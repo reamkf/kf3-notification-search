@@ -28,12 +28,6 @@ cd ./kf3-notification-search
 ### 2. 依存関係をインストールする。
 
 ```bash
-npm install
-```
-
-or
-
-```bash
 bun install
 ```
 
@@ -46,7 +40,6 @@ wrangler login
 ### 4. wrangler.example.toml を wrangler.toml にする。
 
 既存の wrangler.toml がある場合は、削除してください。
-
 
 ### 5. ターミナルで Cloudflare KV の名前空間を作成する。
 
@@ -71,22 +64,11 @@ id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ### 6. 開発環境で実行する
 
 ```bash
-npm run dev
-```
-
-or
-
-```bash
 bun run dev
 ```
 
 ### 7. テストケース実行
 
-```bash
-npm test
-```
-
-or
 
 ```bash
 bun run test
