@@ -14,7 +14,8 @@
     "@hono/vite-ssg": "^0.3.3",
     "dayjs": "^1.11.21",
     "hono": "^4.12.32",
-    "honox": "^0.1.60"
+    "honox": "^0.1.60",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260729.1",
