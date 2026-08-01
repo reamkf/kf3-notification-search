@@ -11,21 +11,22 @@
   },
   "private": true,
   "dependencies": {
-    "@hono/vite-ssg": "^0.1.0",
-    "dayjs": "^1.11.13",
-    "hono": "^4.6.11",
-    "honox": "^0.1.26"
+    "@hono/vite-ssg": "^0.3.3",
+    "dayjs": "^1.11.21",
+    "hono": "^4.12.32",
+    "honox": "^0.1.60"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20241004.0",
-    "@hono/vite-build": "^1.1.0",
-    "@hono/vite-dev-server": "^0.16.0",
-    "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.47",
-    "tailwindcss": "^3.4.13",
-    "vite": "^5.4.8",
-    "vite-node": "^2.1.4",
-    "vitest": "^3.0.8",
-    "wrangler": "^3.80.0"
+    "@cloudflare/workers-types": "^5.20260729.1",
+    "@hono/vite-build": "^1.11.1",
+    "@hono/vite-dev-server": "^0.26.1",
+    "@tailwindcss/postcss": "^4.3.3",
+    "autoprefixer": "^10.5.4",
+    "postcss": "^8.5.23",
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.1.5",
+    "vite-node": "^6.0.0",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.114.0"
   }
 }

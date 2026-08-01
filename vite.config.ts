@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [
     honox({
       client: {
-        input: ["/app/style.css"],
+        input: ["/app/client.ts", "/app/style.css"],
       },
       devServer: { adapter },
     }),
