@@ -1,22 +1,21 @@
 # けもフレ３おしらせ検索
 
-けもフレ３のおしらせを検索することができるツールです。Cloudflare Workersの `workers.dev` URLで公開します。
+けもフレ３のおしらせを検索することができるツールです。
 
 ## 作成した動機
 
-このツールを作った動機は、けもフレ３公式サイトのおしらせが**重い**、**遅い**、**検索できない**、**昔のおしらせが辿れない**を解決させたいと思ったことにあります。
-けもフレ３公式サイトに負担のない方法でおしらせを取得する方法が見つかったので、このツールを作成しました。
+けもフレ３公式サイトのおしらせの**重い**、**遅い**、**検索できない**、**昔のおしらせが辿れない**という課題を解決する目的で作成しました。
 
-## 使った技術
+## 技術スタック
 
 - [HonoX](https://github.com/honojs/honox)
 - [Cloudflare Workers](https://workers.cloudflare.com/)
 - [Cloudflare KV](https://developers.cloudflare.com/kv/)
 - [Cloudflare R2](https://developers.cloudflare.com/r2/)
 
-## ローカルでの再現方法
+## ローカル開発
 
-### 1. このリポジトリをクローンする
+### 1. このリポジトリをクローン
 
 ```bash
 git clone https://github.com/remkf/kf3-notification-search
@@ -26,19 +25,19 @@ git clone https://github.com/remkf/kf3-notification-search
 cd ./kf3-notification-search
 ```
 
-### 2. 依存関係をインストールする
+### 2. 依存関係をインストール
 
 ```bash
 bun install
 ```
 
-### 3. wranglerでCloudflareにログインする
+### 3. wranglerでCloudflareにログイン
 
 ```bash
 wrangler login
 ```
 
-### 4. Cloudflare KVの名前空間を作成する
+### 4. Cloudflare KVの名前空間を作成
 
 ```bash
 wrangler kv namespace create KF3_NOTIF_CACHE
@@ -58,7 +57,7 @@ id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 上記の `id` を `wrangler.toml` の `id` にダブルクオーテーション付きで設定する。
 
-### 5. Cloudflare R2バケットを作成する
+### 5. Cloudflare R2バケットを作成
 
 ```bash
 wrangler r2 bucket create kf3-notif-data
@@ -76,7 +75,7 @@ R2バケットは非公開のまま使用し、Workerの次のURLから配信す
 https://kf3notif.<アカウントのサブドメイン>.workers.dev/entries_merged_20241107.json
 ```
 
-### 6. 開発環境で実行する
+### 6. 開発環境で実行
 
 ```bash
 bun run dev
@@ -88,7 +87,7 @@ Workerの実行環境で確認する場合は、次のコマンドを使用し�
 bun run preview
 ```
 
-### 7. デプロイする
+### 7. デプロイ
 
 ```bash
 bun run deploy
@@ -96,7 +95,7 @@ bun run deploy
 
 デプロイ後に表示される `https://kf3notif.<アカウントのサブドメイン>.workers.dev/` を利用します。カスタムドメインの設定は不要です。
 
-### 8. テストケースを実行する
+### 8. テスト
 
 ```bash
 bun run test
