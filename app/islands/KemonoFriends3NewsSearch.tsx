@@ -4,6 +4,12 @@ import { QueryParser } from "../query-parser";
 import { normalizeQuery } from "../query-normalizer";
 import { getJapaneseDate } from "../get-japanese-date";
 
+// localStorageのキー(同一ドメインでの競合回避のためアプリ固有のprefixを付与)
+const STORAGE_KEYS = {
+  displayLimit: "kf3notif:selectedDisplayLimit",
+  isSearchVisible: "kf3notif:isSearchVisible",
+} as const;
+
 // ニュースデータの検索・表示コンポーネント
 const KemonoFriends3NewsSearch = () => {
   const [newsData, setNewsData] = useState<Array<News>>([]); // 表示されるニュースデータ
@@ -38,13 +44,13 @@ const KemonoFriends3NewsSearch = () => {
           setNumberOfNews(sortedData.length); // ニュースの件数を設定
 
           // 表示件数を設定
-          const savedDisplayLimit = localStorage.getItem("selectedDisplayLimit");
+          const savedDisplayLimit = localStorage.getItem(STORAGE_KEYS.displayLimit);
           if (savedDisplayLimit) {
             setSelectedDisplayLimitString(savedDisplayLimit);
           }
 
           // 検索欄の表示状態を設定
-          const savedSearchVisibility = localStorage.getItem("isSearchVisible");
+          const savedSearchVisibility = localStorage.getItem(STORAGE_KEYS.isSearchVisible);
           if (savedSearchVisibility) {
             setIsSearchVisible(savedSearchVisibility === "true");
           }
@@ -138,14 +144,14 @@ const KemonoFriends3NewsSearch = () => {
   const handleSelectedDisplayLimitChange = (event: Event) => {
     if (event.target instanceof HTMLSelectElement) {
       setSelectedDisplayLimitString(event.target.value);
-      localStorage.setItem("selectedDisplayLimit", event.target.value);
+      localStorage.setItem(STORAGE_KEYS.displayLimit, event.target.value);
     }
   };
 
   // 検索欄の表示・非表示を切り替える
   const toggleSearchVisibility = () => {
     setIsSearchVisible((prev) => !prev);
-    localStorage.setItem("isSearchVisible", (!isSearchVisible).toString());
+    localStorage.setItem(STORAGE_KEYS.isSearchVisible, (!isSearchVisible).toString());
   };
 
   // ニュースデータをキーワードでフィルター
