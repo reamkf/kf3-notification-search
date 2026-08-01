@@ -12,7 +12,8 @@
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "format": "oxfmt .",
-    "format:check": "oxfmt --check ."
+    "format:check": "oxfmt --check .",
+    "prepare": "lefthook install"
   },
   "dependencies": {
     "@hono/vite-ssg": "^0.3.3",
@@ -27,6 +28,7 @@
     "@hono/vite-dev-server": "^0.26.1",
     "@tailwindcss/postcss": "^4.3.3",
     "autoprefixer": "^10.5.4",
+    "lefthook": "^2.1.10",
     "oxfmt": "^0.61.0",
     "oxlint": "^1.76.0",
     "postcss": "^8.5.23",
