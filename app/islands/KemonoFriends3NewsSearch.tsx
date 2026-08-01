@@ -1,4 +1,4 @@
-import { useEffect, useState } from "hono/jsx";
+import { useEffect, useMemo, useState } from "hono/jsx";
 import { newsArraySchema, News } from "../schema";
 import { QueryParser } from "../query-parser";
 import { normalizeQuery } from "../query-normalizer";
@@ -10,21 +10,89 @@ const STORAGE_KEYS = {
   isSearchVisible: "kf3notif:isSearchVisible",
 } as const;
 
+type NewsLoadState =
+  | { status: "loading" }
+  | { status: "success"; data: Array<News> }
+  | { status: "error"; message: string };
+
+const getDisplayLimit = (value: string) => (value === "all" ? Infinity : Number(value));
+
+// "yyyy年MM月dd日 HH時mm分ss秒"形式の日付をパース
+const parseDateString = (dateString: string): number => {
+  const regex = /(\d{4})年(\d{2})月(\d{2})日 (\d{2})時(\d{2})分(\d{2})秒/;
+  const match = dateString.match(regex);
+  if (!match) throw new Error("Invalid date format");
+  const [, year, month, day, hours, minutes, seconds] = match;
+  return new Date(
+    parseInt(year),
+    parseInt(month) - 1,
+    parseInt(day),
+    parseInt(hours),
+    parseInt(minutes),
+    parseInt(seconds),
+  ).getTime();
+};
+
+// ニュースデータをキーワードでフィルター
+const filterNewsByKeyword = (newsArray: Array<News>, query: string) => {
+  const normalizedQuery = normalizeQuery(query);
+  console.log("Normalized query:", normalizedQuery);
+  if (!normalizedQuery) return newsArray;
+
+  try {
+    const parser = new QueryParser(normalizedQuery);
+    let evaluator;
+    try {
+      evaluator = parser.parse();
+    } catch (error) {
+      console.error("Query parsing error:", error);
+      return [];
+    }
+    return newsArray.filter((news) => {
+      const normalizedTitle = normalizeQuery(news.title);
+      return evaluator(normalizedTitle);
+    });
+  } catch (error) {
+    console.error("Query parsing error:", error);
+    // エラー時は単純な部分一致検索にフォールバック
+    return newsArray.filter((news) => {
+      const normalizedTitle = normalizeQuery(news.title);
+      return normalizedTitle.includes(normalizedQuery);
+    });
+  }
+};
+
+// 日付によるフィルター
+const filterNewsByDate = (newsArray: Array<News>, start: string, end: string) => {
+  const startTime = start ? new Date(new Date(start).setHours(0, 0, 0, 0)).getTime() : -Infinity;
+  const endTime = end ? new Date(new Date(end).setHours(0, 0, 0, 0)).getTime() : Infinity;
+
+  return newsArray.filter((news) => {
+    const newsDate = parseDateString(news.newsDate);
+    return newsDate >= startTime && newsDate < endTime + 86400000; // 1日分のミリ秒を加算
+  });
+};
+
+// ニュースデータをソート
+const getSortedNews = (data: Array<News>, sortOrder: string) => {
+  return [...data].sort((a, b) => {
+    const aDate = parseDateString(a.newsDate);
+    const bDate = parseDateString(b.newsDate);
+    return sortOrder === "asc" ? aDate - bDate : bDate - aDate;
+  });
+};
+
 // ニュースデータの検索・表示コンポーネント
 const KemonoFriends3NewsSearch = () => {
-  const [newsData, setNewsData] = useState<Array<News>>([]); // 表示されるニュースデータ
-  const [allNewsData, setAllNewsData] = useState<Array<News>>([]); // 全ニュースデータ
+  const [loadState, setLoadState] = useState<NewsLoadState>({ status: "loading" });
   const [searchKeyword, setSearchKeyword] = useState(""); // 検索キーワード
+  const [appliedSearchKeyword, setAppliedSearchKeyword] = useState(""); // 検索に適用したキーワード
   const [selectedDisplayLimitString, setSelectedDisplayLimitString] = useState<string>("10"); // 選択された表示件数(文字列)
-  const [selectedDisplayLimit, setSelectedDisplayLimit] = useState<number>(10); // 選択された表示件数(数値)
   const [displayLimit, setDisplayLimit] = useState<number>(10); // 表示件数(数値、もっと見るボタンで加算)
   const [sortOrder, setSortOrder] = useState("desc"); // ソート順
   const [isSearchVisible, setIsSearchVisible] = useState(false); // 検索欄の表示状態
   const [startDate, setStartDate] = useState("2019-09-24"); // フィルター開始日
   const [endDate, setEndDate] = useState(getJapaneseDate()); // フィルター終了日
-  const [numberOfNews, setNumberOfNews] = useState(0); // ニュースの数
-  const [isLoading, setIsLoading] = useState(true); // データ取得中の状態
-  const [errorMessage, setErrorMesage] = useState<string | null>(null); // エラーメッセージ
 
   // コンポーネント初回レンダリング時にニュースデータを取得
   useEffect(() => {
@@ -38,15 +106,11 @@ const KemonoFriends3NewsSearch = () => {
       .then((data) => {
         const result = newsArraySchema.safeParse(data);
         if (result.success) {
-          const sortedData = getSortedNews(result.data); // 全データをソート
-          setAllNewsData(sortedData); // 全データをセット
-          setNewsData(sortedData.slice(0, selectedDisplayLimit)); // 初期表示データをセット
-          setNumberOfNews(sortedData.length); // ニュースの件数を設定
-
           // 表示件数を設定
           const savedDisplayLimit = localStorage.getItem(STORAGE_KEYS.displayLimit);
           if (savedDisplayLimit) {
             setSelectedDisplayLimitString(savedDisplayLimit);
+            setDisplayLimit(getDisplayLimit(savedDisplayLimit));
           }
 
           // 検索欄の表示状態を設定
@@ -54,32 +118,24 @@ const KemonoFriends3NewsSearch = () => {
           if (savedSearchVisibility) {
             setIsSearchVisible(savedSearchVisibility === "true");
           }
+
+          setLoadState({ status: "success", data: result.data });
         } else {
           console.error("Data validation failed", result.error);
+          setLoadState({
+            status: "error",
+            message: "データの取得に失敗しました。\n時間を空けて再度お試しください。",
+          });
         }
       })
       .catch((error) => {
         console.error("Failed to fetch news data:", error);
-        setErrorMesage("データの取得に失敗しました。\n時間を空けて再度お試しください。");
-      })
-      .finally(() => {
-        setIsLoading(false);
+        setLoadState({
+          status: "error",
+          message: "データの取得に失敗しました。\n時間を空けて再度お試しください。",
+        });
       });
   }, []);
-
-  // 表示件数が変更されたときに表示件数を更新
-  useEffect(() => {
-    const newLimit =
-      selectedDisplayLimitString === "all" ? Infinity : Number(selectedDisplayLimitString);
-    setSelectedDisplayLimit(newLimit);
-    setDisplayLimit(newLimit);
-  }, [selectedDisplayLimitString]);
-
-  // 検索キーワードを除く検索条件が変更されたときに検索を実行
-  useEffect(() => {
-    if (allNewsData.length === 0) return;
-    handleSearch();
-  }, [selectedDisplayLimit, displayLimit, sortOrder, startDate, endDate]);
 
   // 検索キーワードの変更をハンドリング
   const handleSearchChange = (event: Event) => {
@@ -96,48 +152,35 @@ const KemonoFriends3NewsSearch = () => {
 
   // 検索を実行する関数
   const handleSearch = () => {
-    let filteredNews;
-    filteredNews = filterNewsByKeyword(allNewsData, searchKeyword);
-    filteredNews = filterNewsByDate(filteredNews, startDate, endDate);
-    const sortedNews = getSortedNews(filteredNews);
-    setNumberOfNews(filteredNews.length);
-    setNewsData(sortedNews.slice(0, displayLimit));
-  };
-
-  // 日付によるフィルター
-  const filterNewsByDate = (newsArray: Array<News>, start: string, end: string) => {
-    return newsArray.filter((news) => {
-      const newsDate = parseDateString(news.newsDate);
-      const startDate = start
-        ? new Date(new Date(start).setHours(0, 0, 0, 0)).getTime()
-        : -Infinity;
-      const endDate = end ? new Date(new Date(end).setHours(0, 0, 0, 0)).getTime() : Infinity;
-      return newsDate >= startDate && newsDate < endDate + 86400000; // 1日分のミリ秒を加算
-    });
+    setAppliedSearchKeyword(searchKeyword);
   };
 
   // 日付の変更をハンドリング
   const handleStartDateChange = (event: Event) => {
     if (event.target instanceof HTMLInputElement) {
       setStartDate(event.target.value);
+      setAppliedSearchKeyword(searchKeyword);
     }
   };
 
   const handleEndDateChange = (event: Event) => {
     if (event.target instanceof HTMLInputElement) {
       setEndDate(event.target.value);
+      setAppliedSearchKeyword(searchKeyword);
     }
   };
 
   // 「もっと見る」ボタンを押した時の処理
   const handleLoadMore = () => {
     setDisplayLimit((prevLimit) => prevLimit + 10);
+    setAppliedSearchKeyword(searchKeyword);
   };
 
   // ソート順を変更する
   const handleSortOrderChange = (event: Event) => {
     if (event.target instanceof HTMLSelectElement) {
       setSortOrder(event.target.value);
+      setAppliedSearchKeyword(searchKeyword);
     }
   };
 
@@ -145,6 +188,8 @@ const KemonoFriends3NewsSearch = () => {
   const handleSelectedDisplayLimitChange = (event: Event) => {
     if (event.target instanceof HTMLSelectElement) {
       setSelectedDisplayLimitString(event.target.value);
+      setDisplayLimit(getDisplayLimit(event.target.value));
+      setAppliedSearchKeyword(searchKeyword);
       localStorage.setItem(STORAGE_KEYS.displayLimit, event.target.value);
     }
   };
@@ -155,59 +200,18 @@ const KemonoFriends3NewsSearch = () => {
     localStorage.setItem(STORAGE_KEYS.isSearchVisible, (!isSearchVisible).toString());
   };
 
-  // ニュースデータをキーワードでフィルター
-  const filterNewsByKeyword = (newsArray: Array<News>, query: string) => {
-    const normalizedQuery = normalizeQuery(query);
-    console.log("Normalized query:", normalizedQuery);
-    if (!normalizedQuery) return newsArray;
+  const filteredNews = useMemo(() => {
+    if (loadState.status !== "success") return [];
 
-    try {
-      const parser = new QueryParser(normalizedQuery);
-      let evaluator;
-      try {
-        evaluator = parser.parse();
-      } catch (error) {
-        console.error("Query parsing error:", error);
-        return [];
-      }
-      return newsArray.filter((news) => {
-        const normalizedTitle = normalizeQuery(news.title);
-        return evaluator(normalizedTitle);
-      });
-    } catch (error) {
-      console.error("Query parsing error:", error);
-      // エラー時は単純な部分一致検索にフォールバック
-      return newsArray.filter((news) => {
-        const normalizedTitle = normalizeQuery(news.title);
-        return normalizedTitle.includes(normalizedQuery);
-      });
-    }
-  };
+    const keywordFilteredNews = filterNewsByKeyword(loadState.data, appliedSearchKeyword);
+    const dateFilteredNews = filterNewsByDate(keywordFilteredNews, startDate, endDate);
+    return getSortedNews(dateFilteredNews, sortOrder);
+  }, [loadState, appliedSearchKeyword, startDate, endDate, sortOrder]);
 
-  // ニュースデータをソート
-  const getSortedNews = (data: Array<News>) => {
-    return data.sort((a, b) => {
-      const aDate = parseDateString(a.newsDate);
-      const bDate = parseDateString(b.newsDate);
-      return sortOrder === "asc" ? aDate - bDate : bDate - aDate;
-    });
-  };
-
-  // "yyyy年MM月dd日 HH時mm分ss秒"形式の日付をパース
-  const parseDateString = (dateString: string): number => {
-    const regex = /(\d{4})年(\d{2})月(\d{2})日 (\d{2})時(\d{2})分(\d{2})秒/;
-    const match = dateString.match(regex);
-    if (!match) throw new Error("Invalid date format");
-    const [, year, month, day, hours, minutes, seconds] = match;
-    return new Date(
-      parseInt(year),
-      parseInt(month) - 1,
-      parseInt(day),
-      parseInt(hours),
-      parseInt(minutes),
-      parseInt(seconds),
-    ).getTime();
-  };
+  const newsData = useMemo(() => filteredNews.slice(0, displayLimit), [filteredNews, displayLimit]);
+  const numberOfNews = filteredNews.length;
+  const isLoading = loadState.status === "loading";
+  const errorMessage = loadState.status === "error" ? loadState.message : null;
 
   return (
     <div class="min-h-screen bg-yellow-400 px-4">
@@ -321,9 +325,7 @@ const KemonoFriends3NewsSearch = () => {
                   <div className="relative">
                     <select
                       id="displayLimit"
-                      value={
-                        selectedDisplayLimit === Infinity ? "all" : selectedDisplayLimit.toString()
-                      }
+                      value={selectedDisplayLimitString}
                       onChange={handleSelectedDisplayLimitChange}
                       className="w-full pl-4 pr-8 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
                     >
