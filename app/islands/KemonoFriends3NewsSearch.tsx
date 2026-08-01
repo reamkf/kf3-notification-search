@@ -77,6 +77,7 @@ const KemonoFriends3NewsSearch = () => {
 
   // 検索キーワードを除く検索条件が変更されたときに検索を実行
   useEffect(() => {
+    if (allNewsData.length === 0) return;
     handleSearch();
   }, [selectedDisplayLimit, displayLimit, sortOrder, startDate, endDate]);
 
