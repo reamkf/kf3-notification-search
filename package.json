@@ -7,7 +7,9 @@
     "preview": "$npm_execpath run build && wrangler dev",
     "deploy": "$npm_execpath run build && wrangler deploy",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix"
   },
   "private": true,
   "dependencies": {
@@ -23,6 +25,7 @@
     "@hono/vite-dev-server": "^0.26.1",
     "@tailwindcss/postcss": "^4.3.3",
     "autoprefixer": "^10.5.4",
+    "oxlint": "^1.76.0",
     "postcss": "^8.5.23",
     "tailwindcss": "^4.3.3",
     "vite": "^8.1.5",

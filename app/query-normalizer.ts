@@ -35,7 +35,7 @@ export function normalizeQuery(text: string): string {
   text = text.trim();
 
   const len = text.length;
-  const result = new Array<string>(len);
+  const result: string[] = [];
 
   for (let i = 0; i < len; i++) {
     const char = text[i];
