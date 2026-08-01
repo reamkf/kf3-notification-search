@@ -9,7 +9,7 @@ binding = "ASSETS"
 
 [[kv_namespaces]]
 binding = "KF3_NOTIF_CACHE"
-id = "d8e8bad87034484abc3f5c9c806d0122"
+id = "07df384a6c6e40039d42e663e6a13b7a"
 
 [[r2_buckets]]
 binding = "KF3_NOTIF_DATA"

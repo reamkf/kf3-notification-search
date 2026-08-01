@@ -39,6 +39,8 @@ wrangler login
 
 ### 4. Cloudflare KVの名前空間を作成
 
+初回のみ実行します。すでに`KF3_NOTIF_CACHE`を作成済みの場合は、作成済みnamespaceの`id`を`wrangler.toml`へ設定します。
+
 ```bash
 wrangler kv namespace create KF3_NOTIF_CACHE
 ```
@@ -55,21 +57,23 @@ binding = "KF3_NOTIF_CACHE"
 id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
-上記の `id` を `wrangler.toml` の `id` にダブルクオーテーション付きで設定する。
+上記の`id`を`wrangler.toml`の`id`に設定します。
 
-### 5. Cloudflare R2バケットを作成
+### 5. Cloudflare R2を有効化してバケットを作成
+
+Cloudflare DashboardでR2を有効化してから、初回のみバケットを作成します。すでに存在する場合は作成をスキップします。
 
 ```bash
 wrangler r2 bucket create kf3-notif-data
 ```
 
-旧ニュースデータをR2へアップロードする。JSONファイルはリポジトリに含めず、管理者が保管しているローカルファイルを指定する。
+旧ニュースデータをR2へアップロードします。JSONファイルはリポジトリに置かず、リポジトリ外のローカルファイルを指定してください。`--remote`を付けて、公開用のリモートR2へアップロードします。
 
 ```bash
-wrangler r2 object put kf3-notif-data/entries_merged_20241107.json --file=./entries_merged_20241107.json --content-type=application/json
+wrangler r2 object put kf3-notif-data/entries_merged_20241107.json --file="D:/path/to/entries_merged_20241107.json" --content-type=application/json --remote
 ```
 
-R2バケットは非公開のまま使用し、Workerの次のURLから配信する。
+R2バケットは非公開のまま使用し、Workerの次のURLから配信します。
 
 ```text
 https://kf3notif.<アカウントのサブドメイン>.workers.dev/entries_merged_20241107.json
@@ -87,13 +91,15 @@ Workerの実行環境で確認する場合は、次のコマンドを使用し�
 bun run preview
 ```
 
+`bun run preview`のR2はローカル環境です。APIで旧ニュースデータを使用する場合は、公開用とは別に`--remote`なしでJSONをローカルR2へアップロードしてください。
+
 ### 7. デプロイ
 
 ```bash
 bun run deploy
 ```
 
-デプロイ後に表示される `https://kf3notif.<アカウントのサブドメイン>.workers.dev/` を利用します。カスタムドメインの設定は不要です。
+デプロイ後に表示される`https://kf3notif.<アカウントのサブドメイン>.workers.dev/`を利用します。カスタムドメインの設定は不要です。
 
 ### 8. テスト
 
