@@ -106,3 +106,36 @@ bun run deploy
 ```bash
 bun run test
 ```
+
+## お知らせ一覧取得フロー
+
+画面の初回レンダリング後、クライアントがAPIからお知らせ一覧を取得します。APIはKVキャッシュを確認し、キャッシュがない場合だけR2の旧データと公式サイトの新しいデータを統合します。
+
+```mermaid
+graph TD
+    Browser["ブラウザ: KemonoFriends3NewsSearch"] -->|初回レンダリング後に GET /api/kf3-news| API["Hono API: /api/kf3-news"]
+    API --> Cache{"Cloudflare KVに<br/>kf3-newsがあるか"}
+
+    Cache -->|あり| Cached["キャッシュ済みJSON"]
+    Cached --> Response["JSONレスポンス"]
+
+    Cache -->|なし| R2["Cloudflare R2<br/>旧ニュースデータ"]
+    Cache -->|なし| Official["けものフレンズ3公式サイト<br/>entries.txt"]
+    R2 --> OldData["旧ニュースデータを読み込み"]
+    Official --> NewData["新しいニュースデータを取得"]
+    OldData --> Merge["旧データと新データをマージ"]
+    NewData --> Merge
+    Merge --> Deduplicate["ニュースIDで重複排除"]
+    Deduplicate --> Sort["newsDateの新しい順にソート"]
+    Sort --> Validate{"ニュースデータを<br/>スキーマ検証"}
+
+    Validate -->|成功| Save["Cloudflare KVへ保存<br/>有効期限: 5分"]
+    Save --> Response
+    Validate -->|失敗| ApiError["400 JSONエラー"]
+
+    Response --> ClientValidate["クライアントでスキーマ検証"]
+    ClientValidate --> ClientSort["表示順にソート"]
+    ClientSort --> State["全件を保持し、表示件数分を抽出"]
+    State --> View["お知らせ一覧を表示"]
+    ApiError --> ErrorView["取得エラーを表示"]
+```
