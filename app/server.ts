@@ -59,12 +59,18 @@ baseApp.get("/api/kf3-news", async (context) => {
   }
 
   // 2024年11月7日までのニュースデータをR2から取得
-  const oldNewsObject = await getOldNewsObject(context.env.KF3_NOTIF_DATA);
-  const oldNewsData = await parseNewsData(await oldNewsObject.text());
+  const oldNewsDataPromise = getOldNewsObject(context.env.KF3_NOTIF_DATA)
+    .then((oldNewsObject) => oldNewsObject.text())
+    .then(parseNewsData);
 
   // ニュースデータを外部から取得
   const newNewsUrl = "https://kemono-friends-3.jp/info/all/entries.txt";
-  const newNewsData = await fetchNewsData(newNewsUrl);
+  const newNewsDataPromise = fetchNewsData(newNewsUrl);
+
+  const [oldNewsData, newNewsData] = await Promise.all([
+    oldNewsDataPromise,
+    newNewsDataPromise,
+  ]);
 
   // ニュースデータをマージ
   const mergedNewsArray = [...oldNewsData, ...newNewsData.flat()];
