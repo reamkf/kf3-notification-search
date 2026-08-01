@@ -4,7 +4,6 @@ import { QueryParser } from "../query-parser";
 import { normalizeQuery } from "../query-normalizer";
 import { getJapaneseDate } from "../get-japanese-date";
 
-
 // ニュースデータの検索・表示コンポーネント
 const KemonoFriends3NewsSearch = () => {
   const [newsData, setNewsData] = useState<Array<News>>([]); // 表示されるニュースデータ
@@ -65,9 +64,7 @@ const KemonoFriends3NewsSearch = () => {
   // 表示件数が変更されたときに表示件数を更新
   useEffect(() => {
     const newLimit =
-      selectedDisplayLimitString === "all"
-        ? Infinity
-        : Number(selectedDisplayLimitString);
+      selectedDisplayLimitString === "all" ? Infinity : Number(selectedDisplayLimitString);
     setSelectedDisplayLimit(newLimit);
     setDisplayLimit(newLimit);
   }, [selectedDisplayLimitString]);
@@ -104,7 +101,9 @@ const KemonoFriends3NewsSearch = () => {
   const filterNewsByDate = (newsArray: Array<News>, start: string, end: string) => {
     return newsArray.filter((news) => {
       const newsDate = parseDateString(news.newsDate);
-      const startDate = start ? new Date(new Date(start).setHours(0, 0, 0, 0)).getTime() : -Infinity;
+      const startDate = start
+        ? new Date(new Date(start).setHours(0, 0, 0, 0)).getTime()
+        : -Infinity;
       const endDate = end ? new Date(new Date(end).setHours(0, 0, 0, 0)).getTime() : Infinity;
       return newsDate >= startDate && newsDate < endDate + 86400000; // 1日分のミリ秒を加算
     });
@@ -164,14 +163,14 @@ const KemonoFriends3NewsSearch = () => {
         console.error("Query parsing error:", error);
         return [];
       }
-      return newsArray.filter(news => {
+      return newsArray.filter((news) => {
         const normalizedTitle = normalizeQuery(news.title);
         return evaluator(normalizedTitle);
       });
     } catch (error) {
       console.error("Query parsing error:", error);
       // エラー時は単純な部分一致検索にフォールバック
-      return newsArray.filter(news => {
+      return newsArray.filter((news) => {
         const normalizedTitle = normalizeQuery(news.title);
         return normalizedTitle.includes(normalizedQuery);
       });
@@ -199,7 +198,7 @@ const KemonoFriends3NewsSearch = () => {
       parseInt(day),
       parseInt(hours),
       parseInt(minutes),
-      parseInt(seconds)
+      parseInt(seconds),
     ).getTime();
   };
 
@@ -207,20 +206,35 @@ const KemonoFriends3NewsSearch = () => {
     <div class="min-h-screen bg-yellow-400 px-4">
       <div class="max-w-6xl mx-auto bg-white shadow-lg rounded-lg p-6 my-4">
         {errorMessage && (
-          <div class="bg-red-100 text-red-700 px-4 py-3 rounded-lg relative flex items-center justify-center" role="alert">
-            <svg class="w-6 h-6 mr-2 text-red-700 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M18.364 5.636l-12.728 12.728M5.636 5.636l12.728 12.728" />
+          <div
+            class="bg-red-100 text-red-700 px-4 py-3 rounded-lg relative flex items-center justify-center"
+            role="alert"
+          >
+            <svg
+              class="w-6 h-6 mr-2 text-red-700 flex-shrink-0"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M18.364 5.636l-12.728 12.728M5.636 5.636l12.728 12.728"
+              />
             </svg>
             <span class="block sm:inline">{errorMessage}</span>
           </div>
         )}
 
-        <div class={`flex justify-center items-center p-8 ${isLoading && !errorMessage ? "" : "hidden"}`}>
+        <div
+          class={`flex justify-center items-center p-8 ${isLoading && !errorMessage ? "" : "hidden"}`}
+        >
           <div class="w-8 h-8 border-4 border-blue-200 border-t-blue-500 rounded-full animate-spin"></div>
           <span class="ml-4 text-gray-600 font-medium">データを取得しています...</span>
         </div>
 
-        <div class={`space-y-3 ${isLoading || errorMessage ? "hidden" : ""}`} >
+        <div class={`space-y-3 ${isLoading || errorMessage ? "hidden" : ""}`}>
           {/* 検索欄トグルボタン */}
           <button
             onClick={toggleSearchVisibility}
@@ -256,7 +270,10 @@ const KemonoFriends3NewsSearch = () => {
               {/* ソート順と表示件数 */}
               <div class="flex flex-wrap items-center gap-4">
                 <div class="flex items-center gap-2">
-                  <label class="text-sm font-medium text-gray-700 whitespace-nowrap" for="sortOrder">
+                  <label
+                    class="text-sm font-medium text-gray-700 whitespace-nowrap"
+                    for="sortOrder"
+                  >
                     ソート順:
                   </label>
                   <div className="relative">
@@ -270,21 +287,36 @@ const KemonoFriends3NewsSearch = () => {
                       <option value="asc">古い順</option>
                     </select>
                     <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none">
-                      <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                      <svg
+                        className="w-5 h-5 text-gray-500"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="2"
+                          d="M19 9l-7 7-7-7"
+                        />
                       </svg>
                     </div>
                   </div>
                 </div>
 
                 <div class="flex items-center gap-2">
-                  <label class="text-sm font-medium text-gray-700 whitespace-nowrap" for="displayLimit">
+                  <label
+                    class="text-sm font-medium text-gray-700 whitespace-nowrap"
+                    for="displayLimit"
+                  >
                     表示件数:
                   </label>
                   <div className="relative">
                     <select
                       id="displayLimit"
-                      value={selectedDisplayLimit === Infinity ? "all" : selectedDisplayLimit.toString()}
+                      value={
+                        selectedDisplayLimit === Infinity ? "all" : selectedDisplayLimit.toString()
+                      }
                       onChange={handleSelectedDisplayLimitChange}
                       className="w-full pl-4 pr-8 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
                     >
@@ -294,8 +326,18 @@ const KemonoFriends3NewsSearch = () => {
                       <option value="all">全件</option>
                     </select>
                     <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none">
-                      <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                      <svg
+                        className="w-5 h-5 text-gray-500"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="2"
+                          d="M19 9l-7 7-7-7"
+                        />
                       </svg>
                     </div>
                   </div>
@@ -304,9 +346,7 @@ const KemonoFriends3NewsSearch = () => {
 
               {/* キーワード検索 */}
               <div className="space-y-2">
-                <label className="block text-sm font-medium text-gray-700">
-                  キーワード検索:
-                </label>
+                <label className="block text-sm font-medium text-gray-700">キーワード検索:</label>
                 <div className="flex flex-wrap gap-2">
                   <input
                     type="text"
@@ -327,9 +367,7 @@ const KemonoFriends3NewsSearch = () => {
 
               {/* 日付範囲 */}
               <div class="space-y-2">
-                <label class="block text-sm font-medium text-gray-700">
-                  期間:
-                </label>
+                <label class="block text-sm font-medium text-gray-700">期間:</label>
                 <div class="flex flex-wrap items-center gap-2">
                   <input
                     type="date"
@@ -353,9 +391,7 @@ const KemonoFriends3NewsSearch = () => {
           </div>
 
           {/* お知らせヒット件数 */}
-          <div class="text-sm text-gray-600 font-medium mt-0">
-            おしらせの件数: {numberOfNews}件
-          </div>
+          <div class="text-sm text-gray-600 font-medium mt-0">おしらせの件数: {numberOfNews}件</div>
 
           {/* ニュースリスト */}
           <ul class="space-y-4">
@@ -372,9 +408,7 @@ const KemonoFriends3NewsSearch = () => {
                   <p class="text-gray-800 group-hover:text-blue-600 transition-colors duration-200 mb-2">
                     {news.title}
                   </p>
-                  <time class="text-sm text-gray-500">
-                    {news.newsDate.slice(0, 11)}
-                  </time>
+                  <time class="text-sm text-gray-500">{news.newsDate.slice(0, 11)}</time>
                 </a>
               </li>
             ))}

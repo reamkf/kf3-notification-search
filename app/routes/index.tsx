@@ -8,6 +8,6 @@ export default createRoute((c) => {
       <h1 class="text-4xl font-bold p-4 pb-0">{name}</h1>
       <KemonoFriends3 />
     </div>,
-    { title: name }
+    { title: name },
   );
 });

@@ -2,12 +2,12 @@
  * クエリで使用可能なトークンの種類
  */
 export enum TokenType {
-  WORD = 'WORD',
-  AND = 'AND',
-  OR = 'OR',
-  NOT = 'NOT',
-  LEFT_PAREN = 'LEFT_PAREN',
-  RIGHT_PAREN = 'RIGHT_PAREN'
+  WORD = "WORD",
+  AND = "AND",
+  OR = "OR",
+  NOT = "NOT",
+  LEFT_PAREN = "LEFT_PAREN",
+  RIGHT_PAREN = "RIGHT_PAREN",
 }
 
 /**
@@ -52,35 +52,38 @@ export class QueryParser {
       const char = this.query[i];
 
       // 空白をスキップ
-      if (char === ' ' || char === '　') {
+      if (char === " " || char === "　") {
         i++;
         continue;
       }
 
       // 括弧の処理
-      if (char === '(') {
-        tokens.push({ type: TokenType.LEFT_PAREN, value: '(' });
+      if (char === "(") {
+        tokens.push({ type: TokenType.LEFT_PAREN, value: "(" });
         i++;
         continue;
       }
 
-      if (char === ')') {
-        tokens.push({ type: TokenType.RIGHT_PAREN, value: ')' });
+      if (char === ")") {
+        tokens.push({ type: TokenType.RIGHT_PAREN, value: ")" });
         i++;
         continue;
       }
 
       // NOT演算子の処理
-      if (char === '-' &&
-        (i === 0 || /[\s(]/.test(this.query[i-1])) &&
-        (i < this.query.length - 1 && !/[\s()]/.test(this.query[i+1]))) {
-        tokens.push({ type: TokenType.NOT, value: '-' });
+      if (
+        char === "-" &&
+        (i === 0 || /[\s(]/.test(this.query[i - 1])) &&
+        i < this.query.length - 1 &&
+        !/[\s()]/.test(this.query[i + 1])
+      ) {
+        tokens.push({ type: TokenType.NOT, value: "-" });
         i++;
         continue;
       }
 
       // 単語の処理
-      let word = '';
+      let word = "";
       while (i < this.query.length && !/[\s()]/.test(this.query[i])) {
         word += this.query[i];
         i++;
@@ -89,10 +92,10 @@ export class QueryParser {
       if (word) {
         // ANDとORの特別処理
         const upperWord = word.toUpperCase();
-        if (upperWord === 'AND') {
-          tokens.push({ type: TokenType.AND, value: 'and' });
-        } else if (upperWord === 'OR') {
-          tokens.push({ type: TokenType.OR, value: 'or' });
+        if (upperWord === "AND") {
+          tokens.push({ type: TokenType.AND, value: "and" });
+        } else if (upperWord === "OR") {
+          tokens.push({ type: TokenType.OR, value: "or" });
         } else {
           tokens.push({ type: TokenType.WORD, value: word.toLowerCase() });
         }
@@ -131,8 +134,10 @@ export class QueryParser {
 
     // 無効な演算子をWORDに変換
     return result.map((token, i) => {
-      if ((token.type === TokenType.AND || token.type === TokenType.OR) &&
-        (i === 0 || i === tokens.length - 1)) {
+      if (
+        (token.type === TokenType.AND || token.type === TokenType.OR) &&
+        (i === 0 || i === tokens.length - 1)
+      ) {
         // クエリの先頭または末尾にある演算子
         return { ...token, type: TokenType.WORD };
       }
@@ -140,19 +145,25 @@ export class QueryParser {
       if ((token.type === TokenType.AND || token.type === TokenType.OR) && i > 0) {
         const prev = result[i - 1];
         // 左側が別の演算子または開き括弧の場合
-        if (prev.type === TokenType.AND || prev.type === TokenType.OR ||
-          prev.type === TokenType.NOT || prev.type === TokenType.LEFT_PAREN) {
+        if (
+          prev.type === TokenType.AND ||
+          prev.type === TokenType.OR ||
+          prev.type === TokenType.NOT ||
+          prev.type === TokenType.LEFT_PAREN
+        ) {
           return { ...token, type: TokenType.WORD };
         }
       }
 
-      if (token.type === TokenType.NOT &&
+      if (
+        token.type === TokenType.NOT &&
         (i === tokens.length - 1 ||
-         (i < tokens.length - 1 &&
-          (result[i + 1].type === TokenType.AND ||
-           result[i + 1].type === TokenType.OR ||
-           result[i + 1].type === TokenType.NOT ||
-           result[i + 1].type === TokenType.RIGHT_PAREN)))) {
+          (i < tokens.length - 1 &&
+            (result[i + 1].type === TokenType.AND ||
+              result[i + 1].type === TokenType.OR ||
+              result[i + 1].type === TokenType.NOT ||
+              result[i + 1].type === TokenType.RIGHT_PAREN)))
+      ) {
         return { ...token, type: TokenType.WORD };
       }
 
@@ -176,10 +187,12 @@ export class QueryParser {
         // 暗黙的なANDが必要か判定
         const needsAnd =
           (current.type === TokenType.WORD || current.type === TokenType.RIGHT_PAREN) &&
-          (next.type === TokenType.WORD || next.type === TokenType.NOT || next.type === TokenType.LEFT_PAREN);
+          (next.type === TokenType.WORD ||
+            next.type === TokenType.NOT ||
+            next.type === TokenType.LEFT_PAREN);
 
         if (needsAnd) {
-          result.push({ type: TokenType.AND, value: 'and' });
+          result.push({ type: TokenType.AND, value: "and" });
         }
       }
     }
@@ -252,7 +265,7 @@ export class QueryParser {
       this.currentPosition++; // NOTをスキップ
 
       if (this.currentPosition >= this.tokens.length) {
-        return (text: string) => text.includes('-');
+        return (text: string) => text.includes("-");
       }
 
       const operand = this.parseFactor();

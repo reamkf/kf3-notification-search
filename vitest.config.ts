@@ -1,9 +1,9 @@
-import { defineConfig } from 'vitest/config'
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ['**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}'],
-    environment: 'node',
-	reporters: ['verbose'],
+    include: ["**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}"],
+    environment: "node",
+    reporters: ["verbose"],
   },
-})
+});

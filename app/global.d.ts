@@ -1,8 +1,4 @@
-import {
-  Fetcher,
-  KVNamespace,
-  R2Bucket,
-} from "@cloudflare/workers-types/experimental";
+import { Fetcher, KVNamespace, R2Bucket } from "@cloudflare/workers-types/experimental";
 
 type Head = {
   title?: string;
@@ -18,8 +14,6 @@ declare module "hono" {
     };
   }
   interface ContextRenderer {
-    (content: string | Promise<string>, head?: Head):
-      | Response
-      | Promise<Response>;
+    (content: string | Promise<string>, head?: Head): Response | Promise<Response>;
   }
 }

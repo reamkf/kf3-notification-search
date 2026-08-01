@@ -27,10 +27,9 @@ baseApp.on(["GET", "HEAD"], oldNewsPath, async (context) => {
     headers.set("etag", object.httpEtag);
   }
 
-  return new Response(
-    context.req.method === "HEAD" ? null : await object.arrayBuffer(),
-    { headers }
-  );
+  return new Response(context.req.method === "HEAD" ? null : await object.arrayBuffer(), {
+    headers,
+  });
 });
 
 // ニュースデータを取得する関数
@@ -67,23 +66,19 @@ baseApp.get("/api/kf3-news", async (context) => {
   const newNewsUrl = "https://kemono-friends-3.jp/info/all/entries.txt";
   const newNewsDataPromise = fetchNewsData(newNewsUrl);
 
-  const [oldNewsData, newNewsData] = await Promise.all([
-    oldNewsDataPromise,
-    newNewsDataPromise,
-  ]);
+  const [oldNewsData, newNewsData] = await Promise.all([oldNewsDataPromise, newNewsDataPromise]);
 
   // ニュースデータをマージ
   const mergedNewsArray = [...oldNewsData, ...newNewsData.flat()];
 
   // 重複を削除（ニュースのIDを基に一意性を保証）
   const uniqueNewsArray = Array.from(
-    new Map(mergedNewsArray.map((item: any) => [item.id, item])).values()
+    new Map(mergedNewsArray.map((item: any) => [item.id, item])).values(),
   );
 
   // ニュースデータを日付の新しい順にソート
   uniqueNewsArray.sort(
-    (a: any, b: any) =>
-      new Date(b.newsDate).getTime() - new Date(a.newsDate).getTime()
+    (a: any, b: any) => new Date(b.newsDate).getTime() - new Date(a.newsDate).getTime(),
   );
 
   // データの形式をバリデーション

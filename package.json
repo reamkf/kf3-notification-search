@@ -1,5 +1,6 @@
 {
   "name": "basic",
+  "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,9 +10,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "oxlint",
-    "lint:fix": "oxlint --fix"
+    "lint:fix": "oxlint --fix",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check ."
   },
-  "private": true,
   "dependencies": {
     "@hono/vite-ssg": "^0.3.3",
     "dayjs": "^1.11.21",
@@ -25,6 +27,7 @@
     "@hono/vite-dev-server": "^0.26.1",
     "@tailwindcss/postcss": "^4.3.3",
     "autoprefixer": "^10.5.4",
+    "oxfmt": "^0.61.0",
     "oxlint": "^1.76.0",
     "postcss": "^8.5.23",
     "tailwindcss": "^4.3.3",
