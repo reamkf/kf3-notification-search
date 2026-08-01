@@ -1,22 +1,56 @@
 import { showRoutes } from "hono/dev";
 import { createApp } from "honox/server";
 import { createHono } from "honox/factory";
+import type { R2Bucket } from "@cloudflare/workers-types/experimental";
 import { newsArraySchema } from "./schema";
 
 const baseApp = createHono();
 
+const oldNewsObjectKey = "entries_merged_20241107.json";
+const oldNewsPath = "/" + oldNewsObjectKey;
+
+const getOldNewsObject = async (bucket: R2Bucket) => {
+  const object = await bucket.get(oldNewsObjectKey);
+  if (!object) {
+    throw new Error("旧ニュースデータがR2に見つかりません");
+  }
+  return object;
+};
+
+// 旧ニュースデータをR2から配信
+baseApp.on(["GET", "HEAD"], oldNewsPath, async (context) => {
+  const object = await getOldNewsObject(context.env.KF3_NOTIF_DATA);
+  const headers = new Headers();
+  headers.set("content-type", "application/json; charset=utf-8");
+  headers.set("cache-control", "public, max-age=31536000, immutable");
+  if (object.httpEtag) {
+    headers.set("etag", object.httpEtag);
+  }
+
+  return new Response(
+    context.req.method === "HEAD" ? null : await object.arrayBuffer(),
+    { headers }
+  );
+});
+
 // ニュースデータを取得する関数
-const fetchNewsData = async (url: string) => {
-  const response = await fetch(url);
-  const responseBody = await response.text();
+const parseNewsData = async (responseBody: string) => {
   const newsJson = JSON.parse(responseBody);
   return newsJson.news;
+};
+
+const fetchNewsData = async (url: string) => {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("ニュースデータの取得に失敗しました: " + response.status);
+  }
+  return parseNewsData(await response.text());
 };
 
 // ニュースを取得するAPIエンドポイント
 baseApp.get("/api/kf3-news", async (context) => {
   const cacheKey = "kf3-news"; // キャッシュキー
-  const cache = context.env.KF3_API_CACHE; // キャッシュオブジェクト
+  const cache = context.env.KF3_NOTIF_CACHE; // キャッシュオブジェクト
 
   // キャッシュを確認して、存在すればそれを返す
   const cachedNewsData = await cache.get(cacheKey);
@@ -24,15 +58,12 @@ baseApp.get("/api/kf3-news", async (context) => {
     return context.json(JSON.parse(cachedNewsData));
   }
 
-  // 2024年11月7日までのニュースデータを取得
-  const oldNewsUrl =
-    "https://data.wellwich.com/kf3/entries_merged_20241107.json";
-  const oldNewsData = await fetchNewsData(oldNewsUrl);
+  // 2024年11月7日までのニュースデータをR2から取得
+  const oldNewsObject = await getOldNewsObject(context.env.KF3_NOTIF_DATA);
+  const oldNewsData = await parseNewsData(await oldNewsObject.text());
 
   // ニュースデータを外部から取得
   const newNewsUrl = "https://kemono-friends-3.jp/info/all/entries.txt";
-
-  // 両方のURLからニュースデータを取得
   const newNewsData = await fetchNewsData(newNewsUrl);
 
   // ニュースデータをマージ
@@ -40,7 +71,7 @@ baseApp.get("/api/kf3-news", async (context) => {
 
   // 重複を削除（ニュースのIDを基に一意性を保証）
   const uniqueNewsArray = Array.from(
-    new Map(mergedNewsArray.map((item) => [item.id, item])).values()
+    new Map(mergedNewsArray.map((item: any) => [item.id, item])).values()
   );
 
   // ニュースデータを日付の新しい順にソート
@@ -68,7 +99,6 @@ baseApp.get("/api/kf3-news", async (context) => {
 
 const app = createApp({ app: baseApp });
 
-// アプリケーションのルートを表示
 showRoutes(app);
 
 export default app;

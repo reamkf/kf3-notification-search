@@ -1,8 +1,16 @@
-name = "kf3-notification-search"
+name = "kf3notif"
+main = "./dist/index.js"
 compatibility_date = "2024-04-01"
 compatibility_flags = [ "nodejs_compat" ]
-pages_build_output_dir = "./dist"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
 
 [[kv_namespaces]]
-binding = "KF3_API_CACHE"
+binding = "KF3_NOTIF_CACHE"
 id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+[[r2_buckets]]
+binding = "KF3_NOTIF_DATA"
+bucket_name = "kf3-notif-data"
