@@ -2,6 +2,7 @@ import { showRoutes } from "hono/dev";
 import { createApp } from "honox/server";
 import { createHono } from "honox/factory";
 import type { R2Bucket } from "@cloudflare/workers-types/experimental";
+import { sortNewsByDate } from "./news-date";
 import { newsArraySchema } from "./schema";
 
 const baseApp = createHono();
@@ -77,12 +78,10 @@ baseApp.get("/api/kf3-news", async (context) => {
   );
 
   // ニュースデータを日付の新しい順にソート
-  uniqueNewsArray.sort(
-    (a: any, b: any) => new Date(b.newsDate).getTime() - new Date(a.newsDate).getTime(),
-  );
+  const sortedNewsArray = sortNewsByDate(uniqueNewsArray);
 
   // データの形式をバリデーション
-  const parsedNews = newsArraySchema.safeParse(uniqueNewsArray);
+  const parsedNews = newsArraySchema.safeParse(sortedNewsArray);
   if (!parsedNews.success) {
     // バリデーションエラーがあればログに記録してエラーレスポンスを返す
     console.error("データ形式のエラー:", parsedNews.error);
