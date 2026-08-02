@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "hono/jsx";
+import { useEffect, useMemo, useRef, useState } from "hono/jsx";
 import { newsArraySchema, News } from "../schema";
 import { QueryParser } from "../query-parser";
 import { normalizeQuery } from "../query-normalizer";
@@ -6,16 +6,15 @@ import { getJapaneseDate } from "../get-japanese-date";
 
 // localStorageのキー(同一ドメインでの競合回避のためアプリ固有のprefixを付与)
 const STORAGE_KEYS = {
-  displayLimit: "kf3notif:selectedDisplayLimit",
   isSearchVisible: "kf3notif:isSearchVisible",
 } as const;
+
+const NEWS_PAGE_SIZE = 20;
 
 type NewsLoadState =
   | { status: "loading" }
   | { status: "success"; data: Array<News> }
   | { status: "error"; message: string };
-
-const getDisplayLimit = (value: string) => (value === "all" ? Infinity : Number(value));
 
 // "yyyy年MM月dd日 HH時mm分ss秒"形式の日付をパース
 const parseDateString = (dateString: string): number => {
@@ -87,12 +86,12 @@ const KemonoFriends3NewsSearch = () => {
   const [loadState, setLoadState] = useState<NewsLoadState>({ status: "loading" });
   const [searchKeyword, setSearchKeyword] = useState(""); // 検索キーワード
   const [appliedSearchKeyword, setAppliedSearchKeyword] = useState(""); // 検索に適用したキーワード
-  const [selectedDisplayLimitString, setSelectedDisplayLimitString] = useState<string>("10"); // 選択された表示件数(文字列)
-  const [displayLimit, setDisplayLimit] = useState<number>(10); // 表示件数(数値、もっと見るボタンで加算)
+  const [visibleNewsCount, setVisibleNewsCount] = useState(NEWS_PAGE_SIZE);
   const [sortOrder, setSortOrder] = useState("desc"); // ソート順
   const [isSearchVisible, setIsSearchVisible] = useState(false); // 検索欄の表示状態
   const [startDate, setStartDate] = useState("2019-09-24"); // フィルター開始日
   const [endDate, setEndDate] = useState(getJapaneseDate()); // フィルター終了日
+  const loadMoreRef = useRef<HTMLDivElement>(null);
 
   // コンポーネント初回レンダリング時にニュースデータを取得
   useEffect(() => {
@@ -106,13 +105,6 @@ const KemonoFriends3NewsSearch = () => {
       .then((data) => {
         const result = newsArraySchema.safeParse(data);
         if (result.success) {
-          // 表示件数を設定
-          const savedDisplayLimit = localStorage.getItem(STORAGE_KEYS.displayLimit);
-          if (savedDisplayLimit) {
-            setSelectedDisplayLimitString(savedDisplayLimit);
-            setDisplayLimit(getDisplayLimit(savedDisplayLimit));
-          }
-
           // 検索欄の表示状態を設定
           const savedSearchVisibility = localStorage.getItem(STORAGE_KEYS.isSearchVisible);
           if (savedSearchVisibility) {
@@ -153,6 +145,7 @@ const KemonoFriends3NewsSearch = () => {
   // 検索を実行する関数
   const handleSearch = () => {
     setAppliedSearchKeyword(searchKeyword);
+    setVisibleNewsCount(NEWS_PAGE_SIZE);
   };
 
   // 日付の変更をハンドリング
@@ -160,6 +153,7 @@ const KemonoFriends3NewsSearch = () => {
     if (event.target instanceof HTMLInputElement) {
       setStartDate(event.target.value);
       setAppliedSearchKeyword(searchKeyword);
+      setVisibleNewsCount(NEWS_PAGE_SIZE);
     }
   };
 
@@ -167,13 +161,8 @@ const KemonoFriends3NewsSearch = () => {
     if (event.target instanceof HTMLInputElement) {
       setEndDate(event.target.value);
       setAppliedSearchKeyword(searchKeyword);
+      setVisibleNewsCount(NEWS_PAGE_SIZE);
     }
-  };
-
-  // 「もっと見る」ボタンを押した時の処理
-  const handleLoadMore = () => {
-    setDisplayLimit((prevLimit) => prevLimit + 10);
-    setAppliedSearchKeyword(searchKeyword);
   };
 
   // ソート順を変更する
@@ -181,16 +170,7 @@ const KemonoFriends3NewsSearch = () => {
     if (event.target instanceof HTMLSelectElement) {
       setSortOrder(event.target.value);
       setAppliedSearchKeyword(searchKeyword);
-    }
-  };
-
-  // 表示件数を変更する
-  const handleSelectedDisplayLimitChange = (event: Event) => {
-    if (event.target instanceof HTMLSelectElement) {
-      setSelectedDisplayLimitString(event.target.value);
-      setDisplayLimit(getDisplayLimit(event.target.value));
-      setAppliedSearchKeyword(searchKeyword);
-      localStorage.setItem(STORAGE_KEYS.displayLimit, event.target.value);
+      setVisibleNewsCount(NEWS_PAGE_SIZE);
     }
   };
 
@@ -208,10 +188,32 @@ const KemonoFriends3NewsSearch = () => {
     return getSortedNews(dateFilteredNews, sortOrder);
   }, [loadState, appliedSearchKeyword, startDate, endDate, sortOrder]);
 
-  const newsData = useMemo(() => filteredNews.slice(0, displayLimit), [filteredNews, displayLimit]);
+  const newsData = useMemo(
+    () => filteredNews.slice(0, visibleNewsCount),
+    [filteredNews, visibleNewsCount],
+  );
   const numberOfNews = filteredNews.length;
+  const hasMoreNews = visibleNewsCount < numberOfNews;
   const isLoading = loadState.status === "loading";
   const errorMessage = loadState.status === "error" ? loadState.message : null;
+
+  useEffect(() => {
+    const loadMoreTarget = loadMoreRef.current;
+    if (!loadMoreTarget || !hasMoreNews) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        setVisibleNewsCount((currentCount) =>
+          Math.min(currentCount + NEWS_PAGE_SIZE, numberOfNews),
+        );
+      },
+      { rootMargin: "200px" },
+    );
+
+    observer.observe(loadMoreTarget);
+    return () => observer.disconnect();
+  }, [hasMoreNews, numberOfNews, visibleNewsCount]);
 
   return (
     <div class="min-h-screen bg-yellow-400 px-4">
@@ -278,7 +280,7 @@ const KemonoFriends3NewsSearch = () => {
             }`}
           >
             <div class="bg-white p-1 rounded-lg space-y-3">
-              {/* ソート順と表示件数 */}
+              {/* ソート順 */}
               <div class="flex flex-wrap items-center gap-4">
                 <div class="flex items-center gap-2">
                   <label
@@ -296,43 +298,6 @@ const KemonoFriends3NewsSearch = () => {
                     >
                       <option value="desc">新しい順</option>
                       <option value="asc">古い順</option>
-                    </select>
-                    <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none">
-                      <svg
-                        className="w-5 h-5 text-gray-500"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth="2"
-                          d="M19 9l-7 7-7-7"
-                        />
-                      </svg>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="flex items-center gap-2">
-                  <label
-                    class="text-sm font-medium text-gray-700 whitespace-nowrap"
-                    for="displayLimit"
-                  >
-                    表示件数:
-                  </label>
-                  <div className="relative">
-                    <select
-                      id="displayLimit"
-                      value={selectedDisplayLimitString}
-                      onChange={handleSelectedDisplayLimitChange}
-                      className="w-full pl-4 pr-8 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
-                    >
-                      <option value="10">10件</option>
-                      <option value="50">50件</option>
-                      <option value="100">100件</option>
-                      <option value="all">全件</option>
                     </select>
                     <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none">
                       <svg
@@ -423,15 +388,9 @@ const KemonoFriends3NewsSearch = () => {
             ))}
           </ul>
 
-          {/* もっと見るボタン */}
-          {numberOfNews > displayLimit && (
-            <div class="flex justify-center">
-              <button
-                onClick={handleLoadMore}
-                class="w-full md:w-96 px-6 py-3 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg transition-colors duration-200"
-              >
-                もっと見る
-              </button>
+          {hasMoreNews && (
+            <div ref={loadMoreRef} class="flex justify-center py-4" role="status">
+              <span class="text-sm text-gray-500">ニュースを読み込んでいます...</span>
             </div>
           )}
         </div>
