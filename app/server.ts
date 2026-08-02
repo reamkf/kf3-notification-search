@@ -76,11 +76,6 @@ baseApp.get("/api/kf3-news", async (context) => {
     new Map(mergedNewsArray.map((item: any) => [item.id, item])).values(),
   );
 
-  // ニュースデータを日付の新しい順にソート
-  uniqueNewsArray.sort(
-    (a: any, b: any) => new Date(b.newsDate).getTime() - new Date(a.newsDate).getTime(),
-  );
-
   // データの形式をバリデーション
   const parsedNews = newsArraySchema.safeParse(uniqueNewsArray);
   if (!parsedNews.success) {
