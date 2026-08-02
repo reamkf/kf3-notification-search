@@ -4,6 +4,10 @@ import adapter from "@hono/vite-dev-server/cloudflare";
 import build from "@hono/vite-build/cloudflare-workers";
 
 export default defineConfig({
+  server: {
+    host: true,
+    allowedHosts: true,
+  },
   plugins: [
     honox({
       client: {
