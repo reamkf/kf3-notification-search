@@ -126,8 +126,7 @@ graph TD
     OldData --> Merge["旧データと新データをマージ"]
     NewData --> Merge
     Merge --> Deduplicate["ニュースIDで重複排除"]
-    Deduplicate --> Sort["newsDateの新しい順にソート"]
-    Sort --> Validate{"ニュースデータを<br/>スキーマ検証"}
+    Deduplicate --> Validate{"ニュースデータを<br/>スキーマ検証"}
 
     Validate -->|成功| Save["Cloudflare KVへ保存<br/>有効期限: 5分"]
     Save --> Response
