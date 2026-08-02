@@ -2,10 +2,10 @@ import { jsxRenderer } from "hono/jsx-renderer";
 import { Script } from "honox/server";
 import { Link } from "honox/server";
 
-export default jsxRenderer(({ children, title }) => {
+export default jsxRenderer(({ children, title }, c) => {
   const pageTitle = "けもフレ３おしらせ検索";
   const description = "けもフレ３のおしらせを検索できるサイトです。";
-  const ogImagePath = "/og-image.jpg";
+  const ogImageUrl = new URL("/og-image.jpg", c.req.url).href;
   return (
     <html lang="ja">
       <head>
@@ -15,13 +15,13 @@ export default jsxRenderer(({ children, title }) => {
         <meta property="og:site_name" content={title} />
         <meta property="og:title" content={pageTitle} />
         <meta property="og:description" content={description} />
-        <meta property="og:image" content={ogImagePath} />
+        <meta property="og:image" content={ogImageUrl} />
         <meta property="og:locale" content="ja_JP" />
         {/* Twitter */}
         <meta name="twitter:card" content="summary_large_image" />
         <meta name="twitter:title" content={pageTitle} />
         <meta name="twitter:description" content={description} />
-        <meta name="twitter:image" content={ogImagePath} />
+        <meta name="twitter:image" content={ogImageUrl} />
 
         <title>{title}</title>
         <link rel="icon" href="/favicon.ico" />
