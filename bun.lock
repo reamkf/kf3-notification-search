@@ -7,7 +7,7 @@
       "dependencies": {
         "@hono/vite-ssg": "^0.3.3",
         "dayjs": "^1.11.21",
-        "hono": "^4.12.32",
+        "hono": "^4.13.0",
         "honox": "^0.1.60",
         "zod": "^4.4.3",
       },
@@ -492,7 +492,7 @@
 
     "graceful-fs": ["graceful-fs@4.2.11", "", {}, "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ=="],
 
-    "hono": ["hono@4.12.32", "", {}, "sha512-XcuyW9qE2kJn07PkecMOBd5Vq/hMy7mmGw+idz1yblbg9N17ijJODrvPkn7/dwL3Kulj8LcRJ69DLOWf91dRUg=="],
+    "hono": ["hono@4.13.0", "", {}, "sha512-jhunvfHWxd7J5EFfSgH4xsYJzSe/lfqbUCxiyyeaQasUsXeEHXtzVid+7EOGByc5JnFa23SSFL3Y2RV/z1T+eQ=="],
 
     "honox": ["honox@0.1.60", "", { "dependencies": { "@babel/generator": "7.29.1", "@babel/parser": "7.29.3", "@babel/traverse": "7.29.0", "@babel/types": "7.29.0", "@hono/vite-dev-server": "^0.25.1", "jsonc-parser": "3.3.1", "precinct": "12.2.0" }, "optionalDependencies": { "@rollup/rollup-linux-x64-gnu": "^4.9.6" }, "peerDependencies": { "hono": ">=4.*" } }, "sha512-WeYf6S2UE8XYtLrSdI60edWyVkdrODgbNAapQgDnq377zv5vQ3psDwsEpzDHXMiT2J27/mMqqrESlubLFv5Bfw=="],
 
