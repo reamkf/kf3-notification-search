@@ -4,11 +4,13 @@ import type {
   Fetcher,
   KVNamespace,
   R2Bucket,
+  R2Object,
   R2ObjectBody,
 } from "@cloudflare/workers-types/experimental";
 import {
   CURRENT_ARCHIVE_KEY,
   LEGACY_ARCHIVE_KEY,
+  OFFICIAL_FETCH_STATE_KEY,
   type NewsArchiveUpdateDependencies,
 } from "../news-archive";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
@@ -35,6 +37,14 @@ const createR2Object = (text: string, etag = "etag"): R2ObjectBody =>
     etag,
     httpEtag: `"${etag}"`,
     text: async () => text,
+    get body() {
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(text));
+          controller.close();
+        },
+      });
+    },
     arrayBuffer: async () => new TextEncoder().encode(text).buffer,
   }) as unknown as R2ObjectBody;
 
@@ -59,6 +69,9 @@ type BindingOptions = {
   cacheGetError?: boolean;
   cachePutError?: boolean;
   legacyMissing?: boolean;
+  stateText?: string;
+  stateEtag?: string;
+  conditionalCurrentMismatch?: boolean;
 };
 
 const createBindings = (
@@ -77,12 +90,26 @@ const createBindings = (
   }> = [];
   const cacheDeletes: string[] = [];
   const dataBucket = {
-    get: async (key: string) => {
+    get: async (key: string, getOptions?: { onlyIf?: { etagMatches?: string } }) => {
       dataGets.push(key);
+      if (
+        key === CURRENT_ARCHIVE_KEY &&
+        getOptions?.onlyIf?.etagMatches !== undefined &&
+        options.conditionalCurrentMismatch
+      ) {
+        return { etag: "new-current-etag" } as R2Object;
+      }
       if (key === CURRENT_ARCHIVE_KEY && currentText !== null)
         return createR2Object(currentText, "current-etag");
       if (key === LEGACY_ARCHIVE_KEY && !options.legacyMissing)
         return createR2Object(legacyText, "legacy-etag");
+      if (key === OFFICIAL_FETCH_STATE_KEY && options.stateText !== undefined)
+        return createR2Object(options.stateText, options.stateEtag ?? "state-etag");
+      return null;
+    },
+    head: async (key: string) => {
+      if (key === CURRENT_ARCHIVE_KEY && currentText !== null)
+        return { etag: "current-etag" } as R2Object;
       return null;
     },
   } as unknown as R2Bucket;
@@ -266,6 +293,93 @@ describe("Worker API handler", () => {
     expect(setup.cachePuts[0].metadata).toEqual(
       createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z"),
     );
+  });
+
+  it("cache missの304では公式本文を読まずcurrentから返す", async () => {
+    const current = JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT, true));
+    const setup = createBindings(current, undefined, {
+      stateText: JSON.stringify({
+        version: 1,
+        officialEtag: '"official-etag"',
+        currentEtag: "current-etag",
+      }),
+    });
+    const requestHeaders: Headers[] = [];
+    const handler = createWorkerHandler({
+      fetcher: async (_input, init) => {
+        requestHeaders.push(new Headers(init?.headers));
+        return new Response(null, { status: 304, headers: { etag: '"official-etag"' } });
+      },
+      clock: () => Date.parse("2026-08-09T12:34:56.789Z"),
+    });
+    const response = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+    expect(response.status).toBe(200);
+    expect((await response.json()) as unknown[]).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
+    expect(requestHeaders[0].get("If-None-Match")).toBe('"official-etag"');
+    expect(setup.cachePuts[0].expirationTtl).toBe(300);
+    expect(setup.cachePuts[0].metadata).toEqual(
+      createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z"),
+    );
+  });
+
+  it("cache missの304後にcurrentが競合した場合は完全取得へ戻る", async () => {
+    const setup = createBindings(
+      JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT, true)),
+      undefined,
+      {
+        stateText: JSON.stringify({
+          version: 1,
+          officialEtag: '"official-etag"',
+          currentEtag: "current-etag",
+        }),
+        conditionalCurrentMismatch: true,
+      },
+    );
+    let calls = 0;
+    const handler = createWorkerHandler({
+      fetcher: async (_input, _init) => {
+        calls += 1;
+        if (calls === 1)
+          return new Response(null, { status: 304, headers: { etag: '"official-etag"' } });
+        return createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT));
+      },
+    });
+    const response = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+    expect(response.status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  it("公式取得とcurrent読み込みが両方失敗した場合はarchive-readを優先する", async () => {
+    const setup = createBindings("invalid", undefined, {
+      stateText: JSON.stringify({
+        version: 1,
+        officialEtag: '"official-etag"',
+        currentEtag: "current-etag",
+      }),
+    });
+    const logs: Record<string, unknown>[] = [];
+    const handler = createWorkerHandler({
+      fetcher: async () => Promise.reject(new Error("official unavailable")),
+      logger: { log: () => undefined, error: (event) => logs.push(event) },
+    });
+    const response = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+    expect(response.status).toBe(500);
+    expect(logs[0]).toMatchObject({
+      event: "news_api_error",
+      stage: "archive-read",
+    });
   });
 
   it("cache読み込み失敗時は外部I/Oへ進まず5xxにする", async () => {

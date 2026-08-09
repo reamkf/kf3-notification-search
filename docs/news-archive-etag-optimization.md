@@ -2,11 +2,11 @@
 
 ## 状態
 
-本書は、日次scheduled処理のCPU時間を削減するための未実装の設計案である。現在の実装仕様は [ニュースアーカイブ機能仕様](./news-archive-spec.md) を正とし、本案の受け入れ条件を満たして本番へ反映するまでは現行処理を変更しない。
+本書は、日次scheduled処理とページリクエストのKV cache missで公式ETagを利用する実装仕様である。コードへの反映は完了しているが、本番Workerでの304応答、CPU時間、304率の受け入れ確認は未完了であり、運用状態は [ニュースアーカイブ導入状態](./news-archive-rollout.md) を参照する。
 
 ## 目的
 
-公式配信元のETagと`If-None-Match`を利用し、公式データが前回の正常実行から変わっていない場合に、CPU負荷の大きい処理を省略する。
+公式配信元のETagと`If-None-Match`を利用し、公式データが前回の正常処理から変わっていない場合に、scheduled処理とページリクエストのKV cache missで本文処理を省略する。KV cache hitは従来どおり外部I/Oを行わない。
 
 304経路では次を行わない。
 
@@ -22,7 +22,7 @@ Cron Triggerの頻度、日次バックアップと月次バックアップの�
 
 公式配信元`https://kemono-friends-3.jp/info/all/entries.txt`は、通常のGETで強いETagと`Last-Modified`を返す。同じETagを`If-None-Match`へ指定したGETではHTTP 304、本文0 bytes、同じETagを返すことを確認した。
 
-現在の`fetchOfficialNews`は、304で`Response.ok`が`false`になるため取得失敗として扱う。このため、単に`If-None-Match`ヘッダーを追加するだけでは導入できず、304を正常結果として表現する必要がある。
+`fetchOfficialNews`は、条件付き取得のHTTP 304を`Response.ok`による判定に依存せず、本文を読み込まない`not-modified`結果として明示的に処理する。これにより、304時のJSON解析やアーカイブ統合を省略できる。
 
 本番legacyデータと調査時点の公式データから現行ロジックで累積アーカイブを構成し、変更なし経路のJSON解析、検証、統合をローカルBunで100回計測した参考値は次のとおりだった。この値はWorkers本番CPU時間を示すものではなく、R2本文と公式本文のデコード、ログ、heartbeat、ランタイム差を含まない。
 
@@ -67,11 +67,11 @@ KF3_NOTIF_DATA/archive/official-fetch-state.json
 
 各フィールドの条件は次のとおり。
 
-| フィールド     | 条件                                                                 |
-| -------------- | -------------------------------------------------------------------- |
-| `version`      | 整数`1`                                                              |
-| `officialEtag` | 公式レスポンスから取得した強いETag。引用符を含むヘッダー値を保存する |
-| `currentEtag`  | 検証済み`archive/current.json`の引用符を含まないR2のETag             |
+| フィールド     | 条件                                                                                                                                            |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`      | 整数`1`                                                                                                                                         |
+| `officialEtag` | 公式レスポンスから取得したRFC準拠の単一entity-tagである強いETag。空のopaque-tagを含む。引用符を含むヘッダー値を保存し、長さは1024文字以下とする |
+| `currentEtag`  | 検証済み`archive/current.json`の引用符を含まないR2のETag                                                                                        |
 
 ETagが欠落している場合、弱いETagである場合、長さや文字がヘッダー値として不正な場合は状態を更新せず、次回も完全処理を行う。
 
@@ -123,6 +123,12 @@ currentが存在せずlegacyデータを使用する初回移行では、必ず�
 2. 条件不一致の場合は月次バックアップを作成せず、公式データを条件なしで再取得して完全処理へ切り替える。
 3. current本文の`ReadableStream`をJSON解析せず、当月monthlyへ条件付きで新規作成する。
 4. monthlyキーが競合した場合は現行仕様と同じく保存済みとして扱う。
+
+### APIのKV cache miss経路
+
+APIのKV cache hitでは、従来どおりR2と公式サーバーへアクセスしない。cache missではstateの読み込みとcurrentの`head()`を並行して行い、stateの`currentEtag`と現在のcurrent R2 ETagが一致した場合だけ公式ETagを`If-None-Match`へ指定する。公式ETagとR2 ETagを相互比較しない。
+
+APIが304を受け取った場合は公式本文を読み込まず、currentを同じR2 ETagの条件付きGETで取得する。取得したcurrent本文だけを保存用スキーマで検証してクライアント用配列へ投影し、通常の統合結果と同じTTL 300秒でKVへ保存する。currentの条件付き取得が競合した場合は古い本文を返さず、公式を条件なしで再取得して通常の統合へ戻る。APIはstateを更新しない。
 
 ### 200経路
 
@@ -191,6 +197,9 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`別に集計する。
 - current PUT、KV削除、monthly PUTの失敗時は状態を更新しない。
 - 状態PUTの失敗または競合で、確定済みcurrentを巻き戻さない。
 - 304を公式取得エラーとして扱わない。
+- APIのKV cache hitではstate、R2、公式サーバーへアクセスしない。
+- APIのKV cache missで304を受けた場合はcurrentを条件付きで読み、クライアント用配列へ投影する。
+- APIの304後にcurrentが競合した場合は古い本文を返さず、条件なしの完全統合へ戻る。
 - 公式ETagが欠落または弱い場合は状態を更新しない。
 - 復元後を模した`current`のETag不一致では完全処理へ戻る。
 
@@ -210,10 +219,10 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`別に集計する。
 
 主な変更対象は次のとおり。
 
-- `app/news-archive.ts`: 公式取得結果の200、304分岐、状態の読み書き、current HEAD、304経路
-- `app/server.ts`: scheduled結果と構造化ログの追加項目
+- `app/news-archive.ts`: 公式取得結果の200、304分岐、状態の読み書き、current HEAD、scheduled 304経路
+- `app/server.ts`: API cache missの条件付き取得、304時のcurrent投影、fallback
 - `app/__tests__/news-archive.test.ts`: 状態、条件付き取得、処理順、失敗経路のテスト
-- `app/__tests__/server.test.ts`: scheduled結果とheartbeatの回帰テスト
+- `app/__tests__/server.test.ts`: APIのKV hit/miss、304、競合、fallback、scheduled/heartbeatの回帰テスト
 - `docs/news-archive-spec.md`: 実装完了後に確定仕様を反映
 - `docs/news-archive-rollout.md`: 本番受け入れ状態とCPU計測結果を反映
 

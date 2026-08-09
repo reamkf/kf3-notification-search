@@ -18,8 +18,12 @@ import type { StoredNewsDocument } from "./schema";
 export const OFFICIAL_NEWS_URL = `${OFFICIAL_NEWS_ORIGIN}/info/all/entries.txt`;
 export const OFFICIAL_FETCH_TIMEOUT_MS = 10_000;
 export const CURRENT_ARCHIVE_KEY = "archive/current.json";
+export const OFFICIAL_FETCH_STATE_KEY = "archive/official-fetch-state.json";
 export const LEGACY_ARCHIVE_KEY = "entries_merged_20241107.json";
 export { MAX_OFFICIAL_RESPONSE_BYTES } from "./news-data";
+
+const OFFICIAL_FETCH_STATE_VERSION = 1;
+const MAX_OFFICIAL_ETAG_LENGTH = 1024;
 
 export type NewsFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -49,6 +53,57 @@ export type ArchiveDocumentReadResult = {
   etag: string | null;
   currentExists: boolean;
 };
+
+export type OfficialFetchState = {
+  version: 1;
+  officialEtag: string;
+  currentEtag: string;
+};
+
+type OfficialFetchStateRead = {
+  state: OfficialFetchState | null;
+  objectEtag: string | null;
+  status: "valid" | "missing" | "invalid" | "unavailable";
+};
+
+export type OfficialFetchEligibility = {
+  state: OfficialFetchState | null;
+  stateObjectEtag: string | null;
+  stateStatus: OfficialFetchStateRead["status"];
+  currentEtag: string | null;
+  currentExists: boolean;
+  currentEtagMatchedState: boolean;
+  ifNoneMatch: string | null;
+};
+
+const isStrongOfficialEtag = (value: unknown): value is string => {
+  if (
+    typeof value !== "string" ||
+    value.length < 2 ||
+    value.length > MAX_OFFICIAL_ETAG_LENGTH ||
+    !value.startsWith('"') ||
+    !value.endsWith('"') ||
+    value.startsWith("W/")
+  ) {
+    return false;
+  }
+
+  for (const character of value.slice(1, -1)) {
+    const codePoint = character.codePointAt(0);
+    if (
+      codePoint === undefined ||
+      (codePoint !== 0x21 &&
+        (codePoint < 0x23 || codePoint > 0x7e) &&
+        (codePoint < 0x80 || codePoint > 0xff))
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
+
+const isValidCurrentEtag = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0;
 
 const createArchiveReadError = (error: unknown, details: Record<string, unknown> = {}) => {
   if (error instanceof NewsArchiveError) return error;
@@ -152,6 +207,101 @@ export const readArchiveDocument = async (bucket: R2Bucket): Promise<ArchiveDocu
   };
 };
 
+const readOfficialFetchState = async (bucket: R2Bucket): Promise<OfficialFetchStateRead> => {
+  let object: R2ObjectBody | null;
+  try {
+    object = await bucket.get(OFFICIAL_FETCH_STATE_KEY);
+  } catch {
+    return { state: null, objectEtag: null, status: "unavailable" };
+  }
+  if (!object) return { state: null, objectEtag: null, status: "missing" };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await object.text());
+  } catch {
+    return { state: null, objectEtag: object.etag, status: "invalid" };
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    (parsed as { version?: unknown }).version !== OFFICIAL_FETCH_STATE_VERSION ||
+    !isStrongOfficialEtag((parsed as { officialEtag?: unknown }).officialEtag) ||
+    !isValidCurrentEtag((parsed as { currentEtag?: unknown }).currentEtag)
+  ) {
+    return { state: null, objectEtag: object.etag, status: "invalid" };
+  }
+  return {
+    state: parsed as OfficialFetchState,
+    objectEtag: object.etag,
+    status: "valid",
+  };
+};
+
+export const readOfficialFetchEligibility = async (
+  bucket: R2Bucket,
+): Promise<OfficialFetchEligibility> => {
+  const [stateResult, currentResult] = await Promise.allSettled([
+    readOfficialFetchState(bucket),
+    bucket.head(CURRENT_ARCHIVE_KEY),
+  ]);
+  const stateRead =
+    stateResult.status === "fulfilled"
+      ? stateResult.value
+      : { state: null, objectEtag: null, status: "unavailable" as const };
+  const currentObject = currentResult.status === "fulfilled" ? currentResult.value : null;
+  const currentEtag = currentObject?.etag ?? null;
+  const currentEtagMatchedState =
+    stateRead.state !== null &&
+    currentObject !== null &&
+    stateRead.state.currentEtag === currentEtag;
+  return {
+    state: stateRead.state,
+    stateObjectEtag: stateRead.objectEtag,
+    stateStatus: stateRead.status,
+    currentEtag,
+    currentExists: currentObject !== null,
+    currentEtagMatchedState,
+    ifNoneMatch: currentEtagMatchedState ? (stateRead.state?.officialEtag ?? null) : null,
+  };
+};
+
+const isR2ObjectBody = (object: R2Object | R2ObjectBody | null): object is R2ObjectBody =>
+  object !== null && "body" in object && typeof object.text === "function";
+
+export const readCurrentArchiveDocumentIfEtag = async (
+  bucket: R2Bucket,
+  etag: string,
+): Promise<ArchiveDocumentReadResult | null> => {
+  let object: R2Object | R2ObjectBody | null;
+  try {
+    object = await bucket.get(CURRENT_ARCHIVE_KEY, { onlyIf: { etagMatches: etag } });
+  } catch (error) {
+    throw createArchiveReadError(error, { sourceKey: CURRENT_ARCHIVE_KEY });
+  }
+  if (!isR2ObjectBody(object) || object.etag !== etag) return null;
+  const text = await readObjectText(object, CURRENT_ARCHIVE_KEY);
+  return {
+    document: parseArchiveText(text, CURRENT_ARCHIVE_KEY),
+    sourceKey: CURRENT_ARCHIVE_KEY,
+    etag: object.etag,
+    currentExists: true,
+  };
+};
+
+export const readCurrentArchiveBodyIfEtag = async (
+  bucket: R2Bucket,
+  etag: string,
+): Promise<R2ObjectBody | null> => {
+  let object: R2Object | R2ObjectBody | null;
+  try {
+    object = await bucket.get(CURRENT_ARCHIVE_KEY, { onlyIf: { etagMatches: etag } });
+  } catch (error) {
+    throw createArchiveReadError(error, { sourceKey: CURRENT_ARCHIVE_KEY });
+  }
+  return isR2ObjectBody(object) && object.etag === etag ? object : null;
+};
+
 const parseContentLength = (value: string | null): number | null => {
   if (value === null) return null;
   if (!/^\d+$/.test(value)) {
@@ -170,9 +320,23 @@ const parseContentLength = (value: string | null): number | null => {
   return length;
 };
 
-export type OfficialFetchResult = {
-  document: StoredNewsDocument;
-  byteLength: number;
+export type OfficialFetchResult =
+  | {
+      status: "modified";
+      document: StoredNewsDocument;
+      byteLength: number;
+      officialEtag: string | null;
+      conditionalRequestUsed: boolean;
+    }
+  | {
+      status: "not-modified";
+      byteLength: 0;
+      officialEtag: string;
+      conditionalRequestUsed: true;
+    };
+
+export type OfficialFetchOptions = {
+  ifNoneMatch?: string;
 };
 
 const readResponseBody = async (
@@ -214,13 +378,24 @@ const readResponseBody = async (
   }
 };
 
-export const fetchOfficialNews = async (fetcher: NewsFetcher): Promise<OfficialFetchResult> => {
+export const fetchOfficialNews = async (
+  fetcher: NewsFetcher,
+  options: OfficialFetchOptions = {},
+): Promise<OfficialFetchResult> => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OFFICIAL_FETCH_TIMEOUT_MS);
+  const conditionalEtag = isStrongOfficialEtag(options.ifNoneMatch) ? options.ifNoneMatch : null;
+  const conditionalRequestUsed = conditionalEtag !== null;
   try {
     let response: Response;
     try {
-      response = await fetcher(OFFICIAL_NEWS_URL, { signal: controller.signal });
+      const headers = conditionalEtag
+        ? new Headers({ "If-None-Match": conditionalEtag })
+        : undefined;
+      response = await fetcher(OFFICIAL_NEWS_URL, {
+        signal: controller.signal,
+        ...(headers ? { headers } : {}),
+      });
     } catch {
       throw new NewsArchiveError(
         "official-fetch",
@@ -229,7 +404,27 @@ export const fetchOfficialNews = async (fetcher: NewsFetcher): Promise<OfficialF
           : "公式ニュースの取得に失敗しました",
       );
     }
-    if (!response.ok) {
+
+    if (response.status === 304) {
+      if (!conditionalRequestUsed) {
+        throw new NewsArchiveError("official-fetch", "条件なしリクエストが304を返しました");
+      }
+      const responseEtag = response.headers.get("etag");
+      if (responseEtag !== null && responseEtag !== conditionalEtag) {
+        throw new NewsArchiveError("official-fetch", "304レスポンスのETagが一致しません");
+      }
+      const officialEtag = responseEtag ?? conditionalEtag;
+      if (!isStrongOfficialEtag(officialEtag)) {
+        throw new NewsArchiveError("official-fetch", "304レスポンスのETagが不正です");
+      }
+      return {
+        status: "not-modified",
+        byteLength: 0,
+        officialEtag,
+        conditionalRequestUsed: true,
+      };
+    }
+    if (response.status !== 200) {
       throw new NewsArchiveError("official-fetch", "公式ニュースのHTTPステータスが不正です", {
         status: response.status,
       });
@@ -267,7 +462,13 @@ export const fetchOfficialNews = async (fetcher: NewsFetcher): Promise<OfficialF
         byteLength,
       });
     }
-    return { document, byteLength };
+    return {
+      status: "modified",
+      document,
+      byteLength,
+      officialEtag: response.headers.get("etag"),
+      conditionalRequestUsed,
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -324,20 +525,26 @@ export type NewsArchiveUpdateDependencies = {
   logger?: ArchiveLogger;
 };
 
-export type MonthlyBackupStatus = "created" | "existing";
+export type MonthlyBackupStatus = "created" | "existing" | "not-checked";
+export type EtagStateStatus = "saved" | "unchanged" | "unavailable" | "conflicted";
 
 export type NewsArchiveUpdateResult = {
   updated: boolean;
   sourceKey: string;
-  beforeCount: number;
-  officialCount: number;
-  addedCount: number;
-  updatedCount: number;
-  mergedCount: number;
+  beforeCount: number | null;
+  officialCount: number | null;
+  addedCount: number | null;
+  updatedCount: number | null;
+  mergedCount: number | null;
   officialResponseBytes: number;
   dailyBackupKey: string | null;
   monthlyBackupKey: string;
   monthlyBackupStatus: MonthlyBackupStatus;
+  officialFetchStatus: "modified" | "not-modified";
+  conditionalRequestUsed: boolean;
+  currentEtagMatchedState: boolean;
+  officialBodyProcessed: boolean;
+  etagStateStatus: EtagStateStatus;
   readEtag: string | null;
   updatedEtag: string | null;
   processingMs: number;
@@ -396,9 +603,7 @@ const putCurrentArchive = async (
     throw asArchiveError(error, "archive-write", "累積アーカイブの更新に失敗しました");
   }
   if (!result) {
-    throw new NewsArchiveError("etag-conflict", "累積アーカイブの更新が競合しました", {
-      readEtag: archive.etag,
-    });
+    throw new NewsArchiveError("etag-conflict", "累積アーカイブの更新が競合しました");
   }
   return result.etag;
 };
@@ -406,11 +611,11 @@ const putCurrentArchive = async (
 const putMonthlyBackup = async (
   bucket: R2Bucket,
   key: string,
-  archiveText: string,
+  archiveValue: string | R2ObjectBody["body"],
 ): Promise<MonthlyBackupStatus> => {
   let result: R2Object | null;
   try {
-    result = await bucket.put(key, archiveText, {
+    result = await bucket.put(key, archiveValue, {
       onlyIf: { etagDoesNotMatch: "*" },
       httpMetadata: { contentType },
     });
@@ -420,30 +625,164 @@ const putMonthlyBackup = async (
   return result ? "created" : "existing";
 };
 
+const hasMonthlyBackup = async (bucket: R2Bucket, key: string): Promise<boolean> => {
+  try {
+    return (await bucket.head(key)) !== null;
+  } catch (error) {
+    throw asArchiveError(error, "monthly-backup", "月次バックアップの確認に失敗しました");
+  }
+};
+
+const saveOfficialFetchState = async (
+  bucket: R2Bucket,
+  officialEtag: string | null,
+  currentEtag: string | null,
+  previous: OfficialFetchStateRead,
+): Promise<EtagStateStatus> => {
+  if (!isStrongOfficialEtag(officialEtag) || !isValidCurrentEtag(currentEtag)) return "unavailable";
+  if (previous.state?.officialEtag === officialEtag && previous.state.currentEtag === currentEtag) {
+    return "unchanged";
+  }
+  if (previous.status === "unavailable" && previous.objectEtag === null) return "unavailable";
+
+  const state: OfficialFetchState = {
+    version: OFFICIAL_FETCH_STATE_VERSION,
+    officialEtag,
+    currentEtag,
+  };
+  const onlyIf = previous.objectEtag
+    ? { etagMatches: previous.objectEtag }
+    : { etagDoesNotMatch: "*" as const };
+  try {
+    const result = await bucket.put(OFFICIAL_FETCH_STATE_KEY, JSON.stringify(state), {
+      onlyIf,
+      httpMetadata: { contentType },
+    });
+    return result ? "saved" : "conflicted";
+  } catch {
+    return "unavailable";
+  }
+};
+
 export const updateNewsArchive = async (
   dependencies: NewsArchiveUpdateDependencies,
 ): Promise<NewsArchiveUpdateResult> => {
   const startedAt = dependencies.clock?.() ?? Date.now();
   const logger = dependencies.logger ?? defaultLogger;
+  const fetcher = dependencies.fetcher ?? fetch;
+  const backupKeys = buildBackupKeys(dependencies.nowMs);
   let archive: ArchiveReadResult | undefined;
-  let officialResponseBytes = 0;
-  try {
-    const [archiveResult, officialResult] = await Promise.allSettled([
-      readArchive(dependencies.dataBucket),
-      fetchOfficialNews(dependencies.fetcher ?? fetch),
-    ]);
-    if (archiveResult.status === "rejected") throw archiveResult.reason;
-    archive = archiveResult.value;
-    if (officialResult.status === "rejected") throw officialResult.reason;
-    const official = officialResult.value;
-    officialResponseBytes = official.byteLength;
+  const eligibility = await readOfficialFetchEligibility(dependencies.dataBucket);
+  const previousState: OfficialFetchStateRead = {
+    state: eligibility.state,
+    objectEtag: eligibility.stateObjectEtag,
+    status: eligibility.stateStatus,
+  };
+
+  const logResult = (result: NewsArchiveUpdateResult) => {
+    logger.log({
+      event: "news_archive_update",
+      executedAtUtc: new Date(dependencies.nowMs).toISOString(),
+      updateStatus: result.updated ? "updated" : "unchanged",
+      updated: result.updated,
+      sourceKey: result.sourceKey,
+      beforeCount: result.beforeCount,
+      officialCount: result.officialCount,
+      addedCount: result.addedCount,
+      updatedCount: result.updatedCount,
+      mergedCount: result.mergedCount,
+      officialResponseBytes: result.officialResponseBytes,
+      dailyBackupKey: result.dailyBackupKey,
+      monthlyBackupKey: result.monthlyBackupKey,
+      monthlyBackupStatus: result.monthlyBackupStatus,
+      officialFetchStatus: result.officialFetchStatus,
+      conditionalRequestUsed: result.conditionalRequestUsed,
+      currentEtagMatchedState: result.currentEtagMatchedState,
+      officialBodyProcessed: result.officialBodyProcessed,
+      etagStateStatus: result.etagStateStatus,
+      processingMs: result.processingMs,
+    });
+  };
+
+  const completeNotModified = async (
+    official: Extract<OfficialFetchResult, { status: "not-modified" }>,
+  ): Promise<NewsArchiveUpdateResult | null> => {
+    if (!eligibility.state || !eligibility.currentEtagMatchedState) return null;
+    const monthlyExists = await hasMonthlyBackup(dependencies.backupBucket, backupKeys.monthlyKey);
+    if (monthlyExists) {
+      const processingMs = Math.max(0, (dependencies.clock?.() ?? Date.now()) - startedAt);
+      const result: NewsArchiveUpdateResult = {
+        updated: false,
+        sourceKey: CURRENT_ARCHIVE_KEY,
+        beforeCount: null,
+        officialCount: null,
+        addedCount: null,
+        updatedCount: null,
+        mergedCount: null,
+        officialResponseBytes: official.byteLength,
+        dailyBackupKey: null,
+        monthlyBackupKey: backupKeys.monthlyKey,
+        monthlyBackupStatus: "existing",
+        officialFetchStatus: "not-modified",
+        conditionalRequestUsed: true,
+        currentEtagMatchedState: true,
+        officialBodyProcessed: false,
+        etagStateStatus: "unchanged",
+        readEtag: eligibility.currentEtag,
+        updatedEtag: eligibility.currentEtag,
+        processingMs,
+      };
+      logResult(result);
+      return result;
+    }
+
+    const currentObject = await readCurrentArchiveBodyIfEtag(
+      dependencies.dataBucket,
+      eligibility.state.currentEtag,
+    );
+    if (!currentObject) return null;
+    const monthlyBackupStatus = await putMonthlyBackup(
+      dependencies.backupBucket,
+      backupKeys.monthlyKey,
+      currentObject.body,
+    );
+    const processingMs = Math.max(0, (dependencies.clock?.() ?? Date.now()) - startedAt);
+    const result: NewsArchiveUpdateResult = {
+      updated: false,
+      sourceKey: CURRENT_ARCHIVE_KEY,
+      beforeCount: null,
+      officialCount: null,
+      addedCount: null,
+      updatedCount: null,
+      mergedCount: null,
+      officialResponseBytes: official.byteLength,
+      dailyBackupKey: null,
+      monthlyBackupKey: backupKeys.monthlyKey,
+      monthlyBackupStatus,
+      officialFetchStatus: "not-modified",
+      conditionalRequestUsed: true,
+      currentEtagMatchedState: true,
+      officialBodyProcessed: false,
+      etagStateStatus: "unchanged",
+      readEtag: eligibility.currentEtag,
+      updatedEtag: eligibility.currentEtag,
+      processingMs,
+    };
+    logResult(result);
+    return result;
+  };
+
+  const completeModified = async (
+    official: Extract<OfficialFetchResult, { status: "modified" }>,
+    archiveOverride?: ArchiveReadResult,
+  ): Promise<NewsArchiveUpdateResult> => {
+    archive = archiveOverride ?? (await readArchive(dependencies.dataBucket));
     const merged = mergeValidatedNewsDocument(archive.document, official.document, {
       officialOrigin: OFFICIAL_NEWS_ORIGIN,
       validateOfficialEntries: true,
     });
     const updated =
       !archive.currentExists || merged.stats.addedCount > 0 || merged.stats.updatedCount > 0;
-    const backupKeys = buildBackupKeys(dependencies.nowMs);
     let dailyBackupKey: string | null = null;
     let updatedEtag: string | null = archive.currentExists ? archive.etag : null;
     let mergedJson: string | null = null;
@@ -465,6 +804,12 @@ export const updateNewsArchive = async (
       backupKeys.monthlyKey,
       mergedJson ?? archive.text,
     );
+    const etagStateStatus = await saveOfficialFetchState(
+      dependencies.dataBucket,
+      official.officialEtag,
+      updatedEtag,
+      previousState,
+    );
     const processingMs = Math.max(0, (dependencies.clock?.() ?? Date.now()) - startedAt);
     const result: NewsArchiveUpdateResult = {
       updated,
@@ -474,21 +819,54 @@ export const updateNewsArchive = async (
       addedCount: merged.stats.addedCount,
       updatedCount: merged.stats.updatedCount,
       mergedCount: merged.stats.mergedCount,
-      officialResponseBytes,
+      officialResponseBytes: official.byteLength,
       dailyBackupKey,
       monthlyBackupKey: backupKeys.monthlyKey,
       monthlyBackupStatus,
+      officialFetchStatus: "modified",
+      conditionalRequestUsed: official.conditionalRequestUsed,
+      currentEtagMatchedState: eligibility.currentEtagMatchedState,
+      officialBodyProcessed: true,
+      etagStateStatus,
       readEtag: archive.etag,
       updatedEtag,
       processingMs,
     };
-    logger.log({
-      event: "news_archive_update",
-      executedAtUtc: new Date(dependencies.nowMs).toISOString(),
-      updateStatus: updated ? "updated" : "unchanged",
-      ...result,
-    });
+    logResult(result);
     return result;
+  };
+
+  try {
+    let official: OfficialFetchResult;
+    if (eligibility.ifNoneMatch) {
+      official = await fetchOfficialNews(fetcher, { ifNoneMatch: eligibility.ifNoneMatch });
+      if (official.status === "not-modified") {
+        const result = await completeNotModified(official);
+        if (result) return result;
+        const fullResults = await Promise.allSettled([
+          readArchive(dependencies.dataBucket),
+          fetchOfficialNews(fetcher),
+        ]);
+        if (fullResults[0].status === "rejected") throw fullResults[0].reason;
+        if (fullResults[1].status === "rejected") throw fullResults[1].reason;
+        if (fullResults[1].value.status !== "modified") {
+          throw new NewsArchiveError("official-fetch", "公式ニュースの応答形式が不正です");
+        }
+        return await completeModified(fullResults[1].value, fullResults[0].value);
+      }
+      return await completeModified(official);
+    }
+
+    const [archiveResult, officialResult] = await Promise.allSettled([
+      readArchive(dependencies.dataBucket),
+      fetchOfficialNews(fetcher),
+    ]);
+    if (archiveResult.status === "rejected") throw archiveResult.reason;
+    if (officialResult.status === "rejected") throw officialResult.reason;
+    if (officialResult.value.status !== "modified") {
+      throw new NewsArchiveError("official-fetch", "公式ニュースの応答形式が不正です");
+    }
+    return await completeModified(officialResult.value, archiveResult.value);
   } catch (error) {
     const archiveError = asArchiveError(
       error,

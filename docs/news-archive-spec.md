@@ -34,6 +34,7 @@
 | -------------- | -------------------------------------------------- | ----------------------------------------------------- |
 | 公式データ     | `https://kemono-friends-3.jp/info/all/entries.txt` | 最新のお知らせを取得する入力元                        |
 | 本番R2         | `KF3_NOTIF_DATA/archive/current.json`              | 通常使用する累積アーカイブ                            |
+| 本番R2         | `KF3_NOTIF_DATA/archive/official-fetch-state.json` | 公式ETagとcurrent R2 ETagの対応状態                   |
 | 本番R2         | `KF3_NOTIF_DATA/entries_merged_20241107.json`      | 初回移行と互換配信用のlegacyデータ                    |
 | バックアップR2 | `KF3_NOTIF_BACKUP/daily/...`                       | 更新直前の累積アーカイブ                              |
 | バックアップR2 | `KF3_NOTIF_BACKUP/monthly/...`                     | 各月最初の正常実行時点の本番反映済みアーカイブ        |
@@ -82,9 +83,10 @@ scheduled処理でcurrentを更新する場合は、項目を`newsDate`と`id`�
 
 1. KVの`kf3-news`を`getWithMetadata`で読み込む。
 2. キャッシュが存在すれば、Worker自身が保存した値として本文を再解析せず、R2や公式サーバーへアクセスせずに返す。KV metadataはレスポンスヘッダーへ変換する。
-3. キャッシュがなければ累積アーカイブと公式データを並行して読み込む。
-4. 累積アーカイブを基準にIDで統合し、同じIDは公式データで置き換え、新しいIDは末尾へ追加する。公式データを利用できない場合は累積アーカイブだけを採用する。
-5. クライアント用の必須4フィールドと、存在する場合の`category`へ変換し、トップレベル配列のJSONをKV valueへ保存して返す。
+3. キャッシュがなければ、公式ETag stateと`archive/current.json`のR2 ETagを並行して確認する。公式ETagとR2 ETagを比較するのではなく、stateに保存したcurrent ETagと現在のcurrent ETagが一致する場合だけ、stateの公式ETagを`If-None-Match`へ使用する。
+4. 条件付きGETが304の場合は公式本文を読み込まず、currentを同じR2 ETagの条件付きGETで読み込んで保存用スキーマを検証し、クライアント用配列へ投影する。currentの条件付き取得が競合した場合は、条件なしの公式取得と通常の統合へ戻る。
+5. 条件付きGETが200の場合、または条件付き取得を使えない場合は、累積アーカイブと公式データを読み込んで統合する。公式データを利用できない場合は累積アーカイブだけを採用する。
+6. クライアント用の必須4フィールドと、存在する場合の`category`へ変換し、トップレベル配列のJSONをKV valueへ保存して返す。
 
 APIでの統合は入力順を維持し、R2の累積アーカイブやバックアップを更新しない。通常結果のKV有効期間は300秒とする。KV valueは従来のニュース配列JSONを維持し、次のmetadataを同じKV keyへ保存する。
 
@@ -97,6 +99,18 @@ APIでの統合は入力順を維持し、R2の累積アーカイブやバック
 ```
 
 `source`は通常の統合結果では`merged`、公式データの取得、解析、検証、統合のいずれかに失敗して累積アーカイブだけを返す場合は`archive-fallback`とする。`fetchedAt`はcache miss時に結果を確定してKVへ保存する直前のISO 8601日時である。APIはmetadataを`X-KF3-News-Source`と`X-KF3-News-Fetched-At`レスポンスヘッダーへ投影する。公式データを利用できなかった場合もHTTP 200を返し、画面上に保存済みアーカイブを表示していることを明示する。fallbackのKV有効期間は60秒とする。
+
+公式ETagの最適化状態は本番R2の`archive/official-fetch-state.json`へ保存する。形式は次のとおりとする。
+
+```json
+{
+  "version": 1,
+  "officialEtag": "\"source-etag\"",
+  "currentEtag": "r2-current-etag"
+}
+```
+
+`officialEtag`は公式HTTPレスポンスのRFC準拠の単一entity-tagである引用符付きstrong ETag（空のopaque-tagを含み、長さ1024文字以下）、`currentEtag`は`archive/current.json`のR2 raw ETagであり、両者を相互比較しない。APIはstateを読み取るだけで更新せず、stateが欠落・不正、currentがない、またはstateのcurrent ETagと現在のcurrent ETagが一致しない場合は条件なしGETへ戻る。304は通常の統合結果としてTTL 300秒で保存し、公式取得失敗時だけ既存のTTL 60秒fallbackを使用する。
 
 KVの読み込みまたは結果の保存に失敗した場合は、キャッシュを使わない応答へ切り替えずHTTP 500とする。これらの失敗は`news_api_error`として記録する。KV値の完全性は書き込み元で保証し、読み込み時には再検証しない。
 
@@ -116,31 +130,44 @@ metadataのない旧形式のKV valueや不正なmetadataは、ニュース配�
 
 ```mermaid
 flowchart TD
-    Start[scheduled開始] --> Read[累積アーカイブを読む]
-    Start --> Fetch[公式データを取得する]
+    Start[scheduled開始] --> State[公式ETag stateを読む]
+    Start --> Head[currentをHEADする]
+    State --> Eligible{stateとcurrent ETagが対応}
+    Head --> Eligible
+    Eligible -->|いいえ| FullFetch[条件なしで公式データを取得]
+    Eligible -->|はい| ConditionalFetch[If-None-Match付きで取得]
+    ConditionalFetch -->|200| Read[累積アーカイブを読む]
+    FullFetch --> Read
+    ConditionalFetch -->|304| MonthlyCheck[当月monthlyをHEADする]
+    MonthlyCheck -->|存在| Log304[304結果を記録]
+    MonthlyCheck -->|欠落| StreamCurrent[currentをETag条件付き取得]
+    StreamCurrent --> MonthlyCreate[currentのraw bodyをmonthlyへ保存]
     Read --> Validate[構造検証してIDで統合する]
-    Fetch --> Validate
     Validate --> Changed{currentがない、または内容変更あり}
     Changed -->|はい| Daily[更新前データをdailyへ保存]
     Daily --> Current[ETag条件付きでcurrentを更新]
     Current --> Cache[KVキャッシュを削除]
     Cache --> Monthly[当月monthlyを作成または確認]
     Changed -->|いいえ| Monthly
-    Monthly --> Log[結果を構造化ログへ記録]
+    Monthly --> StateSave[公式ETag stateを保存]
+    StateSave --> Log[結果を構造化ログへ記録]
+    MonthlyCreate --> Log304
 ```
 
 更新処理の詳細は次のとおり。
 
-1. `archive/current.json`を読み、存在しない場合だけlegacyデータを読む。
-2. 公式データを取得する。アーカイブ読み込みと公式取得は並行して行う。
-3. アーカイブと公式データの基本構造、必須フィールドの型、ID一意性を検証し、IDをキーに統合する。公式データの新規または変更項目だけURLと日時を厳密に検証する。同じIDには公式データを採用し、アーカイブにだけ存在するIDは残す。
-4. 未知フィールドを含むJSON値のdeep equalityで既存項目と公式項目を比較し、追加件数または変更件数から内容変更の有無を判定する。オブジェクトのキー順だけの違いは変更扱いにしない。
-5. 内容変更がある場合だけ、統合結果を`newsDate`の降順、同時刻の場合は`id`の降順で決定的にソートし、JSONへシリアライズする。
-6. 内容変更がある場合、更新前のアーカイブの元のバイト列を日次バックアップへ新規作成する。
-7. 読み込み時のETagを条件に`archive/current.json`を更新する。初回作成時は、currentが存在しないことを条件にする。
-8. current更新に成功した後でKVの`kf3-news`を削除する。
-9. 当月の月次バックアップを条件付きで新規作成する。すでに存在する場合は内容を再取得しない。
-10. 成否と処理結果を構造化ログへ記録する。
+1. 公式ETag stateと`archive/current.json`のR2 ETagを並行して確認する。公式ETagとR2 ETagを比較するのではなく、stateに保存したcurrent ETagと現在のcurrent ETagが一致する場合だけ、stateの公式ETagを`If-None-Match`へ使用する。
+2. 条件付き取得を使えない場合は、`archive/current.json`を読み、存在しない場合だけlegacyデータを読む。アーカイブ読み込みと公式取得は並行して行う。
+3. 条件付き取得が200の場合は公式本文を検証した後にcurrentを読み、条件なし取得と同じ統合処理を行う。304の場合は公式本文とcurrent本文の解析、検証、統合、ソート、シリアライズ、daily保存、current更新、KV削除を省略する。
+4. 304では当月monthlyを`head()`する。存在すればR2とKVを変更せず正常終了する。欠落していればcurrentをstateのETagで条件付き取得し、取得objectのETagが一致した場合だけraw bodyをJSON解析せずmonthlyへ保存する。条件不一致なら条件なしの完全処理へ戻る。
+5. 200経路ではアーカイブと公式データの基本構造、必須フィールドの型、ID一意性を検証し、IDをキーに統合する。公式データの新規または変更項目だけURLと日時を厳密に検証する。同じIDには公式データを採用し、アーカイブにだけ存在するIDは残す。
+6. 未知フィールドを含むJSON値のdeep equalityで既存項目と公式項目を比較し、追加件数または変更件数から内容変更の有無を判定する。オブジェクトのキー順だけの違いは変更扱いにしない。
+7. 内容変更がある場合だけ、統合結果を`newsDate`の降順、同時刻の場合は`id`の降順で決定的にソートし、JSONへシリアライズする。
+8. 内容変更がある場合、更新前のアーカイブの元のバイト列を日次バックアップへ新規作成する。
+9. 読み込み時のETagを条件に`archive/current.json`を更新する。初回作成時は、currentが存在しないことを条件にする。
+10. current更新に成功した後でKVの`kf3-news`を削除する。
+11. 当月の月次バックアップを条件付きで新規作成する。すでに存在する場合は内容を再取得しない。
+12. 200経路ではmonthly完了後に、公式strong ETagと確定済みcurrentのR2 raw ETagをstateへCAS保存する。state保存の失敗・競合でarchiveを巻き戻さない。成否と処理結果を構造化ログへ記録する。
 
 currentがまだなく、legacyデータから移行する初回実行では、統合結果がlegacyと同じでも更新ありとして扱う。これにより、更新前legacyの日次バックアップと`archive/current.json`を作成する。
 
@@ -223,7 +250,7 @@ heartbeatはHTTP POSTで送信する。ping URLの末尾の`/`は取り除いて
 | `news_api_fallback`             | APIが公式データを使えずアーカイブだけを返した |
 | `news_api_error`                | APIがレスポンスを構築できなかった             |
 
-更新成功ログには更新有無、実行時刻、各件数、公式レスポンスのバイト数、バックアップキー、ETag、処理時間を含める。処理時間は外部I/O待ちを含む経過時間であり、WorkersのCPU時間判定には使用しない。失敗ログには処理段階とエラー詳細を含めるが、公式レスポンス本文やheartbeat URLは含めない。
+更新成功ログには更新有無、実行時刻、各件数、公式レスポンスのバイト数、バックアップキー、`officialFetchStatus`、`conditionalRequestUsed`、`currentEtagMatchedState`、`officialBodyProcessed`、`monthlyBackupStatus`、`etagStateStatus`、処理時間を含める。公式ETagとR2 ETagの値自体はログへ出さない。処理時間は外部I/O待ちを含む経過時間であり、WorkersのCPU時間判定には使用しない。失敗ログには処理段階とエラー詳細を含めるが、公式レスポンス本文やheartbeat URL、ETag値は含めない。
 
 ## 復元仕様
 

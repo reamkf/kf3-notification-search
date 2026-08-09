@@ -6,6 +6,8 @@ import {
   NewsArchiveError,
   fetchOfficialNews,
   readArchiveDocument,
+  readCurrentArchiveDocumentIfEtag,
+  readOfficialFetchEligibility,
   updateNewsArchive,
   type ArchiveLogger,
   type NewsArchiveUpdateDependencies,
@@ -102,7 +104,7 @@ const sendHeartbeat = async (
   }
 };
 
-const getMergedClientNews = async (
+const getMergedClientNewsUnconditionally = async (
   env: WorkerBindings,
   dependencies: ServerDependencies,
   logger: ArchiveLogger,
@@ -123,10 +125,70 @@ const getMergedClientNews = async (
     logger.error(createFallbackLog(officialResult.reason, clientNews.length));
     return { clientNews, expirationTtl: fallbackCacheTtl, source: "archive-fallback" };
   }
+  if (officialResult.value.status !== "modified") {
+    throw new NewsArchiveError("official-fetch", "公式ニュースの応答形式が不正です");
+  }
 
   let merged: ValidatedNewsMergeResult;
   try {
     merged = mergeValidatedNewsDocument(archive.document, officialResult.value.document, {
+      validateOfficialEntries: true,
+    });
+  } catch (error) {
+    const clientNews = projectValidatedClientNews(archive.document);
+    logger.error(createFallbackLog(error, clientNews.length));
+    return { clientNews, expirationTtl: fallbackCacheTtl, source: "archive-fallback" };
+  }
+  return {
+    clientNews: projectValidatedClientNews(merged.document),
+    expirationTtl: normalCacheTtl,
+    source: "merged",
+  };
+};
+
+const getMergedClientNews = async (
+  env: WorkerBindings,
+  dependencies: ServerDependencies,
+  logger: ArchiveLogger,
+): Promise<{
+  clientNews: ReturnType<typeof projectValidatedClientNews>;
+  expirationTtl: number;
+  source: NewsCacheSource;
+}> => {
+  const eligibility = await readOfficialFetchEligibility(env.KF3_NOTIF_DATA);
+  if (!eligibility.ifNoneMatch) {
+    return getMergedClientNewsUnconditionally(env, dependencies, logger);
+  }
+
+  let officialResult;
+  try {
+    officialResult = await fetchOfficialNews(dependencies.fetcher ?? fetch, {
+      ifNoneMatch: eligibility.ifNoneMatch,
+    });
+  } catch (error) {
+    const archive = await readArchiveDocument(env.KF3_NOTIF_DATA);
+    const clientNews = projectValidatedClientNews(archive.document);
+    logger.error(createFallbackLog(error, clientNews.length));
+    return { clientNews, expirationTtl: fallbackCacheTtl, source: "archive-fallback" };
+  }
+
+  if (officialResult.status === "not-modified") {
+    const archive = await readCurrentArchiveDocumentIfEtag(
+      env.KF3_NOTIF_DATA,
+      eligibility.state?.currentEtag ?? "",
+    );
+    if (!archive) return getMergedClientNewsUnconditionally(env, dependencies, logger);
+    return {
+      clientNews: projectValidatedClientNews(archive.document),
+      expirationTtl: normalCacheTtl,
+      source: "merged",
+    };
+  }
+
+  const archive = await readArchiveDocument(env.KF3_NOTIF_DATA);
+  let merged: ValidatedNewsMergeResult;
+  try {
+    merged = mergeValidatedNewsDocument(archive.document, officialResult.document, {
       validateOfficialEntries: true,
     });
   } catch (error) {
