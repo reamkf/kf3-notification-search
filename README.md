@@ -111,6 +111,7 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 
 ```bash
 bun run test
+bun run test:e2e
 bun run lint
 bun run format:check
 bunx tsc --noEmit
