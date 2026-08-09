@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "hono/jsx";
-import { newsArraySchema, News } from "../schema";
+import * as v from "valibot";
+import { newsArraySchema, News, summarizeValidationIssues } from "../schema";
 import { QueryParser } from "../query-parser";
 import { normalizeQuery } from "../query-normalizer";
 import { getJapaneseDate } from "../get-japanese-date";
@@ -103,7 +104,7 @@ const KemonoFriends3NewsSearch = () => {
         return res.json();
       })
       .then((data) => {
-        const result = newsArraySchema.safeParse(data);
+        const result = v.safeParse(newsArraySchema, data);
         if (result.success) {
           // 検索欄の表示状態を設定
           const savedSearchVisibility = localStorage.getItem(STORAGE_KEYS.isSearchVisible);
@@ -111,9 +112,9 @@ const KemonoFriends3NewsSearch = () => {
             setIsSearchVisible(savedSearchVisibility === "true");
           }
 
-          setLoadState({ status: "success", data: result.data });
+          setLoadState({ status: "success", data: result.output });
         } else {
-          console.error("Data validation failed", result.error);
+          console.error("Data validation failed", summarizeValidationIssues(result.issues));
           setLoadState({
             status: "error",
             message: "データの取得に失敗しました。\n時間を空けて再度お試しください。",

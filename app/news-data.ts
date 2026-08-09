@@ -1,6 +1,8 @@
+import * as v from "valibot";
 import {
   newsArraySchema,
   storedNewsDocumentSchema,
+  summarizeValidationIssues,
   type News,
   type StoredNews,
   type StoredNewsDocument,
@@ -153,13 +155,13 @@ const jsonValuesEqual = (left: unknown, right: unknown): boolean => {
 };
 
 const parseDocument = (value: unknown, stage = "document-validation"): StoredNewsDocument => {
-  const result = storedNewsDocumentSchema.safeParse(value);
+  const result = v.safeParse(storedNewsDocumentSchema, value);
   if (!result.success) {
     throw new NewsDataError(stage, "保存用ニュースデータの形式が無効です", {
-      issues: result.error.issues,
+      issues: summarizeValidationIssues(result.issues),
     });
   }
-  return result.data;
+  return result.output;
 };
 
 const thresholdError = (
@@ -601,7 +603,7 @@ export const mergeNewsData = mergeNewsDocuments;
 
 export const projectClientNews = (document: StoredNewsDocument): News[] => {
   const parsedDocument = validateStoredNewsDocument(document);
-  return newsArraySchema.parse(parsedDocument.news);
+  return v.parse(newsArraySchema, parsedDocument.news);
 };
 
 export const projectValidatedClientNews = (document: StoredNewsDocument): News[] =>

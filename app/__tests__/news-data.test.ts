@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import * as v from "valibot";
 import {
   MAX_UPDATED_EXISTING_ENTRY_COUNT,
   MIN_OFFICIAL_ENTRY_COUNT,
+  NewsDataError,
   canonicalizeNewsDocument,
   mergeNewsDocuments,
   mergeValidatedNewsDocument,
@@ -34,19 +36,28 @@ const createDocument = (
 describe("保存用スキーマ", () => {
   it("idの欠落、0、負数、小数を拒否する", () => {
     for (const id of [undefined, 0, -1, 1.5]) {
-      const result = storedNewsSchema.safeParse(createNews(1, { id }));
+      const result = v.safeParse(storedNewsSchema, createNews(1, { id }));
       expect(result.success).toBe(false);
     }
   });
 
+  it("安全整数の範囲外のidを拒否する", () => {
+    expect(
+      v.safeParse(storedNewsSchema, createNews(1, { id: Number.MAX_SAFE_INTEGER })).success,
+    ).toBe(true);
+    expect(
+      v.safeParse(storedNewsSchema, createNews(1, { id: Number.MAX_SAFE_INTEGER + 1 })).success,
+    ).toBe(false);
+  });
+
   it("categoryの省略を許可し、未知フィールドを保持する", () => {
-    const result = storedNewsSchema.parse(createNews(1, { extra: "keep" }));
+    const result = v.parse(storedNewsSchema, createNews(1, { extra: "keep" }));
     expect(result.category).toBeUndefined();
     expect(result.extra).toBe("keep");
   });
 
   it("保存用documentを検証する", () => {
-    expect(storedNewsDocumentSchema.parse({ news: [createNews(1)] }).news).toHaveLength(1);
+    expect(v.parse(storedNewsDocumentSchema, { news: [createNews(1)] }).news).toHaveLength(1);
   });
 
   it("client用出力を4フィールドに限定する", () => {
@@ -59,13 +70,35 @@ describe("保存用スキーマ", () => {
         updated: "2026年08月01日 12時00分00秒",
       },
     ]);
-    expect(newsArraySchema.safeParse(result).success).toBe(true);
+    expect(v.safeParse(newsArraySchema, result).success).toBe(true);
   });
 
   it("通常経路の構造検証では保存済み日時を再解析しない", () => {
     const document = createDocument(1, { 1: { newsDate: "invalid" } });
     expect(validateParsedStoredNewsDocumentShape(document)).toBe(document);
     expect(() => validateStoredNewsDocument(document)).toThrow();
+  });
+
+  it("スキーマエラーの詳細にはメッセージとキーのパスだけを含める", () => {
+    const document = createDocument(MIN_OFFICIAL_ENTRY_COUNT, { 1: { title: 1 } });
+
+    let error: unknown;
+    try {
+      validateStoredNewsDocument(document);
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(NewsDataError);
+    if (!(error instanceof NewsDataError)) return;
+
+    expect(error.details.issues).toEqual([
+      {
+        message: expect.stringContaining("Expected string"),
+        path: ["news", 0, "title"],
+      },
+    ]);
+    expect(JSON.stringify(error.details).length).toBeLessThan(500);
   });
 });
 
