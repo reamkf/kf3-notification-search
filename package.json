@@ -6,6 +6,7 @@
     "dev": "vite",
     "build": "vite build --mode client && vite build",
     "preview": "$npm_execpath run build && wrangler dev",
+    "restore:dev": "wrangler dev --config wrangler.restore.toml --ip 127.0.0.1 --port 8790",
     "deploy": "$npm_execpath run build && wrangler deploy",
     "test": "vitest run",
     "test:watch": "vitest",
