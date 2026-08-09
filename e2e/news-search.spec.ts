@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+const fetchedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
 const news = [
   {
     targetUrl: "/info/1",
@@ -21,9 +23,17 @@ const news = [
   },
 ];
 
-const mockNewsApi = async (page: Page) => {
+const mockNewsApi = async (page: Page, source = "merged") => {
   await page.route("**/api/kf3-news", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(news) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: {
+        "X-KF3-News-Source": source,
+        "X-KF3-News-Fetched-At": fetchedAt,
+      },
+      body: JSON.stringify(news),
+    }),
   );
 };
 
@@ -43,6 +53,24 @@ test("ニュース一覧を新しい順に表示し、公式サイトへのリ�
     "href",
     "https://kemono-friends-3.jp/info/3",
   );
+});
+
+test("データ取得日時を相対表示する", async ({ page }) => {
+  await openNewsSearch(page);
+
+  await expect(page.getByTestId("news-metadata")).toContainText("データ取得: 5分前");
+  await expect(page.locator(`time[datetime="${fetchedAt}"]`)).toHaveCount(1);
+  await expect(page.getByTestId("news-metadata")).not.toContainText("日本時間");
+});
+
+test("公式データ取得失敗時にアーカイブ表示を通知する", async ({ page }) => {
+  await mockNewsApi(page, "archive-fallback");
+  await page.goto("/");
+
+  await expect(
+    page.getByText("公式データを利用できなかったため、保存済みアーカイブを表示しています。"),
+  ).toBeVisible();
+  await expect(page.locator("ul > li")).toHaveCount(3);
 });
 
 test("キーワード、並び順、期間でニュースを絞り込む", async ({ page }) => {

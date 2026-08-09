@@ -17,19 +17,25 @@ import {
   projectValidatedClientNews,
   type ValidatedNewsMergeResult,
 } from "./news-data";
+import {
+  createNewsCacheMetadata,
+  createNewsResponseHeaders,
+  type NewsCacheMetadata,
+  type NewsCacheSource,
+} from "./news-response-metadata";
 
 const oldNewsPath = `/${LEGACY_ARCHIVE_KEY}`;
 const cacheKey = "kf3-news";
 const normalCacheTtl = 60 * 5;
 const fallbackCacheTtl = 60;
 const heartbeatTimeoutMs = 10_000;
-const jsonContentType = "application/json; charset=UTF-8";
 
 export type ServerDependencies = {
   fetcher?: NewsFetcher;
   heartbeatFetcher?: typeof fetch;
   updater?: (dependencies: NewsArchiveUpdateDependencies) => Promise<unknown>;
   logger?: ArchiveLogger;
+  clock?: () => number;
 };
 
 const defaultLogger: ArchiveLogger = {
@@ -64,8 +70,8 @@ const createFallbackLog = (error: unknown, archiveCount: number) => ({
   archiveCount,
 });
 
-const createJsonResponse = (json: string) =>
-  new Response(json, { headers: { "content-type": jsonContentType } });
+const createJsonResponse = (json: string, metadata?: NewsCacheMetadata) =>
+  new Response(json, { headers: createNewsResponseHeaders(metadata) });
 
 type HeartbeatStage = "heartbeat-start" | "heartbeat-success" | "heartbeat-fail";
 
@@ -100,7 +106,11 @@ const getMergedClientNews = async (
   env: WorkerBindings,
   dependencies: ServerDependencies,
   logger: ArchiveLogger,
-) => {
+): Promise<{
+  clientNews: ReturnType<typeof projectValidatedClientNews>;
+  expirationTtl: number;
+  source: NewsCacheSource;
+}> => {
   const [archiveResult, officialResult] = await Promise.allSettled([
     readArchiveDocument(env.KF3_NOTIF_DATA),
     fetchOfficialNews(dependencies.fetcher ?? fetch),
@@ -111,7 +121,7 @@ const getMergedClientNews = async (
   if (officialResult.status === "rejected") {
     const clientNews = projectValidatedClientNews(archive.document);
     logger.error(createFallbackLog(officialResult.reason, clientNews.length));
-    return { clientNews, expirationTtl: fallbackCacheTtl };
+    return { clientNews, expirationTtl: fallbackCacheTtl, source: "archive-fallback" };
   }
 
   let merged: ValidatedNewsMergeResult;
@@ -122,11 +132,12 @@ const getMergedClientNews = async (
   } catch (error) {
     const clientNews = projectValidatedClientNews(archive.document);
     logger.error(createFallbackLog(error, clientNews.length));
-    return { clientNews, expirationTtl: fallbackCacheTtl };
+    return { clientNews, expirationTtl: fallbackCacheTtl, source: "archive-fallback" };
   }
   return {
     clientNews: projectValidatedClientNews(merged.document),
     expirationTtl: normalCacheTtl,
+    source: "merged",
   };
 };
 
@@ -148,16 +159,21 @@ const createNewsApp = (dependencies: ServerDependencies) => {
   baseApp.get("/api/kf3-news", async (context) => {
     let archiveCount: number | null = null;
     try {
-      const cachedNewsData = await context.env.KF3_NOTIF_CACHE.get(cacheKey);
-      if (cachedNewsData !== null) return createJsonResponse(cachedNewsData);
+      const cachedNews =
+        await context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey);
+      if (cachedNews.value !== null)
+        return createJsonResponse(cachedNews.value, cachedNews.metadata ?? undefined);
 
       const result = await getMergedClientNews(context.env, dependencies, logger);
       archiveCount = result.clientNews.length;
+      const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
+      const metadata = createNewsCacheMetadata(result.source, fetchedAt);
       const responseJson = JSON.stringify(result.clientNews);
       await context.env.KF3_NOTIF_CACHE.put(cacheKey, responseJson, {
         expirationTtl: result.expirationTtl,
+        metadata,
       });
-      return createJsonResponse(responseJson);
+      return createJsonResponse(responseJson, metadata);
     } catch (error) {
       logger.error(createApiErrorLog(error, archiveCount));
       return context.json({ error: "ニュースデータの取得に失敗しました" }, 500);
