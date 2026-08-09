@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { getJapaneseDate } from "../get-japanese-date";
 import dayjs from "dayjs";
 import "dayjs/locale/ja";
@@ -8,7 +8,7 @@ describe("getJapaneseDate", () => {
 
   it("日本時間が正しく表示されるか", () => {
     dayjs.locale("ja");
-    const expected = dayjs(UtcDateMock).format("YYYY-MM-DD"); // 2022-01-01
+    const expected = "2022-01-01"; // 2022-01-01
     const actual = getJapaneseDate(UtcDateMock); // 2022-01-01
     expect(actual).toBe(expected);
   });
@@ -20,9 +20,13 @@ describe("getJapaneseDate", () => {
   });
 
   it("現在日時が返るか", () => {
-    const expected = dayjs().format("YYYY-MM-DD");
-    const actual = getJapaneseDate();
-    expect(actual).toBe(expected);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2021-12-31T15:00:00Z"));
+      expect(getJapaneseDate()).toBe("2022-01-01");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("DateオブジェクトとgetJapaneseDateでギリギリ日付が変わるケース", () => {

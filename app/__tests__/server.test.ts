@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   ExecutionContext,
   Fetcher,
@@ -525,5 +525,49 @@ describe("scheduled handler", () => {
       event: "news_archive_heartbeat_failed",
       stage: "heartbeat-fail",
     });
+  });
+
+  it("heartbeatを10秒でtimeoutしてarchive更新を継続する", async () => {
+    vi.useFakeTimers();
+    try {
+      const setup = createBindings(null);
+      setup.env.HEALTHCHECKS_PING_URL = "https://heartbeat.test/check";
+      let heartbeatCalls = 0;
+      let updateCalls = 0;
+      const logs: Record<string, unknown>[] = [];
+      const handler = createWorkerHandler({
+        heartbeatFetcher: async (_input, init) => {
+          heartbeatCalls += 1;
+          if (heartbeatCalls > 1) return new Response(null, { status: 200 });
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        },
+        updater: async () => {
+          updateCalls += 1;
+        },
+        logger: { log: () => undefined, error: (event) => logs.push(event) },
+      });
+
+      const pending = callScheduled(handler, setup.env, Date.now());
+      await vi.advanceTimersByTimeAsync(10_000);
+      await pending;
+
+      expect(updateCalls).toBe(1);
+      expect(heartbeatCalls).toBe(2);
+      expect(logs).toEqual([
+        {
+          event: "news_archive_heartbeat_failed",
+          stage: "heartbeat-start",
+          error: "heartbeat request failed",
+        },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

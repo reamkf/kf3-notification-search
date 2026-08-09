@@ -1,0 +1,16 @@
+name = "kf3notif-test"
+main = "./app/server.ts"
+compatibility_date = "2024-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "KF3_NOTIF_CACHE"
+id = "test-kf3-notif-cache"
+
+[[r2_buckets]]
+binding = "KF3_NOTIF_DATA"
+bucket_name = "test-kf3-notif-data"
+
+[[r2_buckets]]
+binding = "KF3_NOTIF_BACKUP"
+bucket_name = "test-kf3-notif-backup"

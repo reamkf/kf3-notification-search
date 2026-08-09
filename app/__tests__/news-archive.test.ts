@@ -212,6 +212,57 @@ describe("アーカイブ読み込み", () => {
     );
     expect(result.document.news[0].newsDate).toBe("保存時に検証済み");
   });
+
+  it("currentのR2取得失敗時はlegacyへfallbackしない", async () => {
+    const calls: string[] = [];
+    const bucket = {
+      get: async (key: string) => {
+        calls.push(key);
+        if (key === CURRENT_ARCHIVE_KEY) throw new Error("current get failed");
+        return createObject(createDocument(1), "legacy-etag");
+      },
+    } as unknown as R2Bucket;
+
+    await expect(readArchive(bucket)).rejects.toMatchObject({ stage: "archive-read" });
+    expect(calls).toEqual([CURRENT_ARCHIVE_KEY]);
+  });
+
+  it("current本文の読み込み失敗時はlegacyへfallbackしない", async () => {
+    const calls: string[] = [];
+    const bucket = {
+      get: async (key: string) => {
+        calls.push(key);
+        return {
+          etag: "current-etag",
+          text: async () => Promise.reject(new Error("current text failed")),
+        } as unknown as R2ObjectBody;
+      },
+    } as unknown as R2Bucket;
+
+    await expect(readArchive(bucket)).rejects.toMatchObject({ stage: "archive-read" });
+    expect(calls).toEqual([CURRENT_ARCHIVE_KEY]);
+  });
+
+  it("currentとlegacyがどちらも欠落している場合はarchive-readで失敗する", async () => {
+    await expect(readArchive(createBucket({}))).rejects.toMatchObject({
+      stage: "archive-read",
+      details: { sourceKey: LEGACY_ARCHIVE_KEY },
+    });
+  });
+
+  it("legacyのR2取得失敗をarchive-readへ変換する", async () => {
+    const bucket = {
+      get: async (key: string) => {
+        if (key === CURRENT_ARCHIVE_KEY) return null;
+        throw new Error("legacy get failed");
+      },
+    } as unknown as R2Bucket;
+
+    await expect(readArchive(bucket)).rejects.toMatchObject({
+      stage: "archive-read",
+      details: { sourceKey: LEGACY_ARCHIVE_KEY },
+    });
+  });
 });
 
 describe("公式レスポンス取得", () => {

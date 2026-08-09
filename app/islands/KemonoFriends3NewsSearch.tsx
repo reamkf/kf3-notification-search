@@ -11,6 +11,7 @@ const STORAGE_KEYS = {
 } as const;
 
 const NEWS_PAGE_SIZE = 20;
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
 type NewsLoadState =
   | { status: "loading" }
@@ -19,18 +20,20 @@ type NewsLoadState =
 
 // "yyyy年MM月dd日 HH時mm分ss秒"形式の日付をパース
 const parseDateString = (dateString: string): number => {
-  const regex = /(\d{4})年(\d{2})月(\d{2})日 (\d{2})時(\d{2})分(\d{2})秒/;
+  const regex = /^(\d{4})年(\d{2})月(\d{2})日 (\d{2})時(\d{2})分(\d{2})秒$/;
   const match = dateString.match(regex);
   if (!match) throw new Error("Invalid date format");
   const [, year, month, day, hours, minutes, seconds] = match;
-  return new Date(
-    parseInt(year),
-    parseInt(month) - 1,
-    parseInt(day),
-    parseInt(hours),
-    parseInt(minutes),
-    parseInt(seconds),
-  ).getTime();
+  return (
+    Date.UTC(
+      parseInt(year),
+      parseInt(month) - 1,
+      parseInt(day),
+      parseInt(hours),
+      parseInt(minutes),
+      parseInt(seconds),
+    ) - JST_OFFSET_MS
+  );
 };
 
 // ニュースデータをキーワードでフィルター
@@ -64,8 +67,8 @@ const filterNewsByKeyword = (newsArray: Array<News>, query: string) => {
 
 // 日付によるフィルター
 const filterNewsByDate = (newsArray: Array<News>, start: string, end: string) => {
-  const startTime = start ? new Date(new Date(start).setHours(0, 0, 0, 0)).getTime() : -Infinity;
-  const endTime = end ? new Date(new Date(end).setHours(0, 0, 0, 0)).getTime() : Infinity;
+  const startTime = start ? Date.parse(`${start}T00:00:00+09:00`) : -Infinity;
+  const endTime = end ? Date.parse(`${end}T00:00:00+09:00`) : Infinity;
 
   return newsArray.filter((news) => {
     const newsDate = parseDateString(news.newsDate);
