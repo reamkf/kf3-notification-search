@@ -31,6 +31,12 @@ cd ./kf3-notification-search
 bun install
 ```
 
+`bun install`の`prepare`でローカルR2へダミーデータを投入し、認証済みの場合は本番R2の初期データで置き換えます。本番R2を取得できない場合も、ダミーデータを使って開発を続けられます。ログイン後に本番データを再取得する場合は次を実行します。
+
+```bash
+bun run seed:production
+```
+
 ### 3. wranglerでCloudflareにログイン
 
 ```bash
