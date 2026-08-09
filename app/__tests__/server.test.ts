@@ -15,12 +15,13 @@ import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createWorkerHandler } from "../server";
 import { createNewsCacheMetadata } from "../news-response-metadata";
 
-const createNews = (id: number) => ({
+const createNews = (id: number, category?: string) => ({
   id,
   targetUrl: `/info/${id}`,
   title: `ニュース${id}`,
   newsDate: "2026年08月01日 12時00分00秒",
   updated: "2026年08月01日 12時00分00秒",
+  ...(category !== undefined ? { category } : {}),
 });
 
 const createDocument = (count: number, sorted = false) => {
@@ -237,11 +238,13 @@ describe("Worker API handler", () => {
     expect(setup.cachePuts).toEqual([]);
   });
 
-  it("cache missではニュースの入力順を維持する", async () => {
+  it("cache missではニュースの入力順とcategoryを維持する", async () => {
     const setup = createBindings(JSON.stringify(createDocument(2)));
+    const official = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    official.news[0] = { ...official.news[0], category: "event" };
     const fetchedAt = Date.parse("2026-08-09T12:34:56.789Z");
     const handler = createWorkerHandler({
-      fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+      fetcher: async () => createResponse(official),
       clock: () => fetchedAt,
     });
     const response = await callFetch(
@@ -253,8 +256,10 @@ describe("Worker API handler", () => {
 
     expect(response.status).toBe(200);
     expect(body[0].targetUrl).toBe("/info/1");
+    expect(body[0].category).toBe("event");
     expect(body[1].targetUrl).toBe("/info/2");
     expect(body.at(-1)?.targetUrl).toBe(`/info/${MIN_OFFICIAL_ENTRY_COUNT}`);
+    expect(JSON.parse(setup.cachePuts[0].value)[0].category).toBe("event");
     expect(response.headers.get("X-KF3-News-Source")).toBe("merged");
     expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
     expect(setup.cachePuts[0].expirationTtl).toBe(300);
@@ -317,8 +322,9 @@ describe("Worker API handler", () => {
     });
   });
 
-  it("公式取得失敗時はarchiveをTTL 60で返す", async () => {
+  it("公式取得失敗時はarchiveのcategoryをTTL 60で返す", async () => {
     const archive = createDocument(MIN_OFFICIAL_ENTRY_COUNT, true);
+    archive.news[0] = { ...archive.news[0], category: "archive" };
     const setup = createBindings(JSON.stringify(archive));
     const logs: Record<string, unknown>[] = [];
     const handler = createWorkerHandler({
@@ -332,7 +338,10 @@ describe("Worker API handler", () => {
       setup.env,
     );
     expect(response.status).toBe(200);
-    expect((await response.json()) as unknown[]).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
+    const body = (await response.json()) as Array<Record<string, unknown>>;
+    expect(body).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
+    expect(body[0].category).toBe("archive");
+    expect(JSON.parse(setup.cachePuts[0].value)[0].category).toBe("archive");
     expect(response.headers.get("X-KF3-News-Source")).toBe("archive-fallback");
     expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
     expect(setup.cachePuts[0].expirationTtl).toBe(60);

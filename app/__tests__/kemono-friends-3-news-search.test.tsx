@@ -8,11 +8,13 @@ const createNews = (
   id: number,
   title = `ニュース${id}`,
   newsDate = `2026年08月${String(id).padStart(2, "0")}日 12時00分00秒`,
+  category?: string,
 ) => ({
   targetUrl: `/info/${id}`,
   title,
   newsDate,
   updated: "",
+  ...(category !== undefined ? { category } : {}),
 });
 
 class TestIntersectionObserver implements IntersectionObserver {
@@ -122,6 +124,38 @@ describe("KemonoFriends3NewsSearch", () => {
     intersectionObservers[0].trigger();
     await vi.waitFor(() => expect(container.querySelectorAll("li")).toHaveLength(25));
     expect(intersectionObservers[0].disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("公式分類ラベルは値があるニュースにだけ表示する", async () => {
+    mockNewsResponse([
+      createNews(
+        1,
+        "分類あり",
+        "2026年08月01日 12時00分00秒",
+        "イベント,キャンペーン,【サイト】アプリ",
+      ),
+      createNews(2, "分類なし"),
+      createNews(3, "空の分類", "2026年08月03日 12時00分00秒", ""),
+    ]);
+
+    mount();
+    await waitForText("おしらせの件数: 3件");
+
+    const categories = container.querySelectorAll('[data-testid="news-category"]');
+    expect(categories).toHaveLength(3);
+    expect(Array.from(categories, (category) => category.textContent)).toEqual([
+      "分類: イベント",
+      "分類: キャンペーン",
+      "分類: アプリ",
+    ]);
+    expect(new Set(Array.from(categories, (category) => category.className)).size).toBe(3);
+    const categoryItem = categories[0].closest("li");
+    expect(categoryItem?.textContent).toContain("分類あり");
+    expect(
+      Array.from(container.querySelectorAll("li"))
+        .filter((item) => item !== categoryItem)
+        .every((item) => item.querySelector('[data-testid="news-category"]') === null),
+    ).toBe(true);
   });
 
   it("1分未満の取得日時を秒数で表示する", async () => {
