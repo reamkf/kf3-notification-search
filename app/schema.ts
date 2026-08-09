@@ -5,6 +5,7 @@ export const newsSchema = v.object({
   title: v.string(),
   newsDate: v.string(),
   updated: v.string(),
+  category: v.optional(v.string()),
 });
 
 export const newsArraySchema = v.array(newsSchema);

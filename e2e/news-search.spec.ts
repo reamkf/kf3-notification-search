@@ -8,6 +8,7 @@ const news = [
     title: "測定イベント開催のお知らせ",
     newsDate: "2026年08月01日 12時00分00秒",
     updated: "",
+    category: "イベント,キャンペーン,【サイト】アプリ",
   },
   {
     targetUrl: "/info/2",
@@ -53,6 +54,23 @@ test("ニュース一覧を新しい順に表示し、公式サイトへのリ�
     "href",
     "https://kemono-friends-3.jp/info/3",
   );
+});
+
+test("公式分類ラベルを値があるニュースにだけ表示する", async ({ page }) => {
+  await openNewsSearch(page);
+
+  const categories = page.getByTestId("news-category");
+  await expect(categories).toHaveCount(3);
+  await expect(categories.nth(0)).toHaveText("分類: イベント");
+  await expect(categories.nth(1)).toHaveText("分類: キャンペーン");
+  await expect(categories.nth(2)).toHaveText("分類: アプリ");
+  const categoryClasses = await categories.evaluateAll((elements) =>
+    elements.map((element) => element.getAttribute("class")),
+  );
+  expect(new Set(categoryClasses).size).toBe(3);
+  const items = page.locator("ul > li");
+  await expect(items.filter({ has: categories })).toHaveCount(1);
+  await expect(items.filter({ hasNot: categories })).toHaveCount(2);
 });
 
 test("データ取得日時を相対表示する", async ({ page }) => {

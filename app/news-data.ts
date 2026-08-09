@@ -607,11 +607,12 @@ export const projectClientNews = (document: StoredNewsDocument): News[] => {
 };
 
 export const projectValidatedClientNews = (document: StoredNewsDocument): News[] =>
-  document.news.map(({ targetUrl, title, newsDate, updated }) => ({
+  document.news.map(({ targetUrl, title, newsDate, updated, category }) => ({
     targetUrl,
     title,
     newsDate,
     updated,
+    ...(category !== undefined ? { category } : {}),
   }));
 
 export const toClientNews = projectClientNews;

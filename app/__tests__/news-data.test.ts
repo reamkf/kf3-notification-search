@@ -10,6 +10,7 @@ import {
   normalizeNewsDocument,
   parseJapaneseNewsDate,
   projectClientNews,
+  projectValidatedClientNews,
   sha256Hex,
   validateOfficialNewsDocument,
   validateParsedStoredNewsDocumentShape,
@@ -73,9 +74,25 @@ describe("保存用スキーマ", () => {
     expect(v.parse(storedNewsDocumentSchema, { news: [createNews(1)] }).news).toHaveLength(1);
   });
 
-  it("client用出力を4フィールドに限定する", () => {
-    const result = projectClientNews({ news: [createNews(1, { category: "event", extra: true })] });
-    expect(result).toEqual([
+  it("client用出力にcategoryを含め、未知フィールドを除外する", () => {
+    const document = { news: [createNews(1, { category: "event", extra: true })] };
+    const expected = [
+      {
+        targetUrl: "/info/1",
+        title: "ニュース1",
+        newsDate: "2026年08月01日 12時00分00秒",
+        updated: "2026年08月01日 12時00分00秒",
+        category: "event",
+      },
+    ];
+
+    expect(projectClientNews(document)).toEqual(expected);
+    expect(projectValidatedClientNews(document)).toEqual(expected);
+    expect(v.safeParse(newsArraySchema, expected).success).toBe(true);
+  });
+
+  it("categoryがないときはclient用出力へ含めない", () => {
+    expect(projectValidatedClientNews({ news: [createNews(1)] })).toEqual([
       {
         targetUrl: "/info/1",
         title: "ニュース1",
@@ -83,7 +100,6 @@ describe("保存用スキーマ", () => {
         updated: "2026年08月01日 12時00分00秒",
       },
     ]);
-    expect(v.safeParse(newsArraySchema, result).success).toBe(true);
   });
 
   it("通常経路の構造検証では保存済み日時を再解析しない", () => {

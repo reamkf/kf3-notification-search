@@ -160,11 +160,11 @@ flowchart TD
     Fallback --> Cache60[KV cache TTL 60]
     Cache300 --> Client
     Cache60 --> Client
-    Client --> Fields[targetUrl, title, newsDate, updated]
+    Client --> Fields[targetUrl, title, newsDate, updated, category?]
     Client --> Metadata[X-KF3-News-Source, X-KF3-News-Fetched-At]
 ```
 
-APIの成功レスポンスは従来どおり`id`、`category`、未知フィールドを含まないトップレベル配列です。KV valueもニュース配列JSONのまま維持し、取得元と取得日時はKV metadataへ保存してレスポンスヘッダーへ投影します。KV cacheが存在する場合は本文を再検証せず、R2や公式サーバーへの外部I/Oなしで返します。公式取得、公式検証、統合が失敗した場合は、正常なarchiveが読めたときだけarchiveをTTL 60秒で返し、画面上に保存済みarchiveを表示していることを通知します。archive自体が欠落または不正な場合は5xxを返し、公式データだけを返しません。通常の成功時はTTL 300秒です。`fetchedAt`はcache miss時にAPI結果を確定してKVへ保存する直前の日時で、画面には相対日時で表示します。
+APIの成功レスポンスは`targetUrl`、`title`、`newsDate`、`updated`を含み、保存用データに`category`がある場合だけ分類ラベル用のフィールドを追加したトップレベル配列です。`id`や未知フィールドは含みません。KV valueもニュース配列JSONのまま維持し、取得元と取得日時はKV metadataへ保存してレスポンスヘッダーへ投影します。KV cacheが存在する場合は本文を再検証せず、R2や公式サーバーへの外部I/Oなしで返します。公式取得、公式検証、統合が失敗した場合は、正常なarchiveが読めたときだけarchiveをTTL 60秒で返し、画面上に保存済みarchiveを表示していることを通知します。archive自体が欠落または不正な場合は5xxを返し、公式データだけを返しません。通常の成功時はTTL 300秒です。`fetchedAt`はcache miss時にAPI結果を確定してKVへ保存する直前の日時で、画面には相対日時で表示します。
 
 既存の`/entries_merged_20241107.json` GET/HEAD routeは互換性のため残します。通常のAPI取得先は`archive/current.json`またはlegacy fallbackです。
 
