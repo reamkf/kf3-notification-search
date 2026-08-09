@@ -50,6 +50,19 @@ describe("保存用スキーマ", () => {
     ).toBe(false);
   });
 
+  it("通常経路の高速検証でも安全整数の範囲外のidを拒否する", () => {
+    expect(() =>
+      validateParsedStoredNewsDocumentShape(
+        createDocument(1, { 1: { id: Number.MAX_SAFE_INTEGER } }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateParsedStoredNewsDocumentShape(
+        createDocument(1, { 1: { id: Number.MAX_SAFE_INTEGER + 1 } }),
+      ),
+    ).toThrow();
+  });
+
   it("categoryの省略を許可し、未知フィールドを保持する", () => {
     const result = v.parse(storedNewsSchema, createNews(1, { extra: "keep" }));
     expect(result.category).toBeUndefined();

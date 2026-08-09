@@ -276,7 +276,7 @@ const validateParsedStoredNewsDocumentInternal = (
     const candidate = item as Record<string, unknown>;
     if (
       typeof candidate.id !== "number" ||
-      !Number.isInteger(candidate.id) ||
+      !Number.isSafeInteger(candidate.id) ||
       candidate.id <= 0 ||
       typeof candidate.targetUrl !== "string" ||
       candidate.targetUrl.length === 0 ||

@@ -71,12 +71,24 @@ const streamFromChunks = (chunks: Uint8Array[], onCancel?: () => void) =>
   });
 
 type FakeStoredObject = { text: string; etag: string };
+type PutCall = {
+  key: string;
+  value: string;
+  options?: {
+    onlyIf?: Record<string, string>;
+    httpMetadata?: { contentType?: string };
+  };
+};
 
 const createMutableBucket = (
   label: string,
   initial: Record<string, FakeStoredObject>,
   timeline: string[],
-  options: { failPutKeys?: Set<string>; nullPutKeys?: Set<string> } = {},
+  options: {
+    failPutKeys?: Set<string>;
+    nullPutKeys?: Set<string>;
+    putCalls?: PutCall[];
+  } = {},
 ) => {
   const objects = new Map(Object.entries(initial));
   let nextEtag = 0;
@@ -92,6 +104,7 @@ const createMutableBucket = (
     },
     put: async (key: string, value: string, putOptions?: { onlyIf?: Record<string, string> }) => {
       timeline.push(`${label}:put:${key}`);
+      options.putCalls?.push({ key, value, options: putOptions });
       if (options.failPutKeys?.has(key)) throw new Error(`put failed: ${key}`);
       if (options.nullPutKeys?.has(key)) return null;
       const existing = objects.get(key);
@@ -309,6 +322,28 @@ describe("公式レスポンス取得", () => {
       fetchOfficialNews(async () => createResponse(streamFromChunks([invalidJson]))),
     ).rejects.toMatchObject({ stage: "official-parse" });
   });
+
+  it("network、stream、不正JSONの失敗stageを保持する", async () => {
+    await expect(
+      fetchOfficialNews(async () => Promise.reject(new Error("network failed"))),
+    ).rejects.toMatchObject({ stage: "official-fetch" });
+
+    const failedStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("stream failed"));
+      },
+    });
+    await expect(fetchOfficialNews(async () => createResponse(failedStream))).rejects.toMatchObject(
+      {
+        stage: "official-fetch",
+      },
+    );
+
+    const invalidJson = new TextEncoder().encode("not-json");
+    await expect(
+      fetchOfficialNews(async () => createResponse(streamFromChunks([invalidJson]))),
+    ).rejects.toMatchObject({ stage: "official-parse" });
+  });
 });
 
 describe("バックアップキー", () => {
@@ -330,9 +365,14 @@ describe("アーカイブ更新トランザクション", () => {
       failPutKeys?: Set<string>;
       nullPutKeys?: Set<string>;
       initial?: Record<string, FakeStoredObject>;
+      putCalls?: PutCall[];
     } = {},
     cacheFailure = false,
-    dataOptions: { failPutKeys?: Set<string>; nullPutKeys?: Set<string> } = {},
+    dataOptions: {
+      failPutKeys?: Set<string>;
+      nullPutKeys?: Set<string>;
+      putCalls?: PutCall[];
+    } = {},
   ) => {
     const timeline: string[] = [];
     const dataInitial: Record<string, FakeStoredObject> = current
@@ -366,7 +406,16 @@ describe("アーカイブ更新トランザクション", () => {
   };
 
   it("daily、current、KV、monthlyの順に更新し、ETag条件を使う", async () => {
-    const setup = createDependencies(asStoredObject(createDocument(1), "current-read-etag"));
+    const originalText = `{ "news": ${JSON.stringify(createDocument(1).news)} }`;
+    const dataPuts: PutCall[] = [];
+    const backupPuts: PutCall[] = [];
+    const setup = createDependencies(
+      { text: originalText, etag: "current-read-etag" },
+      createDocument(MIN_OFFICIAL_ENTRY_COUNT),
+      { putCalls: backupPuts },
+      false,
+      { putCalls: dataPuts },
+    );
     const result = await updateNewsArchive(setup.dependencies);
     expect(result.updated).toBe(true);
     expect(result.dailyBackupKey).toMatch(/^daily\/2026\/08\/01\//);
@@ -385,6 +434,34 @@ describe("アーカイブ更新トランザクション", () => {
       updateStatus: "updated",
     });
     expect(setup.logger.errors).toHaveLength(0);
+    expect(dataPuts).toEqual([
+      {
+        key: CURRENT_ARCHIVE_KEY,
+        value: expect.any(String),
+        options: {
+          onlyIf: { etagMatches: "current-read-etag" },
+          httpMetadata: { contentType: "application/json; charset=utf-8" },
+        },
+      },
+    ]);
+    expect(backupPuts).toEqual([
+      {
+        key: result.dailyBackupKey,
+        value: originalText,
+        options: {
+          onlyIf: { etagDoesNotMatch: "*" },
+          httpMetadata: { contentType: "application/json; charset=utf-8" },
+        },
+      },
+      {
+        key: result.monthlyBackupKey,
+        value: dataPuts[0].value,
+        options: {
+          onlyIf: { etagDoesNotMatch: "*" },
+          httpMetadata: { contentType: "application/json; charset=utf-8" },
+        },
+      },
+    ]);
   });
 
   it("daily backup失敗時はcurrentとKVを変更しない", async () => {
@@ -441,6 +518,46 @@ describe("アーカイブ更新トランザクション", () => {
     expect(conflictSetup.logger.errors[0]).toMatchObject({ stage: "etag-conflict" });
   });
 
+  it("currentのput失敗時はKVとmonthlyへ進まない", async () => {
+    const expectedDailyKey = buildBackupKeys(transactionNowMs).dailyKey;
+    const setup = createDependencies(
+      asStoredObject(createDocument(1), "current-read-etag"),
+      createDocument(MIN_OFFICIAL_ENTRY_COUNT),
+      {},
+      false,
+      { failPutKeys: new Set([CURRENT_ARCHIVE_KEY]) },
+    );
+    await expect(updateNewsArchive(setup.dependencies)).rejects.toMatchObject({
+      stage: "archive-write",
+    });
+    expect(setup.timeline).toEqual([
+      `data:get:${CURRENT_ARCHIVE_KEY}`,
+      `backup:put:${expectedDailyKey}`,
+      `data:put:${CURRENT_ARCHIVE_KEY}`,
+    ]);
+    expect(setup.logger.errors[0]).toMatchObject({ stage: "archive-write" });
+  });
+
+  it("KV削除失敗時はcurrentを巻き戻さず、monthlyへ進まない", async () => {
+    const expectedDailyKey = buildBackupKeys(transactionNowMs).dailyKey;
+    const setup = createDependencies(
+      asStoredObject(createDocument(1), "current-read-etag"),
+      createDocument(MIN_OFFICIAL_ENTRY_COUNT),
+      {},
+      true,
+    );
+    await expect(updateNewsArchive(setup.dependencies)).rejects.toMatchObject({
+      stage: "cache-delete",
+    });
+    expect(setup.timeline).toEqual([
+      `data:get:${CURRENT_ARCHIVE_KEY}`,
+      `backup:put:${expectedDailyKey}`,
+      `data:put:${CURRENT_ARCHIVE_KEY}`,
+      "cache:delete:kf3-news",
+    ]);
+    expect(setup.logger.errors[0]).toMatchObject({ stage: "cache-delete" });
+  });
+
   it("currentと統合結果が同じなら本番更新を省略し、monthlyだけ補完する", async () => {
     const setup = createDependencies(
       asStoredObject(createSortedDocument(MIN_OFFICIAL_ENTRY_COUNT), "current-etag"),
@@ -473,6 +590,7 @@ describe("アーカイブ更新トランザクション", () => {
 
   it("current初回作成ではlegacyと同じ内容でもdailyとcurrentを作る", async () => {
     const timeline: string[] = [];
+    const dataPuts: PutCall[] = [];
     const legacy = createMutableBucket(
       "data",
       {
@@ -482,6 +600,7 @@ describe("アーカイブ更新トランザクション", () => {
         ),
       },
       timeline,
+      { putCalls: dataPuts },
     );
     const backup = createMutableBucket("backup", {}, timeline);
     const logger = createLogger();
@@ -498,6 +617,7 @@ describe("アーカイブ更新トランザクション", () => {
     expect(timeline[1]).toBe(`data:get:${LEGACY_ARCHIVE_KEY}`);
     expect(timeline).toContain(`data:put:${CURRENT_ARCHIVE_KEY}`);
     expect(timeline).toContain(`backup:put:${result.dailyBackupKey}`);
+    expect(dataPuts[0].options?.onlyIf).toEqual({ etagDoesNotMatch: "*" });
   });
 
   it("monthly backup失敗時はcurrentを巻き戻さず、失敗を返す", async () => {

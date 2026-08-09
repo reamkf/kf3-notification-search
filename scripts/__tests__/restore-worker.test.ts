@@ -28,8 +28,11 @@ const snapshotDocument = {
 
 type SetupOptions = {
   snapshot?: unknown;
+  snapshotGetError?: boolean;
+  snapshotMissing?: boolean;
   snapshotReadError?: boolean;
   currentEtag?: string | null;
+  currentHeadError?: boolean;
   putResult?: "success" | "conflict" | "error";
   cacheDeleteError?: boolean;
 };
@@ -44,6 +47,8 @@ const createSetup = (options: SetupOptions = {}) => {
   const backupBucket = {
     get: async (key: string) => {
       calls.push(`backup:get:${key}`);
+      if (options.snapshotGetError) throw new Error("snapshot get failed");
+      if (options.snapshotMissing) return null;
       return {
         text: async () => {
           if (options.snapshotReadError) throw new Error("snapshot read failed");
@@ -56,6 +61,7 @@ const createSetup = (options: SetupOptions = {}) => {
   const dataBucket = {
     head: async (key: string) => {
       calls.push(`data:head:${key}`);
+      if (options.currentHeadError) throw new Error("current head failed");
       return currentEtag === null ? null : ({ etag: currentEtag } as R2Object);
     },
     put: async (key: string, value: string, putOptions: Record<string, unknown>) => {
@@ -85,7 +91,7 @@ const createSetup = (options: SetupOptions = {}) => {
   };
 };
 
-const callRestore = async (env: RestoreBindings, body: Record<string, unknown>) =>
+const callRestore = async (env: RestoreBindings, body: unknown) =>
   handleRestoreRequest(
     new Request("http://127.0.0.1:8790/restore", {
       method: "POST",
@@ -100,6 +106,81 @@ const readBody = async (response: Response) => response.json() as Promise<Record
 describe("operator-only復元tool", () => {
   beforeEach(() => {
     expect.hasAssertions();
+  });
+
+  it.each([
+    {
+      name: "localhost以外",
+      request: new Request("https://example.com/restore", { method: "POST" }),
+      status: 403,
+      code: "localhost_only",
+    },
+    {
+      name: "異なるpath",
+      request: new Request("http://127.0.0.1:8790/other", { method: "POST" }),
+      status: 404,
+      code: "not_found",
+    },
+    {
+      name: "POST以外",
+      request: new Request("http://127.0.0.1:8790/restore"),
+      status: 405,
+      code: "method_not_allowed",
+    },
+  ])("$nameをR2アクセス前に拒否する", async ({ request, status, code }) => {
+    const setup = createSetup();
+    const response = await handleRestoreRequest(request, setup.env);
+
+    expect(response.status).toBe(status);
+    expect(await readBody(response)).toMatchObject({ error: { code } });
+    expect(setup.calls).toEqual([]);
+  });
+
+  it.each([
+    { name: "object以外", body: null, code: "invalid_request" },
+    { name: "配列", body: [], code: "invalid_request" },
+    {
+      name: "不正mode",
+      body: { mode: "force", snapshotKey },
+      code: "invalid_mode",
+    },
+    {
+      name: "不正snapshot key",
+      body: { snapshotKey: "archive/current.json" },
+      code: "invalid_snapshot_key",
+    },
+    {
+      name: "数値digest",
+      body: { snapshotKey, snapshotDigest: 1 },
+      code: "invalid_snapshot_digest",
+    },
+    {
+      name: "数値ETag",
+      body: { snapshotKey, currentEtag: 1 },
+      code: "invalid_current_etag",
+    },
+  ])("$nameのrequest bodyを拒否する", async ({ body, code }) => {
+    const setup = createSetup();
+    const response = await callRestore(setup.env, body);
+
+    expect(response.status).toBe(400);
+    expect(await readBody(response)).toMatchObject({ error: { code } });
+    expect(setup.calls).toEqual([]);
+  });
+
+  it("不正JSONを拒否する", async () => {
+    const setup = createSetup();
+    const response = await handleRestoreRequest(
+      new Request("http://127.0.0.1:8790/restore", {
+        method: "POST",
+        body: "{",
+      }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(400);
+    expect(await readBody(response)).toMatchObject({ error: { code: "invalid_json" } });
+    expect(setup.calls).toEqual([]);
   });
 
   it("default dry-runでsnapshotを検証し、writeを行わない", async () => {
@@ -141,6 +222,62 @@ describe("operator-only復元tool", () => {
     expect(await readBody(response)).toMatchObject({
       error: { code: "snapshot_read_failed" },
     });
+  });
+
+  it.each([
+    {
+      name: "snapshot取得失敗",
+      options: { snapshotGetError: true },
+      status: 502,
+      code: "snapshot_read_failed",
+    },
+    {
+      name: "snapshot欠落",
+      options: { snapshotMissing: true },
+      status: 404,
+      code: "snapshot_not_found",
+    },
+    {
+      name: "snapshot JSON不正",
+      options: { snapshot: "not-json" },
+      status: 422,
+      code: "snapshot_json_invalid",
+    },
+    {
+      name: "current取得失敗",
+      options: { currentHeadError: true },
+      status: 502,
+      code: "current_read_failed",
+    },
+    {
+      name: "current欠落",
+      options: { currentEtag: null },
+      status: 409,
+      code: "current_not_found",
+    },
+  ] as const)("$nameを対応するR2エラーとして返す", async ({ options, status, code }) => {
+    const setup = createSetup(options);
+    const response = await callRestore(setup.env, { snapshotKey });
+
+    expect(response.status).toBe(status);
+    expect(await readBody(response)).toMatchObject({ error: { code } });
+    expect(setup.puts).toHaveLength(0);
+    expect(setup.calls).not.toContain("cache:delete:kf3-news");
+  });
+
+  it("applyの確認値が不足している場合はwriteを行わない", async () => {
+    const setup = createSetup();
+    const response = await callRestore(setup.env, {
+      mode: "apply",
+      snapshotKey,
+    });
+
+    expect(response.status).toBe(400);
+    expect(await readBody(response)).toMatchObject({
+      error: { code: "apply_confirmation_required" },
+    });
+    expect(setup.puts).toHaveLength(0);
+    expect(setup.calls).not.toContain("cache:delete:kf3-news");
   });
 
   it("applyでsnapshot digestの再入力を検証する", async () => {
