@@ -6,6 +6,7 @@ import { createExecutionContext, reset } from "cloudflare:test";
 import type { ExportedHandler } from "@cloudflare/workers-types";
 import { CURRENT_ARCHIVE_KEY, updateNewsArchive } from "../news-archive";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
+import { createNewsCacheMetadata } from "../news-response-metadata";
 import { createWorkerHandler } from "../server";
 
 const bindings = env as unknown as WorkerBindings;
@@ -45,7 +46,9 @@ describe("Cloudflare bindings", () => {
         updated: "",
       },
     ];
-    await bindings.KF3_NOTIF_CACHE.put("kf3-news", JSON.stringify(cached));
+    await bindings.KF3_NOTIF_CACHE.put("kf3-news", JSON.stringify(cached), {
+      metadata: createNewsCacheMetadata("archive-fallback", "2026-08-09T12:34:56.789Z"),
+    });
     const fetcher = vi.fn(async () => Promise.reject(new Error("unexpected fetch")));
     const handler = createWorkerHandler({ fetcher });
 
@@ -53,6 +56,8 @@ describe("Cloudflare bindings", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(cached);
+    expect(response.headers.get("X-KF3-News-Source")).toBe("archive-fallback");
+    expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
     expect(fetcher).not.toHaveBeenCalled();
   });
 

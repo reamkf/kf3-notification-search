@@ -13,6 +13,7 @@ import {
 } from "../news-archive";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createWorkerHandler } from "../server";
+import { createNewsCacheMetadata } from "../news-response-metadata";
 
 const createNews = (id: number) => ({
   id,
@@ -43,7 +44,13 @@ type TestBindings = {
   env: WorkerBindings;
   dataGets: string[];
   cacheValues: Map<string, string>;
-  cachePuts: Array<{ key: string; value: string; expirationTtl?: number }>;
+  cacheMetadata: Map<string, unknown>;
+  cachePuts: Array<{
+    key: string;
+    value: string;
+    expirationTtl?: number;
+    metadata?: unknown;
+  }>;
   cacheDeletes: string[];
 };
 
@@ -60,7 +67,13 @@ const createBindings = (
 ): TestBindings => {
   const dataGets: string[] = [];
   const cacheValues = new Map<string, string>();
-  const cachePuts: Array<{ key: string; value: string; expirationTtl?: number }> = [];
+  const cacheMetadata = new Map<string, unknown>();
+  const cachePuts: Array<{
+    key: string;
+    value: string;
+    expirationTtl?: number;
+    metadata?: unknown;
+  }> = [];
   const cacheDeletes: string[] = [];
   const dataBucket = {
     get: async (key: string) => {
@@ -77,14 +90,34 @@ const createBindings = (
       if (options.cacheGetError) throw new Error("cache get failed");
       return cacheValues.get(key) ?? null;
     },
-    put: async (key: string, value: string, putOptions: { expirationTtl?: number }) => {
+    getWithMetadata: async (key: string) => {
+      if (options.cacheGetError) throw new Error("cache get failed");
+      return {
+        value: cacheValues.get(key) ?? null,
+        metadata: cacheMetadata.get(key) ?? null,
+        cacheStatus: null,
+      };
+    },
+    put: async (
+      key: string,
+      value: string,
+      putOptions: { expirationTtl?: number; metadata?: unknown },
+    ) => {
       if (options.cachePutError) throw new Error("cache put failed");
       cacheValues.set(key, value);
-      cachePuts.push({ key, value, expirationTtl: putOptions.expirationTtl });
+      if (putOptions.metadata === undefined) cacheMetadata.delete(key);
+      else cacheMetadata.set(key, putOptions.metadata);
+      cachePuts.push({
+        key,
+        value,
+        expirationTtl: putOptions.expirationTtl,
+        metadata: putOptions.metadata,
+      });
     },
     delete: async (key: string) => {
       cacheDeletes.push(key);
       cacheValues.delete(key);
+      cacheMetadata.delete(key);
     },
   } as unknown as KVNamespace;
   const backup = {
@@ -100,6 +133,7 @@ const createBindings = (
     },
     dataGets,
     cacheValues,
+    cacheMetadata,
     cachePuts,
     cacheDeletes,
   };
@@ -148,11 +182,20 @@ describe("Worker API handler", () => {
       },
     ];
     setup.cacheValues.set("kf3-news", JSON.stringify(cached));
+    setup.cacheMetadata.set(
+      "kf3-news",
+      createNewsCacheMetadata("archive-fallback", "2026-08-09T12:34:56.789Z"),
+    );
     let fetchCalls = 0;
+    let clockCalls = 0;
     const handler = createWorkerHandler({
       fetcher: async () => {
         fetchCalls += 1;
         return createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT));
+      },
+      clock: () => {
+        clockCalls += 1;
+        return Date.now();
       },
     });
     const response = await callFetch(
@@ -162,8 +205,11 @@ describe("Worker API handler", () => {
     );
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(cached);
+    expect(response.headers.get("X-KF3-News-Source")).toBe("archive-fallback");
+    expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
     expect(setup.dataGets).toEqual([]);
     expect(fetchCalls).toBe(0);
+    expect(clockCalls).toBe(0);
   });
 
   it("cacheは再検証せずそのまま返す", async () => {
@@ -183,6 +229,8 @@ describe("Worker API handler", () => {
     );
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("not-json");
+    expect(response.headers.get("X-KF3-News-Source")).toBe("unknown");
+    expect(response.headers.get("X-KF3-News-Fetched-At")).toBeNull();
     expect(fetchCalls).toBe(0);
     expect(setup.dataGets).toEqual([]);
     expect(setup.cacheDeletes).toEqual([]);
@@ -191,8 +239,10 @@ describe("Worker API handler", () => {
 
   it("cache missではニュースの入力順を維持する", async () => {
     const setup = createBindings(JSON.stringify(createDocument(2)));
+    const fetchedAt = Date.parse("2026-08-09T12:34:56.789Z");
     const handler = createWorkerHandler({
       fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+      clock: () => fetchedAt,
     });
     const response = await callFetch(
       handler,
@@ -205,7 +255,12 @@ describe("Worker API handler", () => {
     expect(body[0].targetUrl).toBe("/info/1");
     expect(body[1].targetUrl).toBe("/info/2");
     expect(body.at(-1)?.targetUrl).toBe(`/info/${MIN_OFFICIAL_ENTRY_COUNT}`);
+    expect(response.headers.get("X-KF3-News-Source")).toBe("merged");
+    expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
     expect(setup.cachePuts[0].expirationTtl).toBe(300);
+    expect(setup.cachePuts[0].metadata).toEqual(
+      createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z"),
+    );
   });
 
   it("cache読み込み失敗時は外部I/Oへ進まず5xxにする", async () => {
@@ -268,6 +323,7 @@ describe("Worker API handler", () => {
     const logs: Record<string, unknown>[] = [];
     const handler = createWorkerHandler({
       fetcher: async () => createResponse(null, false),
+      clock: () => Date.parse("2026-08-09T12:34:56.789Z"),
       logger: { log: () => undefined, error: (event) => logs.push(event) },
     });
     const response = await callFetch(
@@ -277,7 +333,12 @@ describe("Worker API handler", () => {
     );
     expect(response.status).toBe(200);
     expect((await response.json()) as unknown[]).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
+    expect(response.headers.get("X-KF3-News-Source")).toBe("archive-fallback");
+    expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
     expect(setup.cachePuts[0].expirationTtl).toBe(60);
+    expect(setup.cachePuts[0].metadata).toEqual(
+      createNewsCacheMetadata("archive-fallback", "2026-08-09T12:34:56.789Z"),
+    );
     expect(logs[0]).toMatchObject({ event: "news_api_fallback", stage: "official-fetch" });
   });
 
@@ -299,7 +360,12 @@ describe("Worker API handler", () => {
 
     expect(response.status).toBe(200);
     expect((await response.json()) as unknown[]).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
+    expect(response.headers.get("X-KF3-News-Source")).toBe("archive-fallback");
     expect(setup.cachePuts[0].expirationTtl).toBe(60);
+    expect(setup.cachePuts[0].metadata).toMatchObject({
+      version: 1,
+      source: "archive-fallback",
+    });
     expect(logs[0]).toMatchObject({ event: "news_api_fallback", stage: "official-validation" });
   });
 

@@ -4,6 +4,7 @@ import { newsArraySchema, News, summarizeValidationIssues } from "../schema";
 import { QueryParser } from "../query-parser";
 import { normalizeQuery } from "../query-normalizer";
 import { getJapaneseDate } from "../get-japanese-date";
+import { parseNewsResponseHeaders, type NewsResponseMetadata } from "../news-response-metadata";
 
 // localStorageのキー(同一ドメインでの競合回避のためアプリ固有のprefixを付与)
 const STORAGE_KEYS = {
@@ -15,7 +16,7 @@ const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
 type NewsLoadState =
   | { status: "loading" }
-  | { status: "success"; data: Array<News> }
+  | { status: "success"; data: Array<News>; metadata: NewsResponseMetadata }
   | { status: "error"; message: string };
 
 // "yyyy年MM月dd日 HH時mm分ss秒"形式の日付をパース
@@ -34,6 +35,28 @@ const parseDateString = (dateString: string): number => {
       parseInt(seconds),
     ) - JST_OFFSET_MS
   );
+};
+
+const formatRelativeFetchedAt = (fetchedAt: string | null) => {
+  if (!fetchedAt || !Number.isFinite(Date.parse(fetchedAt))) return "不明";
+
+  const elapsedMs = Math.max(0, Date.now() - Date.parse(fetchedAt));
+  const elapsedSeconds = Math.floor(elapsedMs / 1000);
+  if (elapsedSeconds < 60) return `${elapsedSeconds}秒前`;
+
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) return `${elapsedMinutes}分前`;
+
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `${elapsedHours}時間前`;
+
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  if (elapsedDays < 30) return `${elapsedDays}日前`;
+
+  const elapsedMonths = Math.floor(elapsedDays / 30);
+  if (elapsedMonths < 12) return `${elapsedMonths}か月前`;
+
+  return `${Math.floor(elapsedMonths / 12)}年前`;
 };
 
 // ニュースデータをキーワードでフィルター
@@ -104,9 +127,10 @@ const KemonoFriends3NewsSearch = () => {
         if (!res.ok) {
           throw new Error(`HTTP error! status: ${res.status}`);
         }
-        return res.json();
+        const metadata = parseNewsResponseHeaders(res.headers);
+        return res.json().then((data) => ({ data, metadata }));
       })
-      .then((data) => {
+      .then(({ data, metadata }) => {
         const result = v.safeParse(newsArraySchema, data);
         if (result.success) {
           // 検索欄の表示状態を設定
@@ -115,7 +139,11 @@ const KemonoFriends3NewsSearch = () => {
             setIsSearchVisible(savedSearchVisibility === "true");
           }
 
-          setLoadState({ status: "success", data: result.output });
+          setLoadState({
+            status: "success",
+            data: result.output,
+            metadata,
+          });
         } else {
           console.error("Data validation failed", summarizeValidationIssues(result.issues));
           setLoadState({
@@ -244,6 +272,14 @@ const KemonoFriends3NewsSearch = () => {
           </div>
         )}
 
+        {loadState.status === "success" && loadState.metadata.source === "archive-fallback" && (
+          <div class="mb-4 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-900">
+            <p role="status" aria-live="polite" aria-atomic="true">
+              公式データを利用できなかったため、保存済みアーカイブを表示しています。
+            </p>
+          </div>
+        )}
+
         <div
           class={`flex justify-center items-center p-8 ${isLoading && !errorMessage ? "" : "hidden"}`}
         >
@@ -369,7 +405,21 @@ const KemonoFriends3NewsSearch = () => {
           </div>
 
           {/* お知らせヒット件数 */}
-          <div class="text-sm text-gray-600 font-medium mt-0">おしらせの件数: {numberOfNews}件</div>
+          <div class="flex items-center gap-4 text-sm text-gray-600 font-medium mt-0">
+            <span>おしらせの件数: {numberOfNews}件</span>
+            {loadState.status === "success" && (
+              <span data-testid="news-metadata">
+                データ取得:{" "}
+                {loadState.metadata.fetchedAt ? (
+                  <time dateTime={loadState.metadata.fetchedAt}>
+                    {formatRelativeFetchedAt(loadState.metadata.fetchedAt)}
+                  </time>
+                ) : (
+                  <span>不明</span>
+                )}
+              </span>
+            )}
+          </div>
 
           {/* ニュースリスト */}
           <ul class="space-y-4">

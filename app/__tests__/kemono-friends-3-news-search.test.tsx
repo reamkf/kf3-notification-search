@@ -47,14 +47,14 @@ const mount = () => {
   root.render(<KemonoFriends3NewsSearch />);
 };
 
-const mockNewsResponse = (news: unknown, status = 200) => {
+const mockNewsResponse = (news: unknown, status = 200, headers: HeadersInit = {}) => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async () =>
       Promise.resolve(
         new Response(JSON.stringify(news), {
           status,
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...headers },
         }),
       ),
     ),
@@ -122,6 +122,55 @@ describe("KemonoFriends3NewsSearch", () => {
     intersectionObservers[0].trigger();
     await vi.waitFor(() => expect(container.querySelectorAll("li")).toHaveLength(25));
     expect(intersectionObservers[0].disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("1分未満の取得日時を秒数で表示する", async () => {
+    const fetchedAt = new Date(Date.now() - 5 * 1000).toISOString();
+    mockNewsResponse([createNews(1)], 200, {
+      "X-KF3-News-Source": "merged",
+      "X-KF3-News-Fetched-At": fetchedAt,
+    });
+
+    mount();
+    await waitForText("データ取得: 5秒前");
+    expect(container.textContent).not.toContain("たった今");
+  });
+
+  it("通常データの取得日時を相対表示する", async () => {
+    const fetchedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    mockNewsResponse([createNews(1)], 200, {
+      "X-KF3-News-Source": "merged",
+      "X-KF3-News-Fetched-At": fetchedAt,
+    });
+
+    mount();
+    await waitForText("データ取得: 5分前");
+
+    expect(container.querySelector(`time[datetime="${fetchedAt}"]`)).not.toBeNull();
+    expect(container.textContent).not.toContain("日本時間");
+    expect(container.textContent).not.toContain("保存済みアーカイブを表示しています");
+  });
+
+  it("公式データ取得失敗時はアーカイブ表示を通知する", async () => {
+    mockNewsResponse([createNews(1)], 200, {
+      "X-KF3-News-Source": "archive-fallback",
+      "X-KF3-News-Fetched-At": "2026-08-09T12:34:56.789Z",
+    });
+
+    mount();
+    await waitForText("公式データを利用できなかったため、保存済みアーカイブを表示しています。");
+
+    expect(container.querySelectorAll("li")).toHaveLength(1);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("metadataがない旧形式データは日時を不明として表示する", async () => {
+    mockNewsResponse([createNews(1)]);
+
+    mount();
+    await waitForText("データ取得: 不明");
+
+    expect(container.textContent).not.toContain("保存済みアーカイブを表示しています");
   });
 
   it("keyword、日付、sort順を画面操作から適用する", async () => {
