@@ -66,8 +66,10 @@ Workers FreeのCron Triggerは1回あたりCPU 10msが上限である。この�
 
 ## ロールバック
 
+復元操作の具体的な手順は [ニュースアーカイブ条件付き復元runbook](./news-archive-restore-runbook.md) を参照する。
+
 - HTTP API、legacy route、Worker exportにregressionがある場合は、反映直前に記録した正常なWorker versionへ戻す。
-- `archive/current.json`だけが不正な場合は、復元ツールをdry-runし、account、snapshot digest、current ETagを確認してから明示的にapplyする。
-- 復元applyは正常snapshotを最新ETag条件でcurrentへ戻し、成功後だけKVを削除する。条件不一致の場合は無条件上書きせず、最新のdry-runからやり直す。
-- R2から復元できない場合だけ、APIの読み込み先をlegacyデータへ戻すコード変更を行う。
+- `archive/current.json`だけが不正な場合は、復元runbookに従ってaccount、snapshot digest、current ETagを確認してから復元する。
+- 条件不一致や復元競合では無条件上書きを行わず、最新のdry-runからやり直す。
+- R2から復元できない場合だけ、APIの読み込み先をlegacyデータへ戻すコード変更を検討する。
 - backup snapshotとlegacy objectは削除しない。

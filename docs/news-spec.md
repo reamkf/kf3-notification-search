@@ -17,6 +17,7 @@
 - [定期実行更新仕様](./news-archive-scheduled-spec.md) はCron実行、currentとバックアップの更新、公式データの安全性検証、heartbeat、構造化ログを扱う。
 - [ニュースアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) は、両方の処理にまたがる条件付き取得の実装上の最適化を扱う。
 - [ニュースアーカイブ導入状態](./news-archive-rollout.md) は、本番外部状態と受け入れ確認の記録を扱う。
+- [ニュースアーカイブ条件付き復元runbook](./news-archive-restore-runbook.md) は、復元操作の手順を扱う。
 
 ## 共通の境界
 
@@ -100,12 +101,12 @@
 
 定期実行とページリクエストが公式データを採用する際は、公式配信元の契約とは別に、Worker側で次の安全性検証を行う。
 
-| 制約                       |    現在値 | 目的                             |
-| -------------------------- | --------: | -------------------------------- |
-| レスポンス本文の最大サイズ |    10 MiB | 異常に大きい応答を早期に停止する |
-| 公式レスポンス取得時間     |      10秒 | 停止した応答からfallbackする     |
-| 公式データの最小件数       |   1,900件 | 部分取得や大幅な欠落を検知する   |
-| 1回で変更できる既存ID      | 100件まで | 大量改変を検知する               |
+| 定数                               | 現在値             | 制約                       | 目的                             |
+| ---------------------------------- | ------------------ | -------------------------- | -------------------------------- |
+| `MAX_OFFICIAL_RESPONSE_BYTES`      | `10 * 1024 * 1024` | レスポンス本文の最大サイズ | 異常に大きい応答を早期に停止する |
+| `OFFICIAL_FETCH_TIMEOUT_MS`        | `10_000`           | 公式レスポンス取得時間     | 停止した応答からfallbackする     |
+| `MIN_OFFICIAL_ENTRY_COUNT`         | `1_900`            | 公式データの最小件数       | 部分取得や大幅な欠落を検知する   |
+| `MAX_UPDATED_EXISTING_ENTRY_COUNT` | `100`              | 変更できる既存IDの最大数   | 大量改変を検知する               |
 
 さらに、次を確認する。
 
@@ -121,7 +122,7 @@
 
 ## 復元仕様
 
-復元機能は本番Workerの公開APIではない。`wrangler.restore.toml`でlocalhost専用Workerを起動し、remote binding経由で本番R2とKVを操作する。復元Worker自体はデプロイしない。
+復元機能は本番Workerの公開APIではない。`wrangler.restore.toml`でlocalhost専用Workerを起動し、remote binding経由で本番R2とKVを操作する。復元Worker自体はデプロイしない。実際の操作手順は [ニュースアーカイブ条件付き復元runbook](./news-archive-restore-runbook.md) を参照する。
 
 復元APIは`POST http://127.0.0.1:8790/restore`で、`daily/...json`または`monthly/...json`のスナップショットだけを受け付ける。日次キーは`daily/YYYY/MM/DD/<filename>.json`、月次キーは`monthly/YYYY-MM.json`に限定し、日次の`filename`には英数字、ピリオド、アンダースコア、ハイフンだけを許可する。request URLのhostnameが`localhost`、`127.0.0.1`、`[::1]`のいずれでもない場合は拒否する。
 

@@ -155,6 +155,39 @@ heartbeatはHTTP POSTで送信する。ping URLの末尾の`/`は取り除いて
 
 失敗ログには処理段階とエラー詳細を含めるが、公式レスポンス本文やheartbeat URL、ETag値は含めない。汎用エラーの詳細には`originalError`としてnameとmessageだけを含める。制御文字と改行を空白へ正規化し、URL、Authorization、Bearer、一般的なtoken・secret・password形式、JWTと既知のtoken prefixをredactした後、nameを100文字、messageを500文字までに制限する。stack、cause、独自プロパティは含めず、非`Error`値は任意に文字列化せず固定値で記録する。
 
+## 公式データの閾値と障害調査
+
+閾値の正式な値と検証内容は、[ニュース機能共通仕様の公式データ利用時の安全性検証](./news-spec.md#公式データ利用時の安全性検証) を参照する。この節では、閾値超過や公式取得失敗が発生したときの調査方法だけを定義する。
+
+scheduled更新に失敗した場合は、Workers Logsの`news_archive_update_failed`を確認し、次の項目を順に見る。
+
+- `stage`
+- `error`
+- `details`
+- `details.dataDetails.thresholdName`
+- `details.dataDetails.configuredValue`
+- `details.dataDetails.actualValue`
+
+`NewsDataError`由来の閾値情報は`details.dataDetails`に入る。公式レスポンスの本文サイズ超過では、`details.contentLength`、`details.actualBytes`、`details.maxBytes`を確認する。
+
+| 事象                                   | 確認する内容                                               |
+| -------------------------------------- | ---------------------------------------------------------- |
+| 公式データの件数不足                   | `stage`、`thresholdName`、`configuredValue`、`actualValue` |
+| 既存IDの変更件数超過                   | `stage`、`thresholdName`、`configuredValue`、`actualValue` |
+| `Content-Length`または実本文サイズ超過 | `stage`、`contentLength`、`actualBytes`、`maxBytes`        |
+| 取得タイムアウト                       | `stage`、`error`、公式取得タイムアウト設定                 |
+| JSON解析または構造検証失敗             | `stage`、`error`、`details`                                |
+
+Healthchecks.ioはCron失敗やCron欠落の通知に使用し、Workers Logsは原因調査に使用する。公式本文、`HEALTHCHECKS_PING_URL`、ETag値などの秘密情報はログに記録しない。
+
+閾値を変更する場合は、次の順で確認する。
+
+1. 公式レスポンスの件数、byte数、ID一意性、URL、日付、既存ID変更数を確認する。
+2. 公式仕様の変更か、部分取得、破損、改ざんかを切り分ける。
+3. 定数と対応するunit testを同じ変更で更新する。
+4. 全検証gateとlocal scheduled testを実行する。
+5. deploy後にstructured logを確認する。
+
 ## 304とETag stateの保存順序
 
 公式ETag stateは、次の処理がすべて完了した後に保存する。
