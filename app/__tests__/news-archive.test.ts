@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   KVNamespace,
   R2Bucket,
+  R2Conditional,
   R2Object,
   R2ObjectBody,
+  R2PutOptions,
 } from "@cloudflare/workers-types/experimental";
 import {
   CURRENT_ARCHIVE_KEY,
@@ -78,13 +80,14 @@ const streamFromChunks = (chunks: Uint8Array[], onCancel?: () => void) =>
   });
 
 type FakeStoredObject = { text: string; etag: string };
+type PutOptions = {
+  onlyIf?: R2Conditional | Headers;
+  httpMetadata?: R2PutOptions["httpMetadata"];
+};
 type PutCall = {
   key: string;
   value: unknown;
-  options?: {
-    onlyIf?: Record<string, string>;
-    httpMetadata?: { contentType?: string };
-  };
+  options?: PutOptions;
 };
 
 const createMutableBucket = (
@@ -93,6 +96,8 @@ const createMutableBucket = (
   timeline: string[],
   options: {
     failPutKeys?: Set<string>;
+    putErrors?: Map<string, unknown>;
+    concurrentPutObjects?: Map<string, FakeStoredObject>;
     nullPutKeys?: Set<string>;
     putCalls?: PutCall[];
   } = {},
@@ -122,15 +127,26 @@ const createMutableBucket = (
       const object = objects.get(key);
       return object ? ({ etag: object.etag } as unknown as R2Object) : null;
     },
-    put: async (key: string, value: unknown, putOptions?: PutCall["options"]) => {
+    put: async (key: string, value: unknown, putOptions?: PutOptions) => {
       timeline.push(`${label}:put:${key}`);
       options.putCalls?.push({ key, value, options: putOptions });
+      if (options.putErrors?.has(key)) throw options.putErrors.get(key);
       if (options.failPutKeys?.has(key)) throw new Error(`put failed: ${key}`);
       if (options.nullPutKeys?.has(key)) return null;
+      const concurrentObject = options.concurrentPutObjects?.get(key);
+      if (concurrentObject) objects.set(key, concurrentObject);
       const existing = objects.get(key);
       const onlyIf = putOptions?.onlyIf;
-      if (onlyIf?.etagDoesNotMatch === "*" && existing) return null;
-      if (onlyIf?.etagMatches && (!existing || existing.etag !== onlyIf.etagMatches)) return null;
+      if (onlyIf instanceof Headers) {
+        if (onlyIf.get("If-None-Match") === "*" && existing) return null;
+      } else if (onlyIf) {
+        if (onlyIf.etagMatches && (!existing || existing.etag !== onlyIf.etagMatches)) {
+          return null;
+        }
+        if (onlyIf.etagDoesNotMatch && existing?.etag === onlyIf.etagDoesNotMatch) {
+          return null;
+        }
+      }
       const etag = `${label}-etag-${nextEtag++}`;
       objects.set(key, { text: typeof value === "string" ? value : "", etag });
       return { etag } as unknown as R2Object;
@@ -168,6 +184,11 @@ const asStoredObject = (value: unknown, etag: string): FakeStoredObject => ({
   text: JSON.stringify(value),
   etag,
 });
+
+const expectCreateIfAbsent = (onlyIf: PutOptions["onlyIf"]) => {
+  expect(onlyIf).toBeInstanceOf(Headers);
+  expect((onlyIf as unknown as Headers).get("If-None-Match")).toBe("*");
+};
 
 const createSortedDocument = (count: number) => ({
   news: createDocument(count).news.reverse(),
@@ -243,8 +264,35 @@ describe("アーカイブ読み込み", () => {
       },
     } as unknown as R2Bucket;
 
-    await expect(readArchive(bucket)).rejects.toMatchObject({ stage: "archive-read" });
+    await expect(readArchive(bucket)).rejects.toMatchObject({
+      stage: "archive-read",
+      details: {
+        sourceKey: CURRENT_ARCHIVE_KEY,
+        originalError: { name: "Error", message: "current get failed" },
+      },
+    });
     expect(calls).toEqual([CURRENT_ARCHIVE_KEY]);
+  });
+
+  it("archive-readの汎用Errorも秘密値を除去して記録する", async () => {
+    const bucket = {
+      get: async () => {
+        throw new Error(
+          "request https://example.com/private?token=read-secret Authorization: Bearer auth-secret",
+        );
+      },
+    } as unknown as R2Bucket;
+
+    await expect(readArchive(bucket)).rejects.toMatchObject({
+      stage: "archive-read",
+      details: {
+        sourceKey: CURRENT_ARCHIVE_KEY,
+        originalError: {
+          name: "Error",
+          message: "request [REDACTED_URL] Authorization: [REDACTED]",
+        },
+      },
+    });
   });
 
   it("current本文の読み込み失敗時はlegacyへfallbackしない", async () => {
@@ -259,7 +307,13 @@ describe("アーカイブ読み込み", () => {
       },
     } as unknown as R2Bucket;
 
-    await expect(readArchive(bucket)).rejects.toMatchObject({ stage: "archive-read" });
+    await expect(readArchive(bucket)).rejects.toMatchObject({
+      stage: "archive-read",
+      details: {
+        sourceKey: CURRENT_ARCHIVE_KEY,
+        originalError: { name: "Error", message: "current text failed" },
+      },
+    });
     expect(calls).toEqual([CURRENT_ARCHIVE_KEY]);
   });
 
@@ -280,7 +334,10 @@ describe("アーカイブ読み込み", () => {
 
     await expect(readArchive(bucket)).rejects.toMatchObject({
       stage: "archive-read",
-      details: { sourceKey: LEGACY_ARCHIVE_KEY },
+      details: {
+        sourceKey: LEGACY_ARCHIVE_KEY,
+        originalError: { name: "Error", message: "legacy get failed" },
+      },
     });
   });
 });
@@ -506,6 +563,7 @@ describe("アーカイブ更新トランザクション", () => {
     official = createDocument(MIN_OFFICIAL_ENTRY_COUNT),
     backupOptions: {
       failPutKeys?: Set<string>;
+      putErrors?: Map<string, unknown>;
       nullPutKeys?: Set<string>;
       initial?: Record<string, FakeStoredObject>;
       putCalls?: PutCall[];
@@ -513,6 +571,7 @@ describe("アーカイブ更新トランザクション", () => {
     cacheFailure = false,
     dataOptions: {
       failPutKeys?: Set<string>;
+      putErrors?: Map<string, unknown>;
       nullPutKeys?: Set<string>;
       putCalls?: PutCall[];
       initial?: Record<string, FakeStoredObject>;
@@ -589,24 +648,23 @@ describe("アーカイブ更新トランザクション", () => {
         },
       },
     ]);
-    expect(backupPuts).toEqual([
-      {
-        key: result.dailyBackupKey,
-        value: originalText,
-        options: {
-          onlyIf: { etagDoesNotMatch: "*" },
-          httpMetadata: { contentType: "application/json; charset=utf-8" },
-        },
+    expect(backupPuts).toHaveLength(2);
+    expect(backupPuts[0]).toMatchObject({
+      key: result.dailyBackupKey,
+      value: originalText,
+      options: {
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
       },
-      {
-        key: result.monthlyBackupKey,
-        value: dataPuts[0].value,
-        options: {
-          onlyIf: { etagDoesNotMatch: "*" },
-          httpMetadata: { contentType: "application/json; charset=utf-8" },
-        },
+    });
+    expectCreateIfAbsent(backupPuts[0].options?.onlyIf);
+    expect(backupPuts[1]).toMatchObject({
+      key: result.monthlyBackupKey,
+      value: dataPuts[0].value,
+      options: {
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
       },
-    ]);
+    });
+    expectCreateIfAbsent(backupPuts[1].options?.onlyIf);
   });
 
   it("stateとcurrentのETagが一致すると公式304を採用し、本文処理を省略する", async () => {
@@ -804,7 +862,11 @@ describe("アーカイブ更新トランザクション", () => {
     const setup = createDependencies(
       asStoredObject(createDocument(1), "current-read-etag"),
       createDocument(MIN_OFFICIAL_ENTRY_COUNT),
-      { nullPutKeys: new Set([dailyKey]) },
+      {
+        initial: {
+          [dailyKey]: { text: "existing daily", etag: "daily-etag" },
+        },
+      },
     );
     await expect(updateNewsArchive(setup.dependencies)).rejects.toMatchObject({
       stage: "daily-backup",
@@ -932,7 +994,43 @@ describe("アーカイブ更新トランザクション", () => {
     expect(timeline[1]).toBe(`data:get:${LEGACY_ARCHIVE_KEY}`);
     expect(timeline).toContain(`data:put:${CURRENT_ARCHIVE_KEY}`);
     expect(timeline).toContain(`backup:put:${result.dailyBackupKey}`);
-    expect(dataPuts[0].options?.onlyIf).toEqual({ etagDoesNotMatch: "*" });
+    expectCreateIfAbsent(dataPuts[0].options?.onlyIf);
+  });
+
+  it("current初回作成の競合時は既存currentを上書きしない", async () => {
+    const timeline: string[] = [];
+    const concurrentCurrent = asStoredObject(createDocument(2), "concurrent-etag");
+    const dataBucket = createMutableBucket(
+      "data",
+      {
+        [LEGACY_ARCHIVE_KEY]: asStoredObject(
+          createSortedDocument(MIN_OFFICIAL_ENTRY_COUNT),
+          "legacy-etag",
+        ),
+      },
+      timeline,
+      {
+        concurrentPutObjects: new Map([[CURRENT_ARCHIVE_KEY, concurrentCurrent]]),
+      },
+    );
+    const backupBucket = createMutableBucket("backup", {}, timeline);
+    const logger = createLogger();
+
+    await expect(
+      updateNewsArchive({
+        dataBucket,
+        backupBucket,
+        cache: createTransactionCache(timeline),
+        fetcher: createTransactionFetcher(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+        nowMs: transactionNowMs,
+        logger: logger.logger,
+      }),
+    ).rejects.toMatchObject({ stage: "etag-conflict" });
+
+    const storedCurrent = await dataBucket.get(CURRENT_ARCHIVE_KEY);
+    expect(await storedCurrent?.text()).toBe(concurrentCurrent.text);
+    expect(timeline).not.toContain("cache:delete:kf3-news");
+    expect(timeline).not.toContain(`backup:put:${buildBackupKeys(transactionNowMs).monthlyKey}`);
   });
 
   it("monthly backup失敗時はcurrentを巻き戻さず、失敗を返す", async () => {
@@ -943,10 +1041,109 @@ describe("アーカイブ更新トランザクション", () => {
     });
     await expect(updateNewsArchive(setup.dependencies)).rejects.toMatchObject({
       stage: "monthly-backup",
+      details: {
+        key: monthlyKey,
+        originalError: { name: "Error", message: `put failed: ${monthlyKey}` },
+      },
     });
     expect(setup.timeline).toContain(`data:put:${CURRENT_ARCHIVE_KEY}`);
     expect(setup.timeline).toContain("cache:delete:kf3-news");
     expect(setup.timeline).toContain(`backup:put:${monthlyKey}`);
+    expect(setup.timeline.some((entry) => entry.includes(":head:"))).toBe(false);
+    expect(setup.logger.errors[0]).toMatchObject({
+      event: "news_archive_update_failed",
+      stage: "monthly-backup",
+      details: {
+        key: monthlyKey,
+        originalError: { name: "Error", message: `put failed: ${monthlyKey}` },
+      },
+    });
+  });
+
+  it("monthlyの条件付きPUT競合は既存扱いにする", async () => {
+    const current = asStoredObject(createDocument(1), "current-read-etag");
+    const monthlyKey = buildBackupKeys(transactionNowMs).monthlyKey;
+    const setup = createDependencies(current, createDocument(MIN_OFFICIAL_ENTRY_COUNT), {
+      nullPutKeys: new Set([monthlyKey]),
+    });
+    const result = await updateNewsArchive(setup.dependencies);
+    expect(result.monthlyBackupStatus).toBe("existing");
+    expect(setup.timeline).toContain(`backup:put:${monthlyKey}`);
+    expect(setup.timeline.some((entry) => entry.includes(":head:"))).toBe(false);
+  });
+
+  it("汎用Errorの秘密値と制御文字を除去し、長さを制限する", async () => {
+    const secretValues = [
+      "url-secret",
+      "authorization-secret",
+      "api-key-secret",
+      "plain-token",
+      "jwt-payload-secret",
+      "github_pat_exampleSecret",
+    ];
+    const unsafeError = new Error(
+      [
+        "request https://user:url-secret@example.com/path?token=url-secret",
+        "Authorization: Bearer authorization-secret",
+        "api_key=api-key-secret",
+        "token=plain-token",
+        "abcdefgh.jwt-payload-secret.ijklmnop",
+        "github_pat_exampleSecret",
+        "line1\r\nline2\0",
+        "x".repeat(600),
+      ].join(" "),
+    );
+    unsafeError.name = `Remote\nError${"n".repeat(120)}`;
+    const setup = createDependencies(
+      asStoredObject(createDocument(1), "current-read-etag"),
+      createDocument(MIN_OFFICIAL_ENTRY_COUNT),
+      {},
+      false,
+      { putErrors: new Map([[CURRENT_ARCHIVE_KEY, unsafeError]]) },
+    );
+
+    await expect(updateNewsArchive(setup.dependencies)).rejects.toMatchObject({
+      stage: "archive-write",
+    });
+
+    const details = setup.logger.errors[0].details as Record<string, unknown>;
+    const originalError = details.originalError as { name: string; message: string };
+    expect(originalError.name).toHaveLength(100);
+    expect(originalError.name.endsWith("…")).toBe(true);
+    expect(originalError.message).toHaveLength(500);
+    expect(originalError.message.endsWith("…")).toBe(true);
+    expect(originalError.message).toContain("[REDACTED_URL]");
+    expect(originalError.message).toContain("[REDACTED]");
+    expect(originalError.message).toContain("[REDACTED_TOKEN]");
+    expect(originalError.message).not.toContain("\r");
+    expect(originalError.message).not.toContain("\n");
+    expect(originalError.message).not.toContain("\0");
+    const serialized = JSON.stringify(setup.logger.errors[0]);
+    for (const secret of secretValues) expect(serialized).not.toContain(secret);
+  });
+
+  it("非Errorのthrowを文字列化せず固定値で記録する", async () => {
+    const toString = vi.fn(() => "must-not-appear");
+    const thrownValue = { token: "object-secret", toString };
+    const setup = createDependencies(
+      asStoredObject(createDocument(1), "current-read-etag"),
+      createDocument(MIN_OFFICIAL_ENTRY_COUNT),
+      {},
+      false,
+      { putErrors: new Map([[CURRENT_ARCHIVE_KEY, thrownValue]]) },
+    );
+
+    await expect(updateNewsArchive(setup.dependencies)).rejects.toMatchObject({
+      stage: "archive-write",
+      details: {
+        originalError: {
+          name: "NonErrorThrown",
+          message: "A non-Error value was thrown",
+        },
+      },
+    });
+    expect(toString).not.toHaveBeenCalled();
+    expect(JSON.stringify(setup.logger.errors[0])).not.toContain("object-secret");
   });
 
   it("公式データの失敗ではwriteとdeleteを実行しない", async () => {
