@@ -110,7 +110,7 @@ const filterNewsByKeyword = (newsArray: Array<News>, query: string) => {
     });
   } catch (error) {
     console.error("Query parsing error:", error);
-    // エラー時は単純な部分一致検索にフォールバック
+    // 評価処理の例外時は単純な部分一致検索にフォールバック
     return newsArray.filter((news) => {
       const normalizedTitle = normalizeQuery(news.title);
       return normalizedTitle.includes(normalizedQuery);

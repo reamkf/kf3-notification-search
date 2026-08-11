@@ -44,7 +44,7 @@ const findProductionData = async (temporaryFile) => {
       const value = JSON.parse(await readFile(temporaryFile, "utf8"));
       if (isNewsDocument(value)) return key;
     } catch {
-      // Try the legacy object when the current object is invalid.
+      // Try the next key when the object cannot be fetched, parsed, or recognized as a news document.
     }
   }
   return null;

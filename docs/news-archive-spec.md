@@ -140,8 +140,9 @@ flowchart TD
     FullFetch --> Read
     ConditionalFetch -->|304| MonthlyCheck[当月monthlyをHEADする]
     MonthlyCheck -->|存在| Log304[304結果を記録]
-    MonthlyCheck -->|欠落| StreamCurrent[currentをETag条件付き取得]
-    StreamCurrent --> MonthlyCreate[currentのraw bodyをmonthlyへ保存]
+    MonthlyCheck -->|欠落| CurrentIfEtag[currentをETag条件付き取得]
+    CurrentIfEtag -->|ETag一致| MonthlyCreate[currentのraw bodyをmonthlyへ保存]
+    CurrentIfEtag -->|nullまたは不一致| FullFetch
     Read --> Validate[構造検証してIDで統合する]
     Validate --> Changed{currentがない、または内容変更あり}
     Changed -->|はい| Daily[更新前データをdailyへ保存]
@@ -167,7 +168,7 @@ flowchart TD
 9. 読み込み時のETagを条件に`archive/current.json`を更新する。初回作成時は、currentが存在しないことを条件にする。
 10. current更新に成功した後でKVの`kf3-news`を削除する。
 11. 当月の月次バックアップを条件付きで新規作成する。すでに存在する場合は内容を再取得しない。条件不一致の場合は既存として扱い、本文を取得しない。
-12. 200経路ではmonthly完了後に、公式strong ETagと確定済みcurrentのR2 raw ETagをstateへCAS保存する。state保存の失敗・競合でarchiveを巻き戻さない。成否と処理結果を構造化ログへ記録する。
+12. 200経路ではmonthly完了後に、公式strong ETagと確定済みcurrentのR2 raw ETagをstateへCAS保存する。state保存の失敗・競合でarchiveを巻き戻さず、結果の`etagStateStatus`へ反映して処理結果を構造化ログへ記録する。state保存専用のwarningログは出さない。
 
 currentがまだなく、legacyデータから移行する初回実行では、統合結果がlegacyと同じでも更新ありとして扱う。これにより、更新前legacyの日次バックアップと`archive/current.json`を作成する。
 
@@ -188,8 +189,9 @@ currentがまだなく、legacyデータから移行する初回実行では、�
 
 - キーは`monthly/YYYY-MM.json`とし、年月はJSTで判定する。
 - 各月で最初に正常に到達した実行が、本番反映済みのアーカイブを保存する。
-- 同じ月のオブジェクトは上書きしない。事前の`head()`や`get()`は行わず、毎回`If-None-Match: *`の条件付きPUTを1回だけ実行する。
-- PUTが`R2Object`を返した場合は新規作成、条件不一致で`null`を返した場合は保存済みとして扱い、既存本文は取得しない。
+- 200または条件なしのfull経路では、同じ月のオブジェクトを上書きしないため、事前の`head()`や`get()`は行わず、毎回`If-None-Match: *`の条件付きPUTを1回だけ実行する。
+- 304経路では先に当月monthlyを`head()`し、存在すればPUTしない。欠落時だけcurrentをstateのETagで条件付き取得し、ETag一致時のraw bodyをmonthlyへ保存する。条件付き取得が`null`または不一致ならfull経路へ戻る。
+- full経路のPUTが`R2Object`を返した場合は新規作成、条件不一致で`null`を返した場合は保存済みとして扱い、既存本文は取得しない。304経路も条件付きPUTの`null`を保存済みとして扱う。
 - currentの内容変更がない実行でも、月次バックアップが欠けていれば作成する。
 
 日次および月次バックアップの内容は、復元dry-runまたは運用上の完全性監査で厳密に検証する。
@@ -324,7 +326,7 @@ KV削除に失敗した場合は、currentがすでに復元済みであるこ�
 
 ## 導入状態と対象外
 
-このブランチにはscheduled handler、Cron設定、バックアップbinding、監視、復元ツールが含まれる。Workers Freeを継続し、Cron Triggerは1本だけ登録する方針と本番登録は完了しているが、CPU制限への適合確認と初回実行後の受け入れ確認は未完了である。したがって、本仕様はコードとリポジトリ設定が提供する振る舞いを示すものであり、本番Cronの初回実行と受け入れが完了していることを意味しない。現在の外部状態、保留理由、再開手順、未完了の受け入れ条件は [ニュースアーカイブ導入状態](./news-archive-rollout.md) に記載する。
+このブランチにはscheduled handler、Cron設定、バックアップbinding、監視、復元ツールが含まれる。Workers Freeを継続し、Cron Triggerは1本だけ登録する方針である。本仕様はコードとリポジトリ設定が提供する振る舞いを示すものであり、現HEADが本番Workerへ反映済みであること、本番Cronが登録済みであること、初回実行や受け入れが完了していることを保証しない。現在の外部状態、保留理由、再開手順、未完了の受け入れ条件は [ニュースアーカイブ導入状態](./news-archive-rollout.md) に記載する。
 
 次は本変更の対象外とする。
 

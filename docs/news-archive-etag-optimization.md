@@ -1,20 +1,23 @@
-# ニュースアーカイブETag条件付き取得案
+# ニュースアーカイブETag条件付き取得の実装仕様
 
 ## 状態
 
-本書は、日次scheduled処理とページリクエストのKV cache missで公式ETagを利用する実装仕様である。コードへの反映は完了しているが、本番Workerでの304応答、CPU時間、304率の受け入れ確認は未完了であり、運用状態は [ニュースアーカイブ導入状態](./news-archive-rollout.md) を参照する。
+本書は、日次scheduled処理とページリクエストのKV cache missで公式ETagを利用する現行実装の仕様を示す。コードへの反映は完了しているが、本番Workerでの304応答、CPU時間、304率の受け入れ確認は未完了であり、運用状態は [ニュースアーカイブ導入状態](./news-archive-rollout.md) を参照する。
 
 ## 目的
 
 公式配信元のETagと`If-None-Match`を利用し、公式データが前回の正常処理から変わっていない場合に、scheduled処理とページリクエストのKV cache missで本文処理を省略する。KV cache hitは従来どおり外部I/Oを行わない。
 
-304経路では次を行わない。
+scheduledの304経路では次を行わない。
 
 - 公式レスポンス本文の読み込みとUTF-8デコード
 - 公式JSONの解析と検証
 - `archive/current.json`本文の読み込み、JSON解析、検証
 - 累積アーカイブと公式データのID統合とdeep equality比較
 - 統合結果のソートとJSONシリアライズ
+- 日次バックアップ、current更新、KV削除
+
+APIのKV cache missで304を受けた場合は、公式本文を読まずに`archive/current.json`を同じETagで条件付き取得する。current本文は保存用shapeを検証してクライアント用配列へ投影し、KVへ保存するため、scheduledの304とは異なりcurrent本文を読み込む。
 
 Cron Triggerの頻度、日次バックアップと月次バックアップの意味、`archive/current.json`の更新条件は変更しない。
 
@@ -34,7 +37,7 @@ Cron Triggerの頻度、日次バックアップと月次バックアップの�
 | 変更なし処理のp95    | 6.32ms                   |
 | 変更なし処理の最大値 | 8.04ms                   |
 
-公式データが変更された日の200経路は現行と同等の処理を必要とする。したがって、全体の効果は304となる日の割合に依存し、導入後のログから評価する。
+公式データが変更された日の200経路は現行と同等の処理を必要とする。したがって、全体の効果は304となる日の割合に依存し、導入後のログから評価する。上記の件数、byte数、ベンチマーク値は調査時点の参考値であり、現行データやWorkers本番のCPU時間を保証するものではない。
 
 ## 設計方針
 
@@ -95,7 +98,8 @@ flowchart TD
     FullFetch --> FullProcess
     CheckMonthly -->|存在する| Skip[本文処理を省略して正常終了]
     CheckMonthly -->|存在しない| StreamCurrent[current本文を条件付き取得]
-    StreamCurrent --> Monthly[current本文を解析せずmonthlyへ保存]
+    StreamCurrent -->|ETag一致| Monthly[current本文を解析せずmonthlyへ保存]
+    StreamCurrent -->|nullまたは不一致| FullFetch
     Monthly --> Skip
     FullProcess --> SaveState[全必須処理の後に状態を保存]
     SaveState --> Done[正常終了]
@@ -144,7 +148,7 @@ APIが304を受け取った場合は公式本文を読み込まず、currentを�
 
 統合結果に変更がない場合も、公式レスポンスのETagと読み込み済み`current`のETagを状態へ保存する。公式のキー順や未知フィールド表現だけが変わり、統合結果が同一だった場合も、次回から新しいETagで条件付き取得できるようにする。
 
-状態PUTには、読み込み時の状態オブジェクトETagを使用する。状態が未作成の場合は存在しないことを条件にする。競合または保存失敗はアーカイブの正しさへ影響しないため、秘密値を含まない警告ログを残し、次回の完全処理へ委ねる。
+状態PUTには、読み込み時の状態オブジェクトETagを使用する。状態が未作成の場合は存在しないことを条件にする。競合または保存失敗はアーカイブの正しさへ影響しないため、archiveを巻き戻さず、成功ログの`etagStateStatus`へ反映して次回の完全処理へ委ねる。状態保存専用のwarningログは出さない。
 
 ## 失敗時の扱い
 
@@ -158,7 +162,7 @@ APIが304を受け取った場合は公式本文を読み込まず、currentを�
 | 条件付きGETが304と200以外            | 現行の公式取得失敗としてR2とKVを変更しない                                |
 | current更新前に処理が失敗            | 状態を更新しない                                                          |
 | current更新後にKVまたはmonthlyが失敗 | 状態を更新しない。次回は完全処理または`current`のETag不一致から再確認する |
-| 状態の保存が失敗または競合           | currentを巻き戻さず警告し、次回の完全処理へ委ねる                         |
+| 状態の保存が失敗または競合           | currentを巻き戻さず`etagStateStatus`へ記録し、次回の完全処理へ委ねる      |
 
 状態をcurrent更新より先に保存してはならない。先に保存すると、currentへ反映されなかった公式ETagに対して翌日の取得が304となり、未反映の変更を省略する可能性がある。
 
@@ -170,7 +174,7 @@ APIが304を受け取った場合は公式本文を読み込まず、currentを�
 
 ## ログと計測
 
-更新成功ログへ次を追加する。ETag値自体は、調査に不要なため通常ログへ出力しない。
+更新成功ログには次を含む。ETag値自体は、調査に不要なため通常ログへ出力しない。
 
 | フィールド                | 値                                                |
 | ------------------------- | ------------------------------------------------- |
@@ -178,14 +182,14 @@ APIが304を受け取った場合は公式本文を読み込まず、currentを�
 | `conditionalRequestUsed`  | 条件付きGETを送ったか                             |
 | `currentEtagMatchedState` | 状態と`current`のETagが一致したか                 |
 | `officialBodyProcessed`   | 公式本文を読み込み、解析したか                    |
-| `monthlyBackupStatus`     | `created`、`existing`、または`not-checked`        |
+| `monthlyBackupStatus`     | `created`または`existing`                         |
 | `etagStateStatus`         | `saved`、`unchanged`、`unavailable`、`conflicted` |
 
 Workers Invocation LogsのCPU時間を`officialFetchStatus`別に集計する。導入前後の比較では経過時間ではなくCPU時間を使用する。
 
-## テスト方針
+## テスト・受入の確認観点
 
-既存の`app/__tests__/news-archive.test.ts`と`app/__tests__/server.test.ts`へ次を追加する。
+実装の回帰テストと本番受入では、次の観点を確認対象とする。
 
 - 状態と`current`のETagが一致すると`If-None-Match`が送られる。
 - 304では公式本文とcurrent本文を読み込まず、統合、日次保存、current PUT、KV削除を行わない。
@@ -215,15 +219,15 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`別に集計する。
 - 本番相当データで304経路がWorkers FreeのCPU上限10ms以内に収まる。
 - 304率を少なくとも14日間記録し、最適化の実効性を評価できる。
 
-## 実装対象
+## 実装箇所と検証対象
 
-主な変更対象は次のとおり。
+主な実装箇所と関連文書は次のとおり。
 
 - `app/news-archive.ts`: 公式取得結果の200、304分岐、状態の読み書き、current HEAD、scheduled 304経路
 - `app/server.ts`: API cache missの条件付き取得、304時のcurrent投影、fallback
 - `app/__tests__/news-archive.test.ts`: 状態、条件付き取得、処理順、失敗経路のテスト
 - `app/__tests__/server.test.ts`: APIのKV hit/miss、304、競合、fallback、scheduled/heartbeatの回帰テスト
-- `docs/news-archive-spec.md`: 実装完了後に確定仕様を反映
-- `docs/news-archive-rollout.md`: 本番受け入れ状態とCPU計測結果を反映
+- `docs/news-archive-spec.md`: 現行実装の確定仕様
+- `docs/news-archive-rollout.md`: 本番受け入れ状態とCPU計測結果の確認記録
 
-新しいpackageやCron Triggerは追加しない。
+本実装では新しいpackageやCron Triggerを追加しない。

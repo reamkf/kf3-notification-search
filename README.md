@@ -113,7 +113,7 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 
 ### 6. テストとデプロイ
 
-本番Workerにはニュースアーカイブのコードが反映済みで、`15 18 * * *`のCron Triggerを1本登録済みです。追加のCronは作成せず、初回scheduled実行後にCPU時間と運用状態を確認します。詳細は [ニュースアーカイブ導入状態](./docs/news-archive-rollout.md) を参照してください。
+リポジトリにはニュースアーカイブのscheduled handler、binding、Healthchecks処理、`15 18 * * *`のCron設定が含まれます。現HEADの本番Workerへの反映、対象WorkerへのCron登録、初回・次回実行、CPU時間、304率などの外部状態はリポジトリだけでは確認できません。確認済みの外部状態と未完了の受入項目は [ニュースアーカイブ導入状態](./docs/news-archive-rollout.md) を参照してください。
 
 ```bash
 bun run test
@@ -140,39 +140,67 @@ bun run deploy
 
 ## お知らせ一覧取得フロー
 
-Cronの更新は保存用検証、統合、決定的ソートを使用します。APIのcache missは同じ検証と統合を使用しますが、ソートせず入力順を維持します。
+### ユーザーのページGET時
+
+`GET /api/kf3-news`は、最初にKV valueの存在を確認します。cache missでは公式ETag stateと`archive/current.json`のR2 ETagを並行して確認し、条件付き取得を使える場合だけ公式strong ETagを`If-None-Match`へ指定します。
 
 ```mermaid
 flowchart TD
-    Cron[scheduled: daily Cron] --> ReadCurrent[Read archive/current.json]
-    ReadCurrent -->|missing only| ReadLegacy[Read entries_merged_20241107.json]
-    ReadCurrent --> OfficialCron[Fetch official entries.txt]
-    ReadLegacy --> OfficialCron
-    OfficialCron --> ValidateCron[Validate size, schema, thresholds, dates]
-    ValidateCron --> MergeCron[Merge with official data preferred]
-    MergeCron --> Daily[Conditional daily backup in KF3_NOTIF_BACKUP]
-    Daily --> Current[Conditional ETag update archive/current.json]
-    Current --> DeleteCache[Delete KV kf3-news]
-    DeleteCache --> Monthly[Ensure monthly backup in KF3_NOTIF_BACKUP]
-
-    Browser[Browser] --> API[GET /api/kf3-news]
-    API --> Cache{Valid KV cache?}
-    Cache -->|yes| Client[Top-level client array]
-    Cache -->|no| ReadApi[Read current or legacy archive]
-    ReadApi --> OfficialApi[Fetch official entries.txt in parallel]
-    OfficialApi --> MergeApi[Validate and merge]
-    MergeApi --> Cache300[KV cache TTL 300]
-    OfficialApi -->|failure only| Fallback[Archive fallback]
-    Fallback --> Cache60[KV cache TTL 60]
-    Cache300 --> Client
-    Cache60 --> Client
-    Client --> Fields[targetUrl, title, newsDate, updated, category?]
-    Client --> Metadata[X-KF3-News-Source, X-KF3-News-Fetched-At]
+    Request[GET /api/kf3-news] --> Cache{KV value exists?}
+    Cache -->|yes| Cached[本文を再検証せず返す]
+    Cache -->|no| Eligibility[stateを読む + currentの存在・ETagを確認]
+    Eligibility --> CanUse{If-None-Matchを使える?}
+    CanUse -->|いいえ| Full[archiveと公式データを取得]
+    CanUse -->|はい| Conditional[公式データをIf-None-Match付き取得]
+    Conditional -->|304| Current[currentをstate ETagで条件付き取得]
+    Current -->|nullまたはETag不一致| Full
+    Current -->|一致| ValidateCurrent[currentを検証]
+    Conditional -->|200| Archive[archiveを読込]
+    Archive --> Merge[検証して統合]
+    Full --> Merge
+    Merge --> ToApi[API用配列へ変換]
+    ValidateCurrent --> ToApi
+    ToApi --> NormalCache[KVへTTL 300秒で保存]
+    Conditional -.->|公式取得・解析・検証・統合の失敗| Fallback[正常なarchiveだけを使用]
+    Fallback --> FallbackProjection[API用配列へ変換]
+    FallbackProjection --> FallbackCache[KVへTTL 60秒で保存]
+    NormalCache --> Response[トップレベル配列を返す]
+    FallbackCache --> Response
+    Request -.->|KVまたはarchiveの読み書き失敗| Error[HTTP 500]
 ```
 
-APIの成功レスポンスは`targetUrl`、`title`、`newsDate`、`updated`を含み、保存用データに`category`がある場合だけ分類ラベル用のフィールドを追加したトップレベル配列です。`id`や未知フィールドは含みません。KV valueもニュース配列JSONのまま維持し、取得元と取得日時はKV metadataへ保存してレスポンスヘッダーへ投影します。KV cacheが存在する場合は本文を再検証せず、R2や公式サーバーへの外部I/Oなしで返します。公式取得、公式検証、統合が失敗した場合は、正常なarchiveが読めたときだけarchiveをTTL 60秒で返し、画面上に保存済みarchiveを表示していることを通知します。archive自体が欠落または不正な場合は5xxを返し、公式データだけを返しません。通常の成功時はTTL 300秒です。`fetchedAt`はcache miss時にAPI結果を確定してKVへ保存する直前の日時で、画面には相対日時で表示します。
+APIレスポンスは必須4フィールドと任意`category`のみを含み、入力順のまま返します。画面側で日付順にソートし、取得元と日時はレスポンスヘッダーへ設定します。
 
-既存の`/entries_merged_20241107.json` GET/HEAD routeは互換性のため残します。通常のAPI取得先は`archive/current.json`またはlegacy fallbackです。
+既存の`/entries_merged_20241107.json` GET/HEAD routeは互換性のため残します。
+
+### 定期実行更新時
+
+scheduled処理は、公式ETag stateと`archive/current.json`のR2 ETagを並行して確認します。stateの`currentEtag`が現在のcurrent ETagと一致し、stateが有効なstrong ETagを持つ場合だけ、公式データへ`If-None-Match`を付けます。公式ETagとR2 ETagを直接比較するのではなく、stateが両者の対応を保持します。
+
+```mermaid
+flowchart TD
+    Start[scheduled開始] --> Eligibility[stateを読む + currentの存在・ETagを確認]
+    Eligibility --> CanUse{state有効かつcurrent ETag一致?}
+    CanUse -->|いいえ| Full[公式データを条件なし取得]
+    CanUse -->|はい| Conditional[公式データをIf-None-Match付き取得]
+    Conditional -->|304| MonthlyHead[当月monthlyの存在を確認]
+    MonthlyHead -->|存在| Done304[archiveとKVを変更せず終了]
+    MonthlyHead -->|欠落| CurrentBody[currentをstate ETagで取得]
+    CurrentBody -->|nullまたは不一致| Full
+    CurrentBody -->|一致| MonthlyRaw[current raw bodyをmonthlyへ保存]
+    MonthlyRaw --> Done304
+    Conditional -->|200| Process
+    Full --> Process[archiveと公式データを検証して統合]
+    Process --> Changed{currentなし、または内容変更?}
+    Changed -->|はい| Serialize[決定的ソート + 1回だけserialize]
+    Serialize --> Daily[dailyを条件付き保存]
+    Daily --> Current[currentをETag条件付き更新]
+    Current --> DeleteCache[KV kf3-newsを削除]
+    DeleteCache --> Monthly[monthlyを条件付き保存]
+    Changed -->|いいえ| Monthly
+    Monthly --> State[stateをCAS保存]
+    State --> Log[news_archive_updateを記録]
+```
 
 ## 公式データの閾値と障害調査
 
