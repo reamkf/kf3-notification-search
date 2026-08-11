@@ -10,6 +10,7 @@ import type {
 import {
   CURRENT_ARCHIVE_KEY,
   LEGACY_ARCHIVE_KEY,
+  OFFICIAL_FETCH_STATE_KEY,
   MAX_OFFICIAL_RESPONSE_BYTES,
   OFFICIAL_FETCH_TIMEOUT_MS,
   OFFICIAL_NEWS_URL,
@@ -34,11 +35,16 @@ const createDocument = (count: number) => ({
   news: Array.from({ length: count }, (_, index) => createNews(index + 1)),
 });
 
-const createObject = (value: unknown, etag: string): R2ObjectBody =>
-  ({
+const createObject = (value: unknown, etag: string): R2ObjectBody => {
+  const text = JSON.stringify(value);
+  return {
     etag,
-    text: async () => JSON.stringify(value),
-  }) as unknown as R2ObjectBody;
+    text: async () => text,
+    get body() {
+      return streamFromChunks([new TextEncoder().encode(text)]);
+    },
+  } as unknown as R2ObjectBody;
+};
 
 const createBucket = (objects: Record<string, R2ObjectBody>): R2Bucket =>
   ({
@@ -49,10 +55,11 @@ const createResponse = (
   body: ReadableStream<Uint8Array> | null,
   headers: HeadersInit = {},
   ok = true,
+  status = ok ? 200 : 503,
 ) =>
   ({
     ok,
-    status: ok ? 200 : 503,
+    status,
     headers: new Headers(headers),
     body,
   }) as unknown as Response;
@@ -79,7 +86,7 @@ type PutOptions = {
 };
 type PutCall = {
   key: string;
-  value: string;
+  value: unknown;
   options?: PutOptions;
 };
 
@@ -97,17 +104,30 @@ const createMutableBucket = (
 ) => {
   const objects = new Map(Object.entries(initial));
   let nextEtag = 0;
+  const toBody = (object: FakeStoredObject) =>
+    ({
+      etag: object.etag,
+      text: async () => object.text,
+      get body() {
+        return streamFromChunks([new TextEncoder().encode(object.text)]);
+      },
+    }) as unknown as R2ObjectBody;
   const bucket = {
-    get: async (key: string) => {
-      timeline.push(`${label}:get:${key}`);
+    get: async (key: string, getOptions?: { onlyIf?: Record<string, string> }) => {
+      if (key !== OFFICIAL_FETCH_STATE_KEY) timeline.push(`${label}:get:${key}`);
       const object = objects.get(key);
       if (!object) return null;
-      return {
-        etag: object.etag,
-        text: async () => object.text,
-      } as unknown as R2ObjectBody;
+      const onlyIf = getOptions?.onlyIf;
+      if (onlyIf?.etagMatches && object.etag !== onlyIf.etagMatches) {
+        return { etag: object.etag } as unknown as R2Object;
+      }
+      return toBody(object);
     },
-    put: async (key: string, value: string, putOptions?: PutOptions) => {
+    head: async (key: string) => {
+      const object = objects.get(key);
+      return object ? ({ etag: object.etag } as unknown as R2Object) : null;
+    },
+    put: async (key: string, value: unknown, putOptions?: PutOptions) => {
       timeline.push(`${label}:put:${key}`);
       options.putCalls?.push({ key, value, options: putOptions });
       if (options.putErrors?.has(key)) throw options.putErrors.get(key);
@@ -128,7 +148,7 @@ const createMutableBucket = (
         }
       }
       const etag = `${label}-etag-${nextEtag++}`;
-      objects.set(key, { text: value, etag });
+      objects.set(key, { text: typeof value === "string" ? value : "", etag });
       return { etag } as unknown as R2Object;
     },
   };
@@ -370,6 +390,8 @@ describe("公式レスポンス取得", () => {
     const split = bytes.findIndex((byte) => byte >= 0x80) + 1;
     const chunks = [bytes.slice(0, split), bytes.slice(split)];
     const result = await fetchOfficialNews(async () => createResponse(streamFromChunks(chunks)));
+    expect(result.status).toBe("modified");
+    if (result.status !== "modified") throw new Error("modified response expected");
     expect(result.byteLength).toBe(bytes.byteLength);
     expect(result.document.news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
     expect(OFFICIAL_NEWS_URL).toBe("https://kemono-friends-3.jp/info/all/entries.txt");
@@ -452,6 +474,76 @@ describe("公式レスポンス取得", () => {
       fetchOfficialNews(async () => createResponse(streamFromChunks([invalidJson]))),
     ).rejects.toMatchObject({ stage: "official-parse" });
   });
+
+  it("strong ETagを返し、条件付き304では本文readerを呼ばない", async () => {
+    const bytes = officialJson();
+    const requestHeaders: Headers[] = [];
+    let readerCalled = false;
+    const body = {
+      getReader: () => {
+        readerCalled = true;
+        return streamFromChunks([bytes]).getReader();
+      },
+    } as unknown as ReadableStream<Uint8Array>;
+    const result = await fetchOfficialNews(
+      async (_input, init) => {
+        requestHeaders.push(new Headers(init?.headers));
+        return createResponse(body, { etag: '"source-etag"' }, false, 304);
+      },
+      { ifNoneMatch: '"source-etag"' },
+    );
+    expect(result).toEqual({
+      status: "not-modified",
+      byteLength: 0,
+      officialEtag: '"source-etag"',
+      conditionalRequestUsed: true,
+    });
+    expect(requestHeaders[0].get("If-None-Match")).toBe('"source-etag"');
+    expect(readerCalled).toBe(false);
+  });
+
+  it("200の公式ETagを結果へ保持する", async () => {
+    const result = await fetchOfficialNews(async () =>
+      createResponse(streamFromChunks([officialJson()]), { etag: '"source-etag"' }),
+    );
+    expect(result.status).toBe("modified");
+    if (result.status !== "modified") throw new Error("modified response expected");
+    expect(result.officialEtag).toBe('"source-etag"');
+  });
+
+  it("空のstrong ETagを条件付き取得へ使用する", async () => {
+    const requestHeaders: Headers[] = [];
+    const result = await fetchOfficialNews(
+      async (_input, init) => {
+        requestHeaders.push(new Headers(init?.headers));
+        return createResponse(null, { etag: '""' }, false, 304);
+      },
+      { ifNoneMatch: '""' },
+    );
+    expect(result).toEqual({
+      status: "not-modified",
+      byteLength: 0,
+      officialEtag: '""',
+      conditionalRequestUsed: true,
+    });
+    expect(requestHeaders[0].get("If-None-Match")).toBe('""');
+  });
+
+  it.each(['"bad value"', '"a","b"', '"😀"'])(
+    "不正なETag %s はIf-None-Matchへ送らない",
+    async (invalidEtag) => {
+      const requestHeaders: Headers[] = [];
+      const result = await fetchOfficialNews(
+        async (_input, init) => {
+          requestHeaders.push(new Headers(init?.headers));
+          return createResponse(streamFromChunks([officialJson()]));
+        },
+        { ifNoneMatch: invalidEtag },
+      );
+      expect(result.status).toBe("modified");
+      expect(requestHeaders[0].get("If-None-Match")).toBeNull();
+    },
+  );
 });
 
 describe("バックアップキー", () => {
@@ -482,12 +574,14 @@ describe("アーカイブ更新トランザクション", () => {
       putErrors?: Map<string, unknown>;
       nullPutKeys?: Set<string>;
       putCalls?: PutCall[];
+      initial?: Record<string, FakeStoredObject>;
     } = {},
   ) => {
     const timeline: string[] = [];
-    const dataInitial: Record<string, FakeStoredObject> = current
-      ? { [CURRENT_ARCHIVE_KEY]: current }
-      : {};
+    const dataInitial: Record<string, FakeStoredObject> = {
+      ...dataOptions.initial,
+      ...(current ? { [CURRENT_ARCHIVE_KEY]: current } : {}),
+    };
     const dataBucket = createMutableBucket("data", dataInitial, timeline, dataOptions);
     const backupBucket = createMutableBucket(
       "backup",
@@ -571,6 +665,176 @@ describe("アーカイブ更新トランザクション", () => {
       },
     });
     expectCreateIfAbsent(backupPuts[1].options?.onlyIf);
+  });
+
+  it("stateとcurrentのETagが一致すると公式304を採用し、本文処理を省略する", async () => {
+    const monthlyKey = buildBackupKeys(transactionNowMs).monthlyKey;
+    const requestHeaders: string[] = [];
+    const setup = createDependencies(
+      asStoredObject(createSortedDocument(MIN_OFFICIAL_ENTRY_COUNT), "current-etag"),
+      createDocument(MIN_OFFICIAL_ENTRY_COUNT),
+      { initial: { [monthlyKey]: asStoredObject(createDocument(1), "monthly-etag") } },
+      false,
+      {
+        initial: {
+          [OFFICIAL_FETCH_STATE_KEY]: asStoredObject(
+            { version: 1, officialEtag: '"official-etag"', currentEtag: "current-etag" },
+            "state-etag",
+          ),
+        },
+      },
+    );
+    const result = await updateNewsArchive({
+      ...setup.dependencies,
+      fetcher: async (_input, init) => {
+        requestHeaders.push(new Headers(init?.headers).get("If-None-Match") ?? "");
+        return createResponse(null, { etag: '"official-etag"' }, false, 304);
+      },
+    });
+    expect(result.officialFetchStatus).toBe("not-modified");
+    expect(result.officialBodyProcessed).toBe(false);
+    expect(result.monthlyBackupStatus).toBe("existing");
+    expect(requestHeaders).toEqual(['"official-etag"']);
+    expect(setup.timeline).toEqual([]);
+  });
+
+  it("304でmonthlyが欠けている場合はcurrentのraw bodyを保存する", async () => {
+    const monthlyKey = buildBackupKeys(transactionNowMs).monthlyKey;
+    const backupPuts: PutCall[] = [];
+    const setup = createDependencies(
+      asStoredObject(createSortedDocument(MIN_OFFICIAL_ENTRY_COUNT), "current-etag"),
+      createDocument(MIN_OFFICIAL_ENTRY_COUNT),
+      { putCalls: backupPuts },
+      false,
+      {
+        initial: {
+          [OFFICIAL_FETCH_STATE_KEY]: asStoredObject(
+            { version: 1, officialEtag: '"official-etag"', currentEtag: "current-etag" },
+            "state-etag",
+          ),
+        },
+      },
+    );
+    const result = await updateNewsArchive({
+      ...setup.dependencies,
+      fetcher: async () => createResponse(null, { etag: '"official-etag"' }, false, 304),
+    });
+    expect(result.officialFetchStatus).toBe("not-modified");
+    expect(result.monthlyBackupStatus).toBe("created");
+    expect(backupPuts).toHaveLength(1);
+    expect(backupPuts[0].key).toBe(monthlyKey);
+    expect(backupPuts[0].value).toBeInstanceOf(Object);
+    expect(setup.timeline).toContain(`data:get:${CURRENT_ARCHIVE_KEY}`);
+  });
+
+  it.each(['"bad value"', '"a","b"', '"😀"'])(
+    "不正なstateの公式ETag %s は条件なしGETへ戻る",
+    async (invalidEtag) => {
+      const requestHeaders: Headers[] = [];
+      const setup = createDependencies(
+        asStoredObject(createDocument(1), "current-etag"),
+        createDocument(MIN_OFFICIAL_ENTRY_COUNT),
+        {},
+        false,
+        {
+          initial: {
+            [OFFICIAL_FETCH_STATE_KEY]: asStoredObject(
+              { version: 1, officialEtag: invalidEtag, currentEtag: "current-etag" },
+              "state-etag",
+            ),
+          },
+        },
+      );
+      const result = await updateNewsArchive({
+        ...setup.dependencies,
+        fetcher: async (_input, init) => {
+          requestHeaders.push(new Headers(init?.headers));
+          return createResponse(
+            streamFromChunks([
+              new TextEncoder().encode(JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT))),
+            ]),
+            { etag: '"official-etag"' },
+          );
+        },
+      });
+      expect(result.officialFetchStatus).toBe("modified");
+      expect(requestHeaders[0].get("If-None-Match")).toBeNull();
+    },
+  );
+
+  it("stateがない場合はIf-None-Matchを送らず200経路を実行する", async () => {
+    const requestHeaders: Headers[] = [];
+    const setup = createDependencies(asStoredObject(createDocument(1), "current-etag"));
+    const result = await updateNewsArchive({
+      ...setup.dependencies,
+      fetcher: async (_input, init) => {
+        requestHeaders.push(new Headers(init?.headers));
+        return createResponse(
+          streamFromChunks([
+            new TextEncoder().encode(JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT))),
+          ]),
+          {
+            etag: '"official-etag"',
+          },
+        );
+      },
+    });
+    expect(result.officialFetchStatus).toBe("modified");
+    expect(requestHeaders[0].get("If-None-Match")).toBeNull();
+  });
+
+  it("200経路ではmonthly完了後に公式ETag stateを保存する", async () => {
+    const dataPuts: PutCall[] = [];
+    const setup = createDependencies(
+      asStoredObject(createDocument(1), "current-etag"),
+      createDocument(MIN_OFFICIAL_ENTRY_COUNT),
+      {},
+      false,
+      { putCalls: dataPuts },
+    );
+    const result = await updateNewsArchive({
+      ...setup.dependencies,
+      fetcher: async () =>
+        createResponse(
+          streamFromChunks([
+            new TextEncoder().encode(JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT))),
+          ]),
+          { etag: '"official-etag"' },
+        ),
+    });
+    expect(result.etagStateStatus).toBe("saved");
+    expect(dataPuts.map((call) => call.key)).toEqual([
+      CURRENT_ARCHIVE_KEY,
+      OFFICIAL_FETCH_STATE_KEY,
+    ]);
+    expect(setup.timeline.indexOf(`data:put:${OFFICIAL_FETCH_STATE_KEY}`)).toBeGreaterThan(
+      setup.timeline.indexOf(`backup:put:${result.monthlyBackupKey}`),
+    );
+  });
+
+  it("公式ETagがweakならstateを保存しない", async () => {
+    const dataPuts: PutCall[] = [];
+    const setup = createDependencies(
+      asStoredObject(createDocument(1), "current-etag"),
+      createDocument(MIN_OFFICIAL_ENTRY_COUNT),
+      {},
+      false,
+      { putCalls: dataPuts },
+    );
+    const result = await updateNewsArchive({
+      ...setup.dependencies,
+      fetcher: async () =>
+        createResponse(
+          streamFromChunks([
+            new TextEncoder().encode(JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT))),
+          ]),
+          {
+            etag: 'W/"weak-etag"',
+          },
+        ),
+    });
+    expect(result.etagStateStatus).toBe("unavailable");
+    expect(dataPuts.some((call) => call.key === OFFICIAL_FETCH_STATE_KEY)).toBe(false);
   });
 
   it("daily backup失敗時はcurrentとKVを変更しない", async () => {

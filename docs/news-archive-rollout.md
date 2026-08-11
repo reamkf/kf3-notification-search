@@ -36,14 +36,15 @@ Workers FreeのCron Triggerは1回あたりCPU 10msが上限である。この�
 
 Invocation Logで初回CronのCPU 44msを確認した。10ms基準を満たすまで、本番相当データでCPU profileを取り、処理を削減して再計測する。
 
-CPU時間に余裕がない場合の削減候補として、公式配信元のETagと`If-None-Match`を使い、HTTP 304の日は公式本文と累積アーカイブ本文の解析、検証、統合を省略する案を検討する。本案は未実装であり、設計と受け入れ条件は [ニュースアーカイブETag条件付き取得案](./news-archive-etag-optimization.md) に記載する。
+公式配信元のETagと`If-None-Match`を使う実装を反映済みである。scheduled処理とページリクエストのKV cache missでは、R2 stateの公式ETagとcurrent ETagの対応を確認できた場合に条件付きGETを行う。KV cache hitは従来どおり外部I/Oを行わない。本番での304応答、CPU時間、304率、API cache missのレイテンシは未確認であり、受け入れ条件として継続確認する。設計と確認項目は [ニュースアーカイブETag条件付き取得案](./news-archive-etag-optimization.md) に記載する。
 
 ## 残りの確認手順
 
 1. Workers Logsで初回実行のheartbeatと構造化errorログの有無を確認する。
 2. CPU 44msの原因を本番相当データでprofileし、10ms以内に収めて再計測する。
-3. 次回の03:15 JST実行後に、変更なし時のcurrent、KV、daily、monthlyの非更新とAPIレスポンスを確認する。
-4. 次回実行までに異常がなければ、本番Cronの導入完了判定を行う。
+3. 次回の03:15 JST実行後に、scheduledの304経路でcurrent、KV、daily、monthlyが不要に更新されないことと、monthly欠落補完を確認する。
+4. APIのKV cache missで条件付きGETと304時のcurrent投影を確認し、cache hitでR2と公式サーバーへアクセスしないことを確認する。
+5. 次回実行までに異常がなければ、本番Cronの導入完了判定を行う。
 
 ## 受け入れ条件
 
@@ -54,6 +55,8 @@ CPU時間に余裕がない場合の削減候補として、公式配信元のET
 - [ ] 不正取得、閾値超過、日次バックアップ失敗でcurrentとKVが変更されない。
 - [x] 更新前dailyと本番反映済みmonthlyを再検証できる。
 - [ ] ETag競合時にcurrent、KV、monthlyが誤って確定しない。
+- [ ] scheduledとAPI cache missで条件付きGETと304経路が確認できる。
+- [ ] API cache hitでR2と公式サーバーへの外部I/Oが発生しない。
 - [x] 本番snapshotを使った復元dry-runでR2とKVへのwriteが0件になる。
 - [ ] successとerrorの構造化ログをWorkers Logsで確認できる（success確認済み、error未確認）。
 - [ ] 本番相当データでscheduled処理のCPU時間が10ms以内に収まる。

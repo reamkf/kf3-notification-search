@@ -152,6 +152,7 @@ describe("Cloudflare bindings", () => {
     let injected = false;
     const dataBucket = {
       get: bindings.KF3_NOTIF_DATA.get.bind(bindings.KF3_NOTIF_DATA),
+      head: bindings.KF3_NOTIF_DATA.head.bind(bindings.KF3_NOTIF_DATA),
       put: async (key: string, value: string, options?: R2PutOptions) => {
         if (key === CURRENT_ARCHIVE_KEY && !injected) {
           injected = true;
