@@ -2,7 +2,7 @@
 
 ## 状態
 
-本書は、日次scheduled処理とページリクエストのKV cache missで公式ETagを利用する現行実装の仕様を示す。コードへの反映は完了しているが、本番Workerでの304応答、CPU時間、304率の受け入れ確認は未完了であり、運用状態は [ニュースアーカイブ導入状態](./news-archive-rollout.md) を参照する。
+本書は、日次scheduled処理とページリクエストのKV cache missで公式ETagを利用する現行実装の仕様を示す。公式レスポンスのデータ形式とHTTP ETagの契約は [公式ニュース配信仕様](./official-news-spec.md) を参照する。コードへの反映は完了しているが、本番Workerでの304応答、CPU時間、304率の受け入れ確認は未完了であり、運用状態は [ニュースアーカイブ導入状態](./news-archive-rollout.md) を参照する。
 
 ## 目的
 
@@ -227,7 +227,10 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`別に集計する。
 - `app/server.ts`: API cache missの条件付き取得、304時のcurrent投影、fallback
 - `app/__tests__/news-archive.test.ts`: 状態、条件付き取得、処理順、失敗経路のテスト
 - `app/__tests__/server.test.ts`: APIのKV hit/miss、304、競合、fallback、scheduled/heartbeatの回帰テスト
-- `docs/news-archive-spec.md`: 現行実装の確定仕様
+- `docs/news-spec.md`: 共通契約と仕様文書の入口
+- `docs/official-news-spec.md`: 公式データとETagの契約
+- `docs/news-archive-scheduled-spec.md`: 定期実行の確定仕様
+- `docs/news-page-request-spec.md`: ページリクエストの確定仕様
 - `docs/news-archive-rollout.md`: 本番受け入れ状態とCPU計測結果の確認記録
 
 本実装では新しいpackageやCron Triggerを追加しない。
