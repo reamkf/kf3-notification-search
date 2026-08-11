@@ -4,7 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { createExecutionContext, reset } from "cloudflare:test";
 import type { ExportedHandler } from "@cloudflare/workers-types";
-import { CURRENT_ARCHIVE_KEY, updateNewsArchive } from "../news-archive";
+import type { R2Bucket, R2PutOptions } from "@cloudflare/workers-types/experimental";
+import {
+  CURRENT_ARCHIVE_KEY,
+  LEGACY_ARCHIVE_KEY,
+  buildBackupKeys,
+  updateNewsArchive,
+} from "../news-archive";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createNewsCacheMetadata } from "../news-response-metadata";
 import { createWorkerHandler } from "../server";
@@ -22,6 +28,10 @@ const createNews = (id: number) => ({
 const createDocument = (count: number) => ({
   news: Array.from({ length: count }, (_, index) => createNews(index + 1)),
 });
+
+const createIfAbsentCondition = () =>
+  new Headers({ "If-None-Match": "*" }) as unknown as NonNullable<R2PutOptions["onlyIf"]>;
+const logger = { log: () => undefined, error: () => undefined };
 
 type WorkerFetch = NonNullable<ExportedHandler<WorkerBindings>["fetch"]>;
 
@@ -74,7 +84,7 @@ describe("Cloudflare bindings", () => {
       cache: bindings.KF3_NOTIF_CACHE,
       fetcher: async () => new Response(JSON.stringify(officialDocument)),
       nowMs: Date.parse("2026-08-01T18:15:00Z"),
-      logger: { log: () => undefined, error: () => undefined },
+      logger,
     });
 
     expect(result.updated).toBe(true);
@@ -90,5 +100,111 @@ describe("Cloudflare bindings", () => {
     expect(await bindings.KF3_NOTIF_CACHE.get("kf3-news")).toBeNull();
     const monthly = await bindings.KF3_NOTIF_BACKUP.get(result.monthlyBackupKey);
     expect(await monthly?.text()).toBe(currentJson);
+  });
+
+  it("実R2のIf-None-Match:*は既存objectを上書きしない", async () => {
+    const key = "conditional/create-only.json";
+    const first = await bindings.KF3_NOTIF_BACKUP.put(key, "first", {
+      onlyIf: createIfAbsentCondition(),
+    });
+    const second = await bindings.KF3_NOTIF_BACKUP.put(key, "second", {
+      onlyIf: createIfAbsentCondition(),
+    });
+
+    expect(first).not.toBeNull();
+    expect(second).toBeNull();
+    expect(await (await bindings.KF3_NOTIF_BACKUP.get(key))?.text()).toBe("first");
+  });
+
+  it("既存dailyを上書きせず、currentとKVを変更しない", async () => {
+    const nowMs = Date.parse("2026-08-01T18:15:00Z");
+    const currentDocument = createDocument(1);
+    const currentText = JSON.stringify(currentDocument);
+    const dailyKey = buildBackupKeys(nowMs).dailyKey;
+    await bindings.KF3_NOTIF_DATA.put(CURRENT_ARCHIVE_KEY, currentText);
+    await bindings.KF3_NOTIF_BACKUP.put(dailyKey, "existing daily");
+    await bindings.KF3_NOTIF_CACHE.put("kf3-news", "stale");
+
+    await expect(
+      updateNewsArchive({
+        dataBucket: bindings.KF3_NOTIF_DATA,
+        backupBucket: bindings.KF3_NOTIF_BACKUP,
+        cache: bindings.KF3_NOTIF_CACHE,
+        fetcher: async () => new Response(JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT))),
+        nowMs,
+        logger,
+      }),
+    ).rejects.toMatchObject({ stage: "daily-backup" });
+
+    expect(await (await bindings.KF3_NOTIF_BACKUP.get(dailyKey))?.text()).toBe("existing daily");
+    expect(await (await bindings.KF3_NOTIF_DATA.get(CURRENT_ARCHIVE_KEY))?.text()).toBe(
+      currentText,
+    );
+    expect(await bindings.KF3_NOTIF_CACHE.get("kf3-news")).toBe("stale");
+  });
+
+  it("current初回作成の競合時は競合側を上書きしない", async () => {
+    const nowMs = Date.parse("2026-08-01T18:15:00Z");
+    const legacyDocument = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    const concurrentText = JSON.stringify(createDocument(2));
+    await bindings.KF3_NOTIF_DATA.put(LEGACY_ARCHIVE_KEY, JSON.stringify(legacyDocument));
+    await bindings.KF3_NOTIF_CACHE.put("kf3-news", "stale");
+    let injected = false;
+    const dataBucket = {
+      get: bindings.KF3_NOTIF_DATA.get.bind(bindings.KF3_NOTIF_DATA),
+      put: async (key: string, value: string, options?: R2PutOptions) => {
+        if (key === CURRENT_ARCHIVE_KEY && !injected) {
+          injected = true;
+          await bindings.KF3_NOTIF_DATA.put(CURRENT_ARCHIVE_KEY, concurrentText);
+        }
+        return bindings.KF3_NOTIF_DATA.put(key, value, options);
+      },
+    } as unknown as R2Bucket;
+
+    await expect(
+      updateNewsArchive({
+        dataBucket,
+        backupBucket: bindings.KF3_NOTIF_BACKUP,
+        cache: bindings.KF3_NOTIF_CACHE,
+        fetcher: async () => new Response(JSON.stringify(legacyDocument)),
+        nowMs,
+        logger,
+      }),
+    ).rejects.toMatchObject({ stage: "etag-conflict" });
+
+    expect(await (await bindings.KF3_NOTIF_DATA.get(CURRENT_ARCHIVE_KEY))?.text()).toBe(
+      concurrentText,
+    );
+    expect(await bindings.KF3_NOTIF_CACHE.get("kf3-news")).toBe("stale");
+    expect(await bindings.KF3_NOTIF_BACKUP.get(buildBackupKeys(nowMs).monthlyKey)).toBeNull();
+  });
+
+  it("既存monthlyはheadせず条件付きPUTだけでexistingにする", async () => {
+    const nowMs = Date.parse("2026-08-01T18:15:00Z");
+    const currentDocument = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    const monthlyKey = buildBackupKeys(nowMs).monthlyKey;
+    await bindings.KF3_NOTIF_DATA.put(CURRENT_ARCHIVE_KEY, JSON.stringify(currentDocument));
+    await bindings.KF3_NOTIF_BACKUP.put(monthlyKey, "existing monthly");
+    const backupBucket = {
+      put: bindings.KF3_NOTIF_BACKUP.put.bind(bindings.KF3_NOTIF_BACKUP),
+      head: async () => {
+        throw new Error("head must not be called");
+      },
+    } as unknown as R2Bucket;
+
+    const result = await updateNewsArchive({
+      dataBucket: bindings.KF3_NOTIF_DATA,
+      backupBucket,
+      cache: bindings.KF3_NOTIF_CACHE,
+      fetcher: async () => new Response(JSON.stringify(currentDocument)),
+      nowMs,
+      logger,
+    });
+
+    expect(result.updated).toBe(false);
+    expect(result.monthlyBackupStatus).toBe("existing");
+    expect(await (await bindings.KF3_NOTIF_BACKUP.get(monthlyKey))?.text()).toBe(
+      "existing monthly",
+    );
   });
 });

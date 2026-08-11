@@ -3,6 +3,7 @@ import type {
   R2Bucket,
   R2Object,
   R2ObjectBody,
+  R2PutOptions,
 } from "@cloudflare/workers-types/experimental";
 import {
   MAX_OFFICIAL_RESPONSE_BYTES,
@@ -50,6 +51,69 @@ export type ArchiveDocumentReadResult = {
   currentExists: boolean;
 };
 
+const ORIGINAL_ERROR_NAME_MAX_LENGTH = 100;
+const ORIGINAL_ERROR_MESSAGE_MAX_LENGTH = 500;
+const REDACTED_VALUE = "[REDACTED]";
+const REDACTED_TOKEN = "[REDACTED_TOKEN]";
+const REDACTED_URL = "[REDACTED_URL]";
+
+const truncateLogValue = (value: string, maxLength: number) =>
+  value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
+
+const sanitizeLogValue = (value: string, maxLength: number, fallback: string) => {
+  const normalized = value
+    .replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const sanitized = normalized
+    .replace(/\b(?:https?|wss?):\/\/[^\s]+/giu, REDACTED_URL)
+    .replace(
+      /\b(proxy-authorization|authorization)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/giu,
+      `$1: ${REDACTED_VALUE}`,
+    )
+    .replace(/\bbearer\s+[a-z0-9._~+/-]+=*/giu, `Bearer ${REDACTED_VALUE}`)
+    .replace(
+      /\b(api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|auth[-_]?token|client[-_]?secret|token|secret|password|passwd)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu,
+      `$1=${REDACTED_VALUE}`,
+    )
+    .replace(/\b[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\b/giu, REDACTED_TOKEN)
+    .replace(/\b(?:github_pat_|gh[pousr]_|xox[baprs]-|sk-)[a-z0-9_-]+\b/giu, REDACTED_TOKEN);
+  return truncateLogValue(sanitized || fallback, maxLength);
+};
+
+const serializeOriginalError = (error: unknown) => {
+  if (!(error instanceof Error)) {
+    return {
+      name: "NonErrorThrown",
+      message: "A non-Error value was thrown",
+    };
+  }
+
+  let name = "Error";
+  let message = "Error message unavailable";
+  try {
+    const errorName = error.name;
+    if (typeof errorName === "string") name = errorName;
+  } catch {
+    name = "Error";
+  }
+  try {
+    const errorMessage = error.message;
+    if (typeof errorMessage === "string") message = errorMessage;
+  } catch {
+    message = "Error message unavailable";
+  }
+
+  return {
+    name: sanitizeLogValue(name, ORIGINAL_ERROR_NAME_MAX_LENGTH, "Error"),
+    message: sanitizeLogValue(
+      message,
+      ORIGINAL_ERROR_MESSAGE_MAX_LENGTH,
+      "Error message unavailable",
+    ),
+  };
+};
+
 const createArchiveReadError = (error: unknown, details: Record<string, unknown> = {}) => {
   if (error instanceof NewsArchiveError) return error;
   if (error instanceof NewsDataError) {
@@ -59,7 +123,10 @@ const createArchiveReadError = (error: unknown, details: Record<string, unknown>
       dataDetails: error.details,
     });
   }
-  return new NewsArchiveError("archive-read", "アーカイブの読み込みに失敗しました", details);
+  return new NewsArchiveError("archive-read", "アーカイブの読み込みに失敗しました", {
+    ...details,
+    originalError: serializeOriginalError(error),
+  });
 };
 
 const readObjectText = async (object: R2ObjectBody, sourceKey: string) => {
@@ -348,24 +415,35 @@ const defaultLogger: ArchiveLogger = {
   error: (event) => console.error(event),
 };
 
-const asArchiveError = (error: unknown, fallbackStage: string, message: string) => {
+const asArchiveError = (
+  error: unknown,
+  fallbackStage: string,
+  message: string,
+  details: Record<string, unknown> = {},
+) => {
   if (error instanceof NewsArchiveError) return error;
   if (error instanceof NewsDataError) {
     return new NewsArchiveError(error.stage || fallbackStage, error.message, {
+      ...details,
       dataStage: error.stage,
       dataDetails: error.details,
     });
   }
-  return new NewsArchiveError(fallbackStage, message);
+  return new NewsArchiveError(fallbackStage, message, {
+    ...details,
+    originalError: serializeOriginalError(error),
+  });
 };
 
 const contentType = "application/json; charset=utf-8";
+const createIfAbsentCondition = () =>
+  new Headers({ "If-None-Match": "*" }) as unknown as NonNullable<R2PutOptions["onlyIf"]>;
 
 const putDailyBackup = async (bucket: R2Bucket, key: string, archiveText: string) => {
   let result: R2Object | null;
   try {
     result = await bucket.put(key, archiveText, {
-      onlyIf: { etagDoesNotMatch: "*" },
+      onlyIf: createIfAbsentCondition(),
       httpMetadata: { contentType },
     });
   } catch (error) {
@@ -385,7 +463,7 @@ const putCurrentArchive = async (
 ) => {
   const onlyIf = archive.currentExists
     ? { etagMatches: archive.etag as string }
-    : { etagDoesNotMatch: "*" as const };
+    : createIfAbsentCondition();
   let result: R2Object | null;
   try {
     result = await bucket.put(CURRENT_ARCHIVE_KEY, mergedJson, {
@@ -411,11 +489,13 @@ const putMonthlyBackup = async (
   let result: R2Object | null;
   try {
     result = await bucket.put(key, archiveText, {
-      onlyIf: { etagDoesNotMatch: "*" },
+      onlyIf: createIfAbsentCondition(),
       httpMetadata: { contentType },
     });
   } catch (error) {
-    throw asArchiveError(error, "monthly-backup", "月次バックアップの保存に失敗しました");
+    throw asArchiveError(error, "monthly-backup", "月次バックアップの保存に失敗しました", {
+      key,
+    });
   }
   return result ? "created" : "existing";
 };
