@@ -66,7 +66,9 @@ Lifecycleは`daily/`だけを90日後に削除する。`monthly/`にはexpire ru
 bunx wrangler r2 object put kf3-notif-data/entries_merged_20241107.json --file="D:/path/to/entries_merged_20241107.json" --content-type=application/json --remote
 ```
 
-通常の累積アーカイブは`KF3_NOTIF_DATA/archive/current.json`である。これがない初回だけ`entries_merged_20241107.json`を読み込み、初回更新で`archive/current.json`を作成する。バックアップは`KF3_NOTIF_BACKUP/daily/YYYY/MM/DD/`と`KF3_NOTIF_BACKUP/monthly/YYYY-MM.json`へ保存する。
+通常の累積archiveは`KF3_NOTIF_DATA/archive/current.json`である。これがない初回だけ`entries_merged_20241107.json`を読み込み、scheduledの初回更新で`archive/current.json`を作成する。backupは`KF3_NOTIF_BACKUP/daily/YYYY/MM/DD/`と`KF3_NOTIF_BACKUP/monthly/YYYY-MM.json`へ保存する。
+
+refresh制御metadataは表示用KVやarchiveとは別にR2へ保存し、R2 CAS leaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。refreshはcurrent、daily、monthly、公式ETag stateを変更しない。
 
 ## ローカルで実行
 
@@ -84,6 +86,8 @@ bun run preview
 
 `bun run preview`のR2はローカルストレージである。本番bucketへ接続する`--remote`操作をローカル確認で使用しない。
 
+`GET /`はSSR shellだけを返す。ブラウザはshell表示後に`GET /api/kf3-news`を呼び、必要に応じて`POST /api/kf3-news/refresh`を別リクエストで呼ぶ。公式取得やmergeのCPU時間をshellへ持ち込まず、`waitUntil`で処理を継続しない。
+
 ## scheduled handlerをローカルで確認
 
 `bun run preview`を起動した状態で、03:15 JSTに相当するUTC時刻を指定する。
@@ -100,6 +104,12 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - local R2に`archive/current.json`、`daily/2026/08/02/...json`、`monthly/2026-08.json`が作成される
 - 内容変更がない2回目はdailyとcurrentが増えず、monthlyは既存扱いになる
 - local testがproduction bucketを変更していない
+- 304経路で公式本文とcurrent本文の不要な処理を行わない
+- `GET /`がニュース取得なしでshellを返す
+- GETのKV hitが外部I/Oを行わず、KV missがR2 snapshotだけを投影する
+- refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
+- refreshが表示用KVだけを更新し、current、daily、monthly、公式ETag stateを変更しない
+- `waitUntil`を使わず、各HTTPリクエストの完了を待っている
 
 ## テストとデプロイ
 
@@ -114,7 +124,7 @@ bunx tsc --noEmit
 bun run build
 ```
 
-全ゲートとローカルscheduled確認が成功し、導入状態ドキュメントの保留事項を解消した後にデプロイする。本番外部状態と未完了の受入項目は [ニュースアーカイブ導入状態](./news-archive-rollout.md) を参照する。
+全ゲートとローカルscheduled確認が成功し、導入状態ドキュメントの受け入れ条件を確認した後にdeployする。本番外部状態と受け入れ項目は [ニュースアーカイブ導入状態](./news-archive-rollout.md) を参照する。
 
 ### Healthchecks.io
 
@@ -124,13 +134,31 @@ Healthchecks.ioのHobbyist planで`kf3notif-daily-archive` checkを作成し、C
 bunx wrangler secret put HEALTHCHECKS_PING_URL
 ```
 
+### Cloudflare Rate LimitingとWAF
+
+refreshは公開routeのため、アプリケーションのR2 CAS leaseと5分cooldownに加え、Cloudflare Rate LimitingとWAFを推奨する。
+
+- Rate Limitingは`POST /api/kf3-news/refresh`に限定し、送信元IPごとの短時間反復POSTを抑制する。
+- GET `/`と`GET /api/kf3-news`へrefresh用の厳しい制限を適用しない。
+- WAF Managed Rulesを有効化し、refresh routeには必要に応じてPOST以外、大きすぎるbody、明らかな異常自動化を対象にcustom ruleを追加する。
+- Rate LimitingとWAFのblock、challenge、429をWorkers Logsと突き合わせ、正規refreshを誤検知しないことを確認する。
+- エッジ制御はアプリケーションのJSON検証、公式データ検証、lease、cooldownの代替にしない。
+
 ### デプロイ
 
 ```bash
 bun run deploy
 ```
 
-デプロイ後はWorkerのURLで`GET /api/kf3-news`を確認する。ニュースの仕様は [ニュース機能共通仕様](./news-spec.md)、ページ取得は [ニュースページリクエスト仕様](./news-page-request-spec.md)、定期実行は [ニュースアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md) を参照する。
+デプロイ後はWorkerのURLで次を確認する。
+
+```bash
+curl -i "https://<worker-host>/"
+curl -i "https://<worker-host>/api/kf3-news"
+curl -i -X POST "https://<worker-host>/api/kf3-news/refresh"
+```
+
+`GET /`がshellだけを返し、GETがKV snapshotまたはR2 snapshotを返し、refreshが実行中202、成功200、cooldown429、依存障害503の契約に従うことを確認する。refresh成功後もcurrent、daily、monthly、公式ETag stateが変更されていないことを確認する。ニュースの仕様は [ニュース機能共通仕様](./news-spec.md)、ページ取得は [ニュースページリクエスト仕様](./news-page-request-spec.md)、定期実行は [ニュースアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md) を参照する。
 
 ### CloudflareダッシュボードからGit連携で自動デプロイ
 
