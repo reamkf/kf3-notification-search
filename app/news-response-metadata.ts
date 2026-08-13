@@ -2,7 +2,7 @@ export const NEWS_SOURCE_HEADER = "X-KF3-News-Source";
 export const NEWS_FETCHED_AT_HEADER = "X-KF3-News-Fetched-At";
 export const NEWS_CACHE_METADATA_VERSION = 1;
 
-export type NewsCacheSource = "merged" | "archive-fallback";
+export type NewsCacheSource = "merged" | "archive-fallback" | "archive-snapshot";
 export type NewsResponseSource = NewsCacheSource | "unknown";
 
 export type NewsCacheMetadata = {
@@ -33,7 +33,9 @@ export const parseNewsCacheMetadata = (value: unknown): NewsCacheMetadata | null
   const candidate = value as Record<string, unknown>;
   if (
     candidate.version !== NEWS_CACHE_METADATA_VERSION ||
-    (candidate.source !== "merged" && candidate.source !== "archive-fallback") ||
+    (candidate.source !== "merged" &&
+      candidate.source !== "archive-fallback" &&
+      candidate.source !== "archive-snapshot") ||
     !isValidTimestamp(candidate.fetchedAt)
   ) {
     return null;
@@ -67,7 +69,9 @@ export const parseNewsResponseHeaders = (headers: Headers): NewsResponseMetadata
   const source = headers.get(NEWS_SOURCE_HEADER);
   const fetchedAt = headers.get(NEWS_FETCHED_AT_HEADER);
   const normalizedSource: NewsResponseSource =
-    source === "merged" || source === "archive-fallback" ? source : "unknown";
+    source === "merged" || source === "archive-fallback" || source === "archive-snapshot"
+      ? source
+      : "unknown";
   return {
     source: normalizedSource,
     fetchedAt: normalizedSource === "unknown" || !isValidTimestamp(fetchedAt) ? null : fetchedAt,

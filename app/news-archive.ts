@@ -3,7 +3,6 @@ import type {
   R2Bucket,
   R2Object,
   R2ObjectBody,
-  R2PutOptions,
 } from "@cloudflare/workers-types/experimental";
 import {
   MAX_OFFICIAL_RESPONSE_BYTES,
@@ -136,7 +135,7 @@ const sanitizeLogValue = (value: string, maxLength: number, fallback: string) =>
   return truncateLogValue(sanitized || fallback, maxLength);
 };
 
-const serializeOriginalError = (error: unknown) => {
+export const serializeArchiveErrorForLog = (error: unknown) => {
   if (!(error instanceof Error)) {
     return {
       name: "NonErrorThrown",
@@ -179,7 +178,7 @@ const createArchiveReadError = (error: unknown, details: Record<string, unknown>
   }
   return new NewsArchiveError("archive-read", "アーカイブの読み込みに失敗しました", {
     ...details,
-    originalError: serializeOriginalError(error),
+    originalError: serializeArchiveErrorForLog(error),
   });
 };
 
@@ -637,13 +636,12 @@ const asArchiveError = (
   }
   return new NewsArchiveError(fallbackStage, message, {
     ...details,
-    originalError: serializeOriginalError(error),
+    originalError: serializeArchiveErrorForLog(error),
   });
 };
 
 const contentType = "application/json; charset=utf-8";
-const createIfAbsentCondition = () =>
-  new Headers({ "If-None-Match": "*" }) as unknown as NonNullable<R2PutOptions["onlyIf"]>;
+const createIfAbsentCondition = () => ({ etagDoesNotMatch: "*" });
 
 const putDailyBackup = async (bucket: R2Bucket, key: string, archiveText: string) => {
   let result: R2Object | null;
