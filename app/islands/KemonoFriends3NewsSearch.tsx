@@ -13,6 +13,12 @@ const STORAGE_KEYS = {
 
 const NEWS_PAGE_SIZE = 20;
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+const REFRESH_STALE_AFTER_MS = 5 * 60 * 1000;
+const MAX_REFRESH_ATTEMPTS = 3;
+const DEFAULT_RETRY_AFTER_MS = 1_000;
+const REFRESH_TIMEOUT_MS = 15_000;
+const REFRESH_COOLDOWN_MS = 5 * 60_000;
+const METADATA_TEXT_CLASS = "text-sm font-normal leading-5 text-gray-600";
 
 const CATEGORY_LABEL_CLASSES: Record<string, string> = {
   おしらせ: "bg-orange-200 text-orange-900",
@@ -44,10 +50,94 @@ const getCategoryLabelClass = (label: string, index: number): string =>
   CATEGORY_LABEL_CLASSES[label] ??
   FALLBACK_CATEGORY_LABEL_CLASSES[index % FALLBACK_CATEGORY_LABEL_CLASSES.length];
 
-type NewsLoadState =
-  | { status: "loading" }
-  | { status: "success"; data: Array<News>; metadata: NewsResponseMetadata }
-  | { status: "error"; message: string };
+type NewsPayload = {
+  data: Array<News>;
+  metadata: NewsResponseMetadata;
+};
+
+type InitialLoadStatus = "loading" | "success" | "error";
+
+type RefreshState =
+  | { status: "idle" }
+  | { status: "refreshing" }
+  | { status: "error" }
+  | { status: "cooldown"; retryAt: number };
+
+type RefreshResponse = {
+  news: Array<News>;
+  metadata: {
+    source: "merged";
+    fetchedAt: string;
+  };
+};
+
+const refreshResponseSchema = v.object({
+  news: newsArraySchema,
+  metadata: v.object({
+    source: v.literal("merged"),
+    fetchedAt: v.pipe(
+      v.string(),
+      v.check((value) => Number.isFinite(Date.parse(value)), "fetchedAt must be a timestamp"),
+    ),
+  }),
+});
+
+type RefreshStatusIconProps = {
+  status: RefreshState["status"];
+};
+
+const RefreshStatusIcon = ({ status }: RefreshStatusIconProps) => {
+  if (status === "refreshing") {
+    return (
+      <span
+        aria-hidden="true"
+        class="h-4 w-4 animate-spin rounded-full border-2 border-blue-200 border-t-blue-600"
+      />
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <svg
+        aria-hidden="true"
+        class="h-5 w-5 text-red-600"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="2"
+          d="M6 6l12 12M18 6L6 18"
+        />
+      </svg>
+    );
+  }
+
+  return (
+    <svg
+      aria-hidden="true"
+      class="h-5 w-5 text-green-600"
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="m5 12 4 4L19 6" />
+    </svg>
+  );
+};
+
+const ReloadIcon = () => (
+  <svg aria-hidden="true" class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+      d="M20 11a8 8 0 0 0-14.9-3M4 5v4h4m-4 4a8 8 0 0 0 14.9 3M20 19v-4h-4"
+    />
+  </svg>
+);
 
 // "yyyy年MM月dd日 HH時mm分ss秒"形式の日付をパース
 const parseDateString = (dateString: string): number => {
@@ -67,10 +157,10 @@ const parseDateString = (dateString: string): number => {
   );
 };
 
-const formatRelativeFetchedAt = (fetchedAt: string | null) => {
+const formatRelativeFetchedAt = (fetchedAt: string | null, now = Date.now()) => {
   if (!fetchedAt || !Number.isFinite(Date.parse(fetchedAt))) return "不明";
 
-  const elapsedMs = Math.max(0, Date.now() - Date.parse(fetchedAt));
+  const elapsedMs = Math.max(0, now - Date.parse(fetchedAt));
   const elapsedSeconds = Math.floor(elapsedMs / 1000);
   if (elapsedSeconds < 60) return `${elapsedSeconds}秒前`;
 
@@ -89,10 +179,60 @@ const formatRelativeFetchedAt = (fetchedAt: string | null) => {
   return `${Math.floor(elapsedMonths / 12)}年前`;
 };
 
+const getRefreshCooldownUntil = (fetchedAt: string | null, now = Date.now()) => {
+  const fetchedAtMs = fetchedAt ? Date.parse(fetchedAt) : Number.NaN;
+  return Number.isFinite(fetchedAtMs)
+    ? fetchedAtMs + REFRESH_COOLDOWN_MS
+    : now + REFRESH_COOLDOWN_MS;
+};
+
+const isRefreshNeeded = (metadata: NewsResponseMetadata) => {
+  if (metadata.source === "archive-snapshot" || metadata.source === "archive-fallback") return true;
+  if (!metadata.fetchedAt || !Number.isFinite(Date.parse(metadata.fetchedAt))) return true;
+  return Date.now() - Date.parse(metadata.fetchedAt) >= REFRESH_STALE_AFTER_MS;
+};
+
+const parseRetryAfterMs = (value: string | null, now = Date.now()) => {
+  if (!value) return DEFAULT_RETRY_AFTER_MS;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - now) : DEFAULT_RETRY_AFTER_MS;
+};
+
+const parseCooldownMs = async (response: Response) => {
+  const headerDelay = response.headers.get("Retry-After");
+  if (headerDelay) return parseRetryAfterMs(headerDelay);
+
+  try {
+    const body: unknown = await response.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) return DEFAULT_RETRY_AFTER_MS;
+    const candidate = body as Record<string, unknown>;
+    for (const key of ["nextAvailableAt", "cooldownUntil"]) {
+      const value = candidate[key];
+      if (typeof value !== "string") continue;
+      const timestamp = Date.parse(value);
+      if (Number.isFinite(timestamp)) return Math.max(0, timestamp - Date.now());
+    }
+    for (const key of ["cooldownSeconds", "retryAfter"]) {
+      const seconds = candidate[key];
+      if (typeof seconds === "number" && Number.isFinite(seconds)) {
+        return Math.max(0, seconds * 1000);
+      }
+      if (typeof seconds === "string" && seconds.trim() !== "") {
+        const parsed = Number(seconds);
+        if (Number.isFinite(parsed)) return Math.max(0, parsed * 1000);
+      }
+    }
+  } catch {
+    return DEFAULT_RETRY_AFTER_MS;
+  }
+  return DEFAULT_RETRY_AFTER_MS;
+};
+
 // ニュースデータをキーワードでフィルター
 const filterNewsByKeyword = (newsArray: Array<News>, query: string) => {
   const normalizedQuery = normalizeQuery(query);
-  console.log("Normalized query:", normalizedQuery);
   if (!normalizedQuery) return newsArray;
 
   try {
@@ -125,7 +265,7 @@ const filterNewsByDate = (newsArray: Array<News>, start: string, end: string) =>
 
   return newsArray.filter((news) => {
     const newsDate = parseDateString(news.newsDate);
-    return newsDate >= startTime && newsDate < endTime + 86400000; // 1日分のミリ秒を加算
+    return newsDate >= startTime && newsDate < endTime + 86400000;
   });
 };
 
@@ -140,62 +280,234 @@ const getSortedNews = (data: Array<News>, sortOrder: string) => {
 
 // ニュースデータの検索・表示コンポーネント
 const KemonoFriends3NewsSearch = () => {
-  const [loadState, setLoadState] = useState<NewsLoadState>({ status: "loading" });
-  const [searchKeyword, setSearchKeyword] = useState(""); // 検索キーワード
-  const [appliedSearchKeyword, setAppliedSearchKeyword] = useState(""); // 検索に適用したキーワード
+  const [initialLoadStatus, setInitialLoadStatus] = useState<InitialLoadStatus>("loading");
+  const [initialErrorMessage, setInitialErrorMessage] = useState<string | null>(null);
+  const [newsPayload, setNewsPayload] = useState<NewsPayload | null>(null);
+  const [refreshState, setRefreshState] = useState<RefreshState>({ status: "idle" });
+  const [relativeNow, setRelativeNow] = useState(() => Date.now());
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const [appliedSearchKeyword, setAppliedSearchKeyword] = useState("");
   const [visibleNewsCount, setVisibleNewsCount] = useState(NEWS_PAGE_SIZE);
-  const [sortOrder, setSortOrder] = useState("desc"); // ソート順
-  const [isSearchVisible, setIsSearchVisible] = useState(false); // 検索欄の表示状態
-  const [startDate, setStartDate] = useState("2019-09-24"); // フィルター開始日
-  const [endDate, setEndDate] = useState(getJapaneseDate()); // フィルター終了日
+  const [sortOrder, setSortOrder] = useState("desc");
+  const [isSearchVisible, setIsSearchVisible] = useState(false);
+  const [startDate, setStartDate] = useState("2019-09-24");
+  const [endDate, setEndDate] = useState(getJapaneseDate());
   const loadMoreRef = useRef<HTMLDivElement>(null);
+  const mountedRef = useRef(true);
+  const generationRef = useRef(0);
+  const refreshAbortRef = useRef<AbortController | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshInFlightRef = useRef(false);
+  const refreshStateRef = useRef<RefreshState | null>({ status: "idle" });
+  const refreshNewsRef = useRef<((attempt?: number, bypassCooldown?: boolean) => void) | null>(
+    () => undefined,
+  );
+
+  const updateRefreshState = (next: RefreshState) => {
+    refreshStateRef.current = next;
+    setRefreshState(next);
+  };
+
+  const cancelAutoRefresh = () => {
+    if (autoRefreshTimerRef.current === null) return;
+    clearTimeout(autoRefreshTimerRef.current);
+    autoRefreshTimerRef.current = null;
+  };
+
+  const refreshNews = (initialAttempt = 0, bypassCooldown = false) => {
+    cancelAutoRefresh();
+    if (!mountedRef.current || refreshInFlightRef.current || !newsPayload) return;
+    const currentRefreshState = refreshStateRef.current;
+    if (
+      !bypassCooldown &&
+      currentRefreshState?.status === "cooldown" &&
+      currentRefreshState.retryAt > Date.now()
+    ) {
+      return;
+    }
+
+    const generation = (generationRef.current ?? 0) + 1;
+    generationRef.current = generation;
+    refreshInFlightRef.current = true;
+    updateRefreshState({ status: "refreshing" });
+
+    const finishWithError = () => {
+      if (!mountedRef.current || generationRef.current !== generation) return;
+      refreshInFlightRef.current = false;
+      updateRefreshState({ status: "error" });
+    };
+
+    const execute = async (attempt: number): Promise<void> => {
+      if (!mountedRef.current || generationRef.current !== generation) return;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
+      refreshAbortRef.current = controller;
+      try {
+        const response = await fetch("/api/kf3-news/refresh", {
+          method: "POST",
+          signal: controller.signal,
+        });
+        if (!mountedRef.current || generationRef.current !== generation) return;
+
+        if (response.status === 202) {
+          if (attempt + 1 >= MAX_REFRESH_ATTEMPTS) {
+            finishWithError();
+            return;
+          }
+          const delay = parseRetryAfterMs(response.headers.get("Retry-After"));
+          retryTimerRef.current = setTimeout(() => {
+            retryTimerRef.current = null;
+            void execute(attempt + 1);
+          }, delay);
+          return;
+        }
+
+        if (response.status === 429) {
+          const cooldownMs = await parseCooldownMs(response);
+          if (!mountedRef.current || generationRef.current !== generation) return;
+          refreshInFlightRef.current = false;
+          updateRefreshState({ status: "cooldown", retryAt: Date.now() + cooldownMs });
+          return;
+        }
+
+        if (!response.ok) {
+          finishWithError();
+          return;
+        }
+
+        const payload: unknown = await response.json();
+        if (!mountedRef.current || generationRef.current !== generation) return;
+        const result = v.safeParse(refreshResponseSchema, payload);
+        if (!result.success) {
+          console.error("Refresh data validation failed", summarizeValidationIssues(result.issues));
+          finishWithError();
+          return;
+        }
+
+        const validated: RefreshResponse = result.output;
+        setNewsPayload({
+          data: validated.news,
+          metadata: {
+            source: validated.metadata.source as NewsResponseMetadata["source"],
+            fetchedAt: validated.metadata.fetchedAt,
+          },
+        });
+        refreshInFlightRef.current = false;
+        updateRefreshState({
+          status: "cooldown",
+          retryAt: getRefreshCooldownUntil(validated.metadata.fetchedAt),
+        });
+      } catch (error) {
+        if (!mountedRef.current) return;
+        if (controller.signal.aborted) {
+          finishWithError();
+          return;
+        }
+        console.error("Failed to refresh news data:", error);
+        finishWithError();
+      } finally {
+        clearTimeout(timeout);
+        if (refreshAbortRef.current === controller) refreshAbortRef.current = null;
+      }
+    };
+
+    void execute(initialAttempt);
+  };
+
+  refreshNewsRef.current = refreshNews;
 
   // コンポーネント初回レンダリング時にニュースデータを取得
   useEffect(() => {
-    fetch("/api/kf3-news")
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`HTTP error! status: ${res.status}`);
-        }
-        const metadata = parseNewsResponseHeaders(res.headers);
-        return res.json().then((data) => ({ data, metadata }));
-      })
-      .then(({ data, metadata }) => {
+    mountedRef.current = true;
+    const controller = new AbortController();
+    const generation = (generationRef.current ?? 0) + 1;
+    generationRef.current = generation;
+    const loadNews = async () => {
+      try {
+        const response = await fetch("/api/kf3-news", { signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const metadata = parseNewsResponseHeaders(response.headers);
+        const data: unknown = await response.json();
         const result = v.safeParse(newsArraySchema, data);
-        if (result.success) {
-          // 検索欄の表示状態を設定
-          const savedSearchVisibility = localStorage.getItem(STORAGE_KEYS.isSearchVisible);
-          if (savedSearchVisibility) {
-            setIsSearchVisible(savedSearchVisibility === "true");
-          }
-
-          setLoadState({
-            status: "success",
-            data: result.output,
-            metadata,
-          });
-        } else {
+        if (!result.success) {
           console.error("Data validation failed", summarizeValidationIssues(result.issues));
-          setLoadState({
-            status: "error",
-            message: "データの取得に失敗しました。\n時間を空けて再度お試しください。",
-          });
+          throw new Error("news data validation failed");
         }
-      })
-      .catch((error) => {
-        console.error("Failed to fetch news data:", error);
-        setLoadState({
-          status: "error",
-          message: "データの取得に失敗しました。\n時間を空けて再度お試しください。",
+        if (!mountedRef.current || generationRef.current !== generation) return;
+
+        // 検索欄の表示状態を設定
+        const savedSearchVisibility = localStorage.getItem(STORAGE_KEYS.isSearchVisible);
+        if (savedSearchVisibility) setIsSearchVisible(savedSearchVisibility === "true");
+        setNewsPayload({ data: result.output, metadata });
+        setInitialErrorMessage(null);
+        setInitialLoadStatus("success");
+        updateRefreshState({
+          status: "cooldown",
+          retryAt: getRefreshCooldownUntil(metadata.fetchedAt),
         });
-      });
+
+        if (isRefreshNeeded(metadata)) {
+          autoRefreshTimerRef.current = setTimeout(() => {
+            autoRefreshTimerRef.current = null;
+            refreshNewsRef.current?.(0, true);
+          }, 50);
+        }
+      } catch (error) {
+        if (controller.signal.aborted || !mountedRef.current) return;
+        console.error("Failed to fetch news data:", error);
+        setInitialErrorMessage("データの取得に失敗しました。\n時間を空けて再度お試しください。");
+        setInitialLoadStatus("error");
+      }
+    };
+
+    void loadNews();
+    return () => {
+      mountedRef.current = false;
+      generationRef.current = (generationRef.current ?? 0) + 1;
+      controller.abort();
+      refreshAbortRef.current?.abort();
+      cancelAutoRefresh();
+      if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    };
   }, []);
+
+  useEffect(() => {
+    if (!newsPayload?.metadata.fetchedAt && refreshState.status !== "cooldown") return;
+    let interval: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (interval === null) return;
+      clearInterval(interval);
+      interval = null;
+    };
+    const start = () => {
+      if (document.visibilityState === "hidden" || interval !== null) return;
+      interval = setInterval(() => setRelativeNow(Date.now()), 1_000);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") stop();
+      else {
+        setRelativeNow(Date.now());
+        start();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    start();
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      stop();
+    };
+  }, [newsPayload?.metadata.fetchedAt, refreshState.status]);
+
+  useEffect(() => {
+    if (refreshState.status !== "cooldown" || refreshState.retryAt > relativeNow) return;
+    updateRefreshState({ status: "idle" });
+  }, [relativeNow, refreshState]);
 
   // 検索キーワードの変更をハンドリング
   const handleSearchChange = (event: Event) => {
-    if (event.target instanceof HTMLInputElement) {
-      setSearchKeyword(event.target.value);
-    }
+    if (event.target instanceof HTMLInputElement) setSearchKeyword(event.target.value);
   };
 
   // Enterキーが押されたときにキーワード検索を実行
@@ -214,7 +526,6 @@ const KemonoFriends3NewsSearch = () => {
   const handleStartDateChange = (event: Event) => {
     if (event.target instanceof HTMLInputElement) {
       setStartDate(event.target.value);
-      setAppliedSearchKeyword(searchKeyword);
       setVisibleNewsCount(NEWS_PAGE_SIZE);
     }
   };
@@ -222,7 +533,6 @@ const KemonoFriends3NewsSearch = () => {
   const handleEndDateChange = (event: Event) => {
     if (event.target instanceof HTMLInputElement) {
       setEndDate(event.target.value);
-      setAppliedSearchKeyword(searchKeyword);
       setVisibleNewsCount(NEWS_PAGE_SIZE);
     }
   };
@@ -231,24 +541,25 @@ const KemonoFriends3NewsSearch = () => {
   const handleSortOrderChange = (event: Event) => {
     if (event.target instanceof HTMLSelectElement) {
       setSortOrder(event.target.value);
-      setAppliedSearchKeyword(searchKeyword);
       setVisibleNewsCount(NEWS_PAGE_SIZE);
     }
   };
 
   // 検索欄の表示・非表示を切り替える
   const toggleSearchVisibility = () => {
-    setIsSearchVisible((prev) => !prev);
-    localStorage.setItem(STORAGE_KEYS.isSearchVisible, (!isSearchVisible).toString());
+    setIsSearchVisible((previous) => {
+      const next = !previous;
+      localStorage.setItem(STORAGE_KEYS.isSearchVisible, next.toString());
+      return next;
+    });
   };
 
   const filteredNews = useMemo(() => {
-    if (loadState.status !== "success") return [];
-
-    const keywordFilteredNews = filterNewsByKeyword(loadState.data, appliedSearchKeyword);
+    if (!newsPayload) return [];
+    const keywordFilteredNews = filterNewsByKeyword(newsPayload.data, appliedSearchKeyword);
     const dateFilteredNews = filterNewsByDate(keywordFilteredNews, startDate, endDate);
     return getSortedNews(dateFilteredNews, sortOrder);
-  }, [loadState, appliedSearchKeyword, startDate, endDate, sortOrder]);
+  }, [newsPayload, appliedSearchKeyword, startDate, endDate, sortOrder]);
 
   const newsData = useMemo(
     () => filteredNews.slice(0, visibleNewsCount),
@@ -256,8 +567,10 @@ const KemonoFriends3NewsSearch = () => {
   );
   const numberOfNews = filteredNews.length;
   const hasMoreNews = visibleNewsCount < numberOfNews;
-  const isLoading = loadState.status === "loading";
-  const errorMessage = loadState.status === "error" ? loadState.message : null;
+  const isInitialLoading = initialLoadStatus === "loading";
+  const isRefreshing = refreshState.status === "refreshing";
+  const isCooldownActive = refreshState.status === "cooldown" && refreshState.retryAt > relativeNow;
+  const isRefreshDisabled = isInitialLoading || isRefreshing || isCooldownActive;
 
   useEffect(() => {
     const loadMoreTarget = loadMoreRef.current;
@@ -277,10 +590,23 @@ const KemonoFriends3NewsSearch = () => {
     return () => observer.disconnect();
   }, [hasMoreNews, numberOfNews, visibleNewsCount]);
 
+  const metadata = newsPayload?.metadata ?? null;
+  const lastFetchedText = formatRelativeFetchedAt(metadata?.fetchedAt ?? null, relativeNow);
+  const refreshStatusMessage =
+    refreshState.status === "refreshing"
+      ? "ニュースを再取得しています"
+      : refreshState.status === "error"
+        ? "ニュースの再取得に失敗しました"
+        : refreshState.status === "cooldown" && isCooldownActive
+          ? "ニュースは再取得待機中です"
+          : "";
+  const refreshButtonClasses = isRefreshDisabled
+    ? "text-gray-400"
+    : "text-gray-700 hover:text-gray-900";
   return (
     <div class="min-h-screen bg-yellow-400 px-4">
       <div class="max-w-6xl mx-auto bg-white shadow-lg rounded-lg p-6 my-4">
-        {errorMessage && (
+        {initialErrorMessage && (
           <div
             class="bg-red-100 text-red-700 px-4 py-3 rounded-lg relative flex items-center justify-center"
             role="alert"
@@ -298,11 +624,11 @@ const KemonoFriends3NewsSearch = () => {
                 d="M18.364 5.636l-12.728 12.728M5.636 5.636l12.728 12.728"
               />
             </svg>
-            <span class="block sm:inline">{errorMessage}</span>
+            <span class="block sm:inline">{initialErrorMessage}</span>
           </div>
         )}
 
-        {loadState.status === "success" && loadState.metadata.source === "archive-fallback" && (
+        {newsPayload?.metadata.source === "archive-fallback" && (
           <div class="mb-4 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-900">
             <p role="status" aria-live="polite" aria-atomic="true">
               公式データを利用できなかったため、保存済みアーカイブを表示しています。
@@ -311,24 +637,24 @@ const KemonoFriends3NewsSearch = () => {
         )}
 
         <div
-          class={`flex justify-center items-center p-8 ${isLoading && !errorMessage ? "" : "hidden"}`}
+          class={`flex justify-center items-center p-8 ${isInitialLoading && !initialErrorMessage ? "" : "hidden"}`}
         >
           <div class="w-8 h-8 border-4 border-blue-200 border-t-blue-500 rounded-full animate-spin"></div>
           <span class="ml-4 text-gray-600 font-medium">データを取得しています...</span>
         </div>
 
-        <div class={`space-y-3 ${isLoading || errorMessage ? "hidden" : ""}`}>
-          {/* 検索欄トグルボタン */}
+        <div class={`space-y-3 ${isInitialLoading || !newsPayload ? "hidden" : ""}`}>
           <button
+            type="button"
             onClick={toggleSearchVisibility}
-            class={`w-full md:w-auto px-6 py-3 text-white font-medium rounded-lg transition-colors duration-200 flex items-center justify-center gap-2 ${
+            aria-expanded={isSearchVisible ? "true" : "false"}
+            aria-controls="news-search-options"
+            class={`w-full md:w-auto px-6 py-3 text-white font-medium rounded-lg transition-colors duration-200 flex items-center justify-center gap-2 focus:outline-none focus:ring-2 focus:ring-blue-700 focus:ring-offset-2 ${
               isSearchVisible ? "bg-gray-500 hover:bg-gray-600" : "bg-blue-500 hover:bg-blue-600"
             }`}
           >
             <svg
-              class={`w-5 h-5 transition-transform duration-200 ${
-                isSearchVisible ? "rotate-180" : ""
-              }`}
+              class={`w-5 h-5 transition-transform duration-200 ${isSearchVisible ? "rotate-180" : ""}`}
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -343,124 +669,164 @@ const KemonoFriends3NewsSearch = () => {
             検索オプション
           </button>
 
-          {/* 検索欄 */}
           <div
+            id="news-search-options"
+            aria-hidden={isSearchVisible ? "false" : "true"}
             class={`transition-all duration-300 ease-in-out overflow-hidden ${
               isSearchVisible ? "max-h-screen opacity-100" : "max-h-0 opacity-0"
             }`}
           >
-            <div class="bg-white p-1 rounded-lg space-y-3">
-              {/* ソート順 */}
-              <div class="flex flex-wrap items-center gap-4">
-                <div class="flex items-center gap-2">
-                  <label
-                    class="text-sm font-medium text-gray-700 whitespace-nowrap"
-                    for="sortOrder"
-                  >
-                    ソート順:
-                  </label>
-                  <div className="relative">
-                    <select
-                      id="sortOrder"
-                      value={sortOrder}
-                      onChange={handleSortOrderChange}
-                      className="w-full pl-4 pr-8 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+            {isSearchVisible && (
+              <div class="bg-white p-1 rounded-lg space-y-3">
+                <div class="flex flex-wrap items-center gap-4">
+                  <div class="flex items-center gap-2">
+                    <label
+                      class="text-sm font-medium text-gray-700 whitespace-nowrap"
+                      for="sortOrder"
                     >
-                      <option value="desc">新しい順</option>
-                      <option value="asc">古い順</option>
-                    </select>
-                    <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none">
-                      <svg
-                        className="w-5 h-5 text-gray-500"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
+                      ソート順:
+                    </label>
+                    <div className="relative">
+                      <select
+                        id="sortOrder"
+                        value={sortOrder}
+                        onChange={handleSortOrderChange}
+                        className="w-full pl-4 pr-8 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
                       >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth="2"
-                          d="M19 9l-7 7-7-7"
-                        />
-                      </svg>
+                        <option value="desc">新しい順</option>
+                        <option value="asc">古い順</option>
+                      </select>
+                      <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none">
+                        <svg
+                          className="w-5 h-5 text-gray-500"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth="2"
+                            d="M19 9l-7 7-7-7"
+                          />
+                        </svg>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
 
-              {/* キーワード検索 */}
-              <div className="space-y-2">
-                <label className="block text-sm font-medium text-gray-700">キーワード検索:</label>
-                <div className="flex flex-wrap gap-2">
-                  <input
-                    type="text"
-                    className="flex-1 min-w-[200px] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="(測定 or 掃除) 開催 -予告"
-                    value={searchKeyword}
-                    onChange={handleSearchChange}
-                    onKeyDown={handleKeyDown}
-                  />
-                  <button
-                    onClick={handleSearch}
-                    className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg transition-colors duration-200"
-                  >
-                    検索
-                  </button>
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700" for="news-keyword">
+                    キーワード検索:
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    <input
+                      type="text"
+                      id="news-keyword"
+                      className="flex-1 min-w-[200px] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      placeholder="(測定 or 掃除) 開催 -予告"
+                      value={searchKeyword}
+                      onChange={handleSearchChange}
+                      onKeyDown={handleKeyDown}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSearch}
+                      className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-700 focus:ring-offset-2"
+                    >
+                      検索
+                    </button>
+                  </div>
+                </div>
+
+                <div class="space-y-2">
+                  <span class="block text-sm font-medium text-gray-700">期間:</span>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <label for="startDate" class="sr-only">
+                      開始日
+                    </label>
+                    <input
+                      type="date"
+                      id="startDate"
+                      value={startDate}
+                      onChange={handleStartDateChange}
+                      class="px-4 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+                    />
+                    <span class="text-gray-500" aria-hidden="true">
+                      ～
+                    </span>
+                    <label for="endDate" class="sr-only">
+                      終了日
+                    </label>
+                    <input
+                      type="date"
+                      id="endDate"
+                      value={endDate}
+                      onChange={handleEndDateChange}
+                      class="px-4 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+                    />
+                  </div>
                 </div>
               </div>
-
-              {/* 日付範囲 */}
-              <div class="space-y-2">
-                <label class="block text-sm font-medium text-gray-700">期間:</label>
-                <div class="flex flex-wrap items-center gap-2">
-                  <input
-                    type="date"
-                    id="startDate"
-                    value={startDate}
-                    onChange={handleStartDateChange}
-                    class="px-4 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
-                  />
-                  <span class="text-gray-500">～</span>
-                  <input
-                    type="date"
-                    id="endDate"
-                    value={endDate}
-                    onChange={handleEndDateChange}
-                    class="px-4 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
-                  />
-                </div>
-              </div>
-            </div>
-            <div class="border-t border-gray-300 my-4"></div>
-          </div>
-
-          {/* お知らせヒット件数 */}
-          <div class="flex items-center gap-4 text-sm text-gray-600 font-medium mt-0">
-            <span>おしらせの件数: {numberOfNews}件</span>
-            {loadState.status === "success" && (
-              <span data-testid="news-metadata">
-                データ取得:{" "}
-                {loadState.metadata.fetchedAt ? (
-                  <time dateTime={loadState.metadata.fetchedAt}>
-                    {formatRelativeFetchedAt(loadState.metadata.fetchedAt)}
-                  </time>
-                ) : (
-                  <span>不明</span>
-                )}
-              </span>
             )}
+            {isSearchVisible && <div class="border-t border-gray-300 my-4"></div>}
           </div>
 
-          {/* ニュースリスト */}
+          <div class="flex items-center gap-3 mt-0">
+            <span class={METADATA_TEXT_CLASS}>おしらせの件数: {numberOfNews}件</span>
+            {metadata && (
+              <div class="ml-auto flex items-center gap-1.5">
+                <span
+                  data-testid="news-metadata"
+                  data-refresh-status={refreshState.status}
+                  aria-busy={isRefreshing ? "true" : "false"}
+                  class="inline-flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <RefreshStatusIcon status={refreshState.status} />
+                  <span class={METADATA_TEXT_CLASS}>
+                    最終取得:{" "}
+                    {metadata.fetchedAt ? (
+                      <time dateTime={metadata.fetchedAt}>{lastFetchedText}</time>
+                    ) : (
+                      lastFetchedText
+                    )}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  data-testid="news-refresh-button"
+                  onClick={() => refreshNewsRef.current?.()}
+                  disabled={isRefreshDisabled}
+                  aria-label="ニュースを再取得"
+                  aria-describedby="news-refresh-status"
+                  title="ニュースを再取得"
+                  class={`inline-flex min-h-7 cursor-pointer items-center justify-center rounded p-1 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed ${refreshButtonClasses}`}
+                >
+                  <ReloadIcon />
+                </button>
+              </div>
+            )}
+            <span
+              id="news-refresh-status"
+              class="sr-only"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              {refreshStatusMessage}
+            </span>
+          </div>
+
           <ul class="space-y-4">
-            {newsData.map((news, index) => (
+            {newsData.map((news) => (
               <li
-                key={index}
+                key={news.targetUrl}
                 class="group bg-white hover:bg-blue-50 border border-gray-300 rounded-lg transition-all duration-200 hover:shadow-lg"
               >
                 <a
                   href={`https://kemono-friends-3.jp${news.targetUrl}`}
                   target="_blank"
+                  rel="noreferrer"
                   class="block p-4"
                 >
                   <div class="flex flex-wrap items-center gap-2 mb-2">
