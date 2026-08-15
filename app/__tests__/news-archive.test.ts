@@ -81,7 +81,7 @@ const streamFromChunks = (chunks: Uint8Array[], onCancel?: () => void) =>
 
 type FakeStoredObject = { text: string; etag: string };
 type PutOptions = {
-  onlyIf?: R2Conditional | Headers;
+  onlyIf?: R2Conditional;
   httpMetadata?: R2PutOptions["httpMetadata"];
 };
 type PutCall = {
@@ -137,13 +137,15 @@ const createMutableBucket = (
       if (concurrentObject) objects.set(key, concurrentObject);
       const existing = objects.get(key);
       const onlyIf = putOptions?.onlyIf;
-      if (onlyIf instanceof Headers) {
-        if (onlyIf.get("If-None-Match") === "*" && existing) return null;
-      } else if (onlyIf) {
+      if (onlyIf) {
         if (onlyIf.etagMatches && (!existing || existing.etag !== onlyIf.etagMatches)) {
           return null;
         }
-        if (onlyIf.etagDoesNotMatch && existing?.etag === onlyIf.etagDoesNotMatch) {
+        if (
+          onlyIf.etagDoesNotMatch === "*"
+            ? existing !== undefined
+            : existing?.etag === onlyIf.etagDoesNotMatch
+        ) {
           return null;
         }
       }
@@ -186,8 +188,7 @@ const asStoredObject = (value: unknown, etag: string): FakeStoredObject => ({
 });
 
 const expectCreateIfAbsent = (onlyIf: PutOptions["onlyIf"]) => {
-  expect(onlyIf).toBeInstanceOf(Headers);
-  expect((onlyIf as unknown as Headers).get("If-None-Match")).toBe("*");
+  expect(onlyIf).toEqual({ etagDoesNotMatch: "*" });
 };
 
 const createSortedDocument = (count: number) => ({

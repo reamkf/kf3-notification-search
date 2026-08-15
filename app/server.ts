@@ -1,13 +1,16 @@
 import type { ExportedHandler } from "@cloudflare/workers-types";
+import type { Context } from "hono";
 import { createHono } from "honox/factory";
 import { createApp } from "honox/server";
 import {
+  CURRENT_ARCHIVE_KEY,
   LEGACY_ARCHIVE_KEY,
   NewsArchiveError,
   fetchOfficialNews,
   readArchiveDocument,
   readCurrentArchiveDocumentIfEtag,
   readOfficialFetchEligibility,
+  serializeArchiveErrorForLog,
   updateNewsArchive,
   type ArchiveLogger,
   type NewsArchiveUpdateDependencies,
@@ -20,16 +23,20 @@ import {
   type ValidatedNewsMergeResult,
 } from "./news-data";
 import {
+  acquireNewsRefreshLease,
+  completeNewsRefreshLease,
+  hasActiveNewsRefreshLease,
+  type NewsRefreshAcquireResult,
+} from "./news-refresh-control";
+import {
   createNewsCacheMetadata,
   createNewsResponseHeaders,
   type NewsCacheMetadata,
-  type NewsCacheSource,
 } from "./news-response-metadata";
 
 const oldNewsPath = `/${LEGACY_ARCHIVE_KEY}`;
 const cacheKey = "kf3-news";
 const normalCacheTtl = 60 * 5;
-const fallbackCacheTtl = 60;
 const heartbeatTimeoutMs = 10_000;
 
 export type ServerDependencies = {
@@ -61,19 +68,31 @@ const getErrorStage = (error: unknown) => {
 const createApiErrorLog = (error: unknown, archiveCount: number | null = null) => ({
   event: "news_api_error",
   stage: getErrorStage(error),
-  error: error instanceof Error ? error.message : "ニュースAPI処理に失敗しました",
+  error: "ニュースAPI処理に失敗しました",
+  originalError: serializeArchiveErrorForLog(error),
   archiveCount,
 });
 
-const createFallbackLog = (error: unknown, archiveCount: number) => ({
-  event: "news_api_fallback",
+const createRefreshErrorLog = (error: unknown, archiveCount: number | null = null) => ({
+  event: "news_refresh_failed",
   stage: getErrorStage(error),
-  error: error instanceof Error ? error.message : "公式ニュース処理に失敗しました",
+  error: "ニュース更新に失敗しました",
+  originalError: serializeArchiveErrorForLog(error),
   archiveCount,
 });
 
-const createJsonResponse = (json: string, metadata?: NewsCacheMetadata) =>
-  new Response(json, { headers: createNewsResponseHeaders(metadata) });
+const refreshPath = "/api/kf3-news/refresh";
+
+const createJsonResponse = (json: string, metadata?: NewsCacheMetadata) => {
+  const headers = createNewsResponseHeaders(metadata);
+  headers.set("cache-control", "no-store");
+  return new Response(json, { headers });
+};
+
+const createRefreshResponse = (
+  news: ReturnType<typeof projectValidatedClientNews>,
+  metadata: NewsCacheMetadata,
+) => createJsonResponse(JSON.stringify({ news, metadata }), metadata);
 
 type HeartbeatStage = "heartbeat-start" | "heartbeat-success" | "heartbeat-fail";
 
@@ -104,103 +123,102 @@ const sendHeartbeat = async (
   }
 };
 
-const getMergedClientNewsUnconditionally = async (
+const readArchiveSnapshot = async (env: WorkerBindings) => {
+  const archive = await readArchiveDocument(env.KF3_NOTIF_DATA);
+  return {
+    archive,
+    clientNews: projectValidatedClientNews(archive.document),
+  };
+};
+
+type RefreshNewsResult = {
+  news: ReturnType<typeof projectValidatedClientNews>;
+  currentEtag: string | null;
+};
+
+const getRefreshNewsUnconditionally = async (
   env: WorkerBindings,
   dependencies: ServerDependencies,
-  logger: ArchiveLogger,
-): Promise<{
-  clientNews: ReturnType<typeof projectValidatedClientNews>;
-  expirationTtl: number;
-  source: NewsCacheSource;
-}> => {
+): Promise<RefreshNewsResult> => {
   const [archiveResult, officialResult] = await Promise.allSettled([
     readArchiveDocument(env.KF3_NOTIF_DATA),
     fetchOfficialNews(dependencies.fetcher ?? fetch),
   ]);
   if (archiveResult.status === "rejected") throw archiveResult.reason;
-  const archive = archiveResult.value;
-
-  if (officialResult.status === "rejected") {
-    const clientNews = projectValidatedClientNews(archive.document);
-    logger.error(createFallbackLog(officialResult.reason, clientNews.length));
-    return { clientNews, expirationTtl: fallbackCacheTtl, source: "archive-fallback" };
-  }
+  if (officialResult.status === "rejected") throw officialResult.reason;
   if (officialResult.value.status !== "modified") {
     throw new NewsArchiveError("official-fetch", "公式ニュースの応答形式が不正です");
   }
-
-  let merged: ValidatedNewsMergeResult;
-  try {
-    merged = mergeValidatedNewsDocument(archive.document, officialResult.value.document, {
+  const merged = mergeValidatedNewsDocument(
+    archiveResult.value.document,
+    officialResult.value.document,
+    {
       validateOfficialEntries: true,
-    });
-  } catch (error) {
-    const clientNews = projectValidatedClientNews(archive.document);
-    logger.error(createFallbackLog(error, clientNews.length));
-    return { clientNews, expirationTtl: fallbackCacheTtl, source: "archive-fallback" };
-  }
+    },
+  );
   return {
-    clientNews: projectValidatedClientNews(merged.document),
-    expirationTtl: normalCacheTtl,
-    source: "merged",
+    news: projectValidatedClientNews(merged.document),
+    currentEtag: archiveResult.value.etag,
   };
 };
 
-const getMergedClientNews = async (
+const getRefreshNews = async (
   env: WorkerBindings,
   dependencies: ServerDependencies,
-  logger: ArchiveLogger,
-): Promise<{
-  clientNews: ReturnType<typeof projectValidatedClientNews>;
-  expirationTtl: number;
-  source: NewsCacheSource;
-}> => {
+): Promise<RefreshNewsResult> => {
   const eligibility = await readOfficialFetchEligibility(env.KF3_NOTIF_DATA);
-  if (!eligibility.ifNoneMatch) {
-    return getMergedClientNewsUnconditionally(env, dependencies, logger);
-  }
+  if (!eligibility.ifNoneMatch) return getRefreshNewsUnconditionally(env, dependencies);
 
-  let officialResult;
-  try {
-    officialResult = await fetchOfficialNews(dependencies.fetcher ?? fetch, {
-      ifNoneMatch: eligibility.ifNoneMatch,
-    });
-  } catch (error) {
-    const archive = await readArchiveDocument(env.KF3_NOTIF_DATA);
-    const clientNews = projectValidatedClientNews(archive.document);
-    logger.error(createFallbackLog(error, clientNews.length));
-    return { clientNews, expirationTtl: fallbackCacheTtl, source: "archive-fallback" };
-  }
-
-  if (officialResult.status === "not-modified") {
-    const archive = await readCurrentArchiveDocumentIfEtag(
+  const official = await fetchOfficialNews(dependencies.fetcher ?? fetch, {
+    ifNoneMatch: eligibility.ifNoneMatch,
+  });
+  if (official.status === "not-modified") {
+    const current = await readCurrentArchiveDocumentIfEtag(
       env.KF3_NOTIF_DATA,
       eligibility.state?.currentEtag ?? "",
     );
-    if (!archive) return getMergedClientNewsUnconditionally(env, dependencies, logger);
-    return {
-      clientNews: projectValidatedClientNews(archive.document),
-      expirationTtl: normalCacheTtl,
-      source: "merged",
-    };
+    if (current) {
+      return {
+        news: projectValidatedClientNews(current.document),
+        currentEtag: current.etag,
+      };
+    }
+    return getRefreshNewsUnconditionally(env, dependencies);
   }
 
   const archive = await readArchiveDocument(env.KF3_NOTIF_DATA);
   let merged: ValidatedNewsMergeResult;
-  try {
-    merged = mergeValidatedNewsDocument(archive.document, officialResult.document, {
-      validateOfficialEntries: true,
-    });
-  } catch (error) {
-    const clientNews = projectValidatedClientNews(archive.document);
-    logger.error(createFallbackLog(error, clientNews.length));
-    return { clientNews, expirationTtl: fallbackCacheTtl, source: "archive-fallback" };
-  }
+  merged = mergeValidatedNewsDocument(archive.document, official.document, {
+    validateOfficialEntries: true,
+  });
   return {
-    clientNews: projectValidatedClientNews(merged.document),
-    expirationTtl: normalCacheTtl,
-    source: "merged",
+    news: projectValidatedClientNews(merged.document),
+    currentEtag: archive.etag,
   };
+};
+
+const getRetryHeaders = (retryAfterSeconds: number) =>
+  new Headers({
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "retry-after": String(retryAfterSeconds),
+  });
+
+const createRefreshBusyResponse = (
+  result: Exclude<NewsRefreshAcquireResult, { status: "acquired" }>,
+) => {
+  const headers = getRetryHeaders(result.retryAfterSeconds);
+  const body =
+    result.status === "running"
+      ? { error: "ニュース更新が実行中です", leaseUntil: result.leaseUntil }
+      : { error: "ニュース更新はクールダウン中です", nextAvailableAt: result.nextAvailableAt };
+  if (result.status === "cooldown") {
+    headers.set("x-kf3-news-refresh-next-available-at", result.nextAvailableAt);
+  }
+  return new Response(JSON.stringify(body), {
+    status: result.status === "running" ? 202 : 429,
+    headers,
+  });
 };
 
 const createNewsApp = (dependencies: ServerDependencies) => {
@@ -226,20 +244,123 @@ const createNewsApp = (dependencies: ServerDependencies) => {
       if (cachedNews.value !== null)
         return createJsonResponse(cachedNews.value, cachedNews.metadata ?? undefined);
 
-      const result = await getMergedClientNews(context.env, dependencies, logger);
-      archiveCount = result.clientNews.length;
+      const snapshot = await readArchiveSnapshot(context.env);
+      archiveCount = snapshot.clientNews.length;
       const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
-      const metadata = createNewsCacheMetadata(result.source, fetchedAt);
-      const responseJson = JSON.stringify(result.clientNews);
-      await context.env.KF3_NOTIF_CACHE.put(cacheKey, responseJson, {
-        expirationTtl: result.expirationTtl,
-        metadata,
-      });
-      return createJsonResponse(responseJson, metadata);
+      const metadata = createNewsCacheMetadata("archive-snapshot", fetchedAt);
+      return createJsonResponse(JSON.stringify(snapshot.clientNews), metadata);
     } catch (error) {
       logger.error(createApiErrorLog(error, archiveCount));
       return context.json({ error: "ニュースデータの取得に失敗しました" }, 500);
     }
+  });
+
+  const refreshNews = async (
+    context: Context<
+      {
+        Bindings: WorkerBindings;
+        Variables: {};
+      },
+      typeof refreshPath
+    >,
+  ) => {
+    let archiveCount: number | null = null;
+    let token: string | null = null;
+    try {
+      const acquired = await acquireNewsRefreshLease(
+        context.env.KF3_NOTIF_DATA,
+        dependencies.clock?.() ?? Date.now(),
+      );
+      if (acquired.status !== "acquired") {
+        logger.error({
+          event: "news_refresh_failed",
+          stage: "refresh-control",
+          error:
+            acquired.status === "running"
+              ? "ニュース更新が実行中です"
+              : "ニュース更新はクールダウン中です",
+          archiveCount,
+          reason: acquired.status,
+          retryAfterSeconds: acquired.retryAfterSeconds,
+        });
+        return createRefreshBusyResponse(acquired);
+      }
+      token = acquired.token;
+
+      let result = await getRefreshNews(context.env, dependencies);
+      let current = await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY);
+      if ((result.currentEtag ?? null) !== (current?.etag ?? null)) {
+        result = await getRefreshNews(context.env, dependencies);
+        current = await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY);
+        if ((result.currentEtag ?? null) !== (current?.etag ?? null)) {
+          throw new NewsArchiveError("etag-conflict", "refresh中にcurrentが競合しました");
+        }
+      }
+      archiveCount = result.news.length;
+      if (
+        !(await hasActiveNewsRefreshLease(
+          context.env.KF3_NOTIF_DATA,
+          token,
+          dependencies.clock?.() ?? Date.now(),
+        ))
+      ) {
+        return new Response(JSON.stringify({ error: "ニュース更新のleaseが失効しました" }), {
+          status: 202,
+          headers: getRetryHeaders(1),
+        });
+      }
+      const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
+      const metadata = createNewsCacheMetadata("merged", fetchedAt);
+      const responseJson = JSON.stringify(result.news);
+      await context.env.KF3_NOTIF_CACHE.put(cacheKey, responseJson, {
+        expirationTtl: normalCacheTtl,
+        metadata,
+      });
+      let leaseCompletion: string;
+      try {
+        leaseCompletion = await completeNewsRefreshLease(
+          context.env.KF3_NOTIF_DATA,
+          token,
+          "success",
+          dependencies.clock?.() ?? Date.now(),
+        );
+      } catch (error) {
+        leaseCompletion = "error";
+        logger.error({
+          event: "news_refresh_control_completion_failed",
+          originalError: serializeArchiveErrorForLog(error),
+        });
+      }
+      logger.log({
+        event: "news_refresh_succeeded",
+        archiveCount,
+        mergedCount: result.news.length,
+        leaseCompletion,
+      });
+      return createRefreshResponse(result.news, metadata);
+    } catch (error) {
+      logger.error(createRefreshErrorLog(error, archiveCount));
+      if (token !== null) {
+        try {
+          await completeNewsRefreshLease(
+            context.env.KF3_NOTIF_DATA,
+            token,
+            "failure",
+            dependencies.clock?.() ?? Date.now(),
+          );
+        } catch (completionError) {
+          logger.error(createRefreshErrorLog(completionError, archiveCount));
+        }
+      }
+      return context.json({ error: "ニュース更新に失敗しました" }, 503);
+    }
+  };
+
+  baseApp.all(refreshPath, async (context) => {
+    if (context.req.method !== "POST") {
+      return new Response(null, { status: 405, headers: { Allow: "POST" } });
+    }
+    return refreshNews(context);
   });
 
   return baseApp;

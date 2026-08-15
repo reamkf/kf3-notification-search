@@ -29,8 +29,7 @@ const createDocument = (count: number) => ({
   news: Array.from({ length: count }, (_, index) => createNews(index + 1)),
 });
 
-const createIfAbsentCondition = () =>
-  new Headers({ "If-None-Match": "*" }) as unknown as NonNullable<R2PutOptions["onlyIf"]>;
+const createIfAbsentCondition = () => ({ etagDoesNotMatch: "*" });
 const logger = { log: () => undefined, error: () => undefined };
 
 type WorkerFetch = NonNullable<ExportedHandler<WorkerBindings>["fetch"]>;

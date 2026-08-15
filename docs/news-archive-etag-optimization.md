@@ -2,42 +2,22 @@
 
 ## 状態
 
-本書は、日次scheduled処理とページリクエストのKV cache missで公式ETagを利用する現行実装の仕様を示す。公式レスポンスのデータ形式とHTTP ETagの契約は [公式ニュース配信仕様](./official-news-spec.md) を参照する。コードへの反映は完了しているが、本番Workerでの304応答、CPU時間、304率の受け入れ確認は未完了であり、運用状態は [ニュースアーカイブ導入状態](./news-archive-rollout.md) を参照する。
+本書は、scheduled処理と表示用refreshで公式ETagを利用する現行実装の仕様を示す。表示用APIの`GET /api/kf3-news`は公式取得やETag条件付き取得を行わず、KV snapshotまたはR2 snapshotを返す。`POST /api/kf3-news/refresh`は保存済みstateとcurrent ETagが対応する場合だけ条件付き取得を利用するが、公式ETag stateを書き換えず、scheduledの最適化状態へ影響を与えない。公式レスポンスのデータ形式とHTTP ETagの契約は [公式ニュース配信仕様](./official-news-spec.md) を参照する。
 
 ## 目的
 
-公式配信元のETagと`If-None-Match`を利用し、公式データが前回の正常処理から変わっていない場合に、scheduled処理とページリクエストのKV cache missで本文処理を省略する。KV cache hitは従来どおり外部I/Oを行わない。
+公式配信元のETagと`If-None-Match`をscheduled処理で利用し、公式データが前回の正常処理から変わっていない場合に本文処理を省略する。表示用データのrefreshは、表示用KVを最新化する独立した処理として公式データを取得、検証、mergeする。refreshの実行結果は公式ETag stateや`archive/current.json`の正しさの根拠にならない。
 
 scheduledの304経路では次を行わない。
 
 - 公式レスポンス本文の読み込みとUTF-8デコード
 - 公式JSONの解析と検証
 - `archive/current.json`本文の読み込み、JSON解析、検証
-- 累積アーカイブと公式データのID統合とdeep equality比較
+- 累積archiveと公式データのID統合とdeep equality比較
 - 統合結果のソートとJSONシリアライズ
-- 日次バックアップ、current更新、KV削除
+- 日次backup、current更新、KV削除
 
-APIのKV cache missで304を受けた場合は、公式本文を読まずに`archive/current.json`を同じETagで条件付き取得する。current本文は保存用shapeを検証してクライアント用配列へ投影し、KVへ保存するため、scheduledの304とは異なりcurrent本文を読み込む。
-
-Cron Triggerの頻度、日次バックアップと月次バックアップの意味、`archive/current.json`の更新条件は変更しない。
-
-## 調査結果
-
-公式配信元`https://kemono-friends-3.jp/info/all/entries.txt`は、通常のGETで強いETagと`Last-Modified`を返す。同じETagを`If-None-Match`へ指定したGETではHTTP 304、本文0 bytes、同じETagを返すことを確認した。
-
-`fetchOfficialNews`は、条件付き取得のHTTP 304を`Response.ok`による判定に依存せず、本文を読み込まない`not-modified`結果として明示的に処理する。これにより、304時のJSON解析やアーカイブ統合を省略できる。
-
-本番legacyデータと調査時点の公式データから現行ロジックで累積アーカイブを構成し、変更なし経路のJSON解析、検証、統合をローカルBunで100回計測した参考値は次のとおりだった。この値はWorkers本番CPU時間を示すものではなく、R2本文と公式本文のデコード、ログ、heartbeat、ランタイム差を含まない。
-
-| 項目                 | 値                       |
-| -------------------- | ------------------------ |
-| 累積アーカイブ       | 5,598件、1,472,151 bytes |
-| 公式データ           | 2,000件、631,395 bytes   |
-| 変更なし処理の中央値 | 4.11ms                   |
-| 変更なし処理のp95    | 6.32ms                   |
-| 変更なし処理の最大値 | 8.04ms                   |
-
-公式データが変更された日の200経路は現行と同等の処理を必要とする。したがって、全体の効果は304となる日の割合に依存し、導入後のログから評価する。上記の件数、byte数、ベンチマーク値は調査時点の参考値であり、現行データやWorkers本番のCPU時間を保証するものではない。
+表示用GETのKV missでは公式取得を行わず、R2 snapshotを投影して直接返す。GETはR2の投影結果を表示用KVへ書き戻さない。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KVとrefresh制御metadataだけを更新し、ETag state、current、daily、monthlyを更新しない。
 
 ## 設計方針
 
@@ -46,13 +26,13 @@ Cron Triggerの頻度、日次バックアップと月次バックアップの�
 - 正常に検証して処理した公式レスポンスのETag
 - その公式レスポンスを反映済み、または統合結果が同一であると確認済みの`archive/current.json`のR2のETag
 
-日次処理の開始時に、保存済みの`current`のETagと実際の`current`のETagが一致する場合だけ条件付きGETを行う。これにより、復元、手動操作、別実行によってcurrentが変わった後に、古い公式ETagを使って処理を省略することを防ぐ。
+scheduled処理の開始時に、保存済みのcurrentのETagと実際のcurrentのETagが一致する場合だけ条件付きGETを行う。これにより、復元、手動操作、別実行によってcurrentが変わった後に、古い公式ETagを使って処理を省略することを防ぐ。
 
-状態は正しさの根拠ではなく最適化用のヒントとして扱う。状態が欠落、不正、競合、またはcurrentと不一致の場合は、エラーで停止せず条件なしの完全処理へ切り替える。
+stateは正しさの根拠ではなく最適化用のヒントとして扱う。stateが欠落、不正、競合、またはcurrentと不一致の場合は、エラーで停止せず条件なしの完全処理へ切り替える。refreshも同じ対応関係を条件付き取得の判定に利用するが、stateは書き換えない。refreshの実行後もscheduledは保存済みstateとcurrent ETagの対応を検証する。
 
-## 状態オブジェクト
+## 状態object
 
-状態は本番データ用R2の次のキーへ保存する。
+状態は本番データ用R2の次のkeyへ保存する。
 
 ```text
 KF3_NOTIF_DATA/archive/official-fetch-state.json
@@ -76,9 +56,9 @@ KF3_NOTIF_DATA/archive/official-fetch-state.json
 | `officialEtag` | 公式レスポンスから取得したRFC準拠の単一entity-tagである強いETag。空のopaque-tagを含む。引用符を含むヘッダー値を保存し、長さは1024文字以下とする |
 | `currentEtag`  | 検証済み`archive/current.json`の引用符を含まないR2のETag                                                                                        |
 
-ETagが欠落している場合、弱いETagである場合、長さや文字がヘッダー値として不正な場合は状態を更新せず、次回も完全処理を行う。
+ETagが欠落している場合、弱いETagである場合、長さや文字がヘッダー値として不正な場合はstateを更新せず、次回も完全処理を行う。
 
-状態の保存先にはWorkers KVを使用しない。KVは結果整合性であり、本処理はcurrentとの対応関係を確認する必要がある。R2の`head()`、強整合な読み書き、ETag条件付きPUTを使用する。
+stateの保存先にはWorkers KVを使用しない。KVは結果整合性であり、本処理はcurrentとの対応関係を確認する必要がある。R2の`head()`、強整合な読み書き、ETag条件付きPUTを使用する。
 
 `archive/current.json`のcustom metadataへ公式ETagを保存する方法も採用しない。公式のバイト列だけが変わり統合結果が同じ場合に、metadata更新のためだけにcurrentを上書きする必要が生じるためである。
 
@@ -86,9 +66,9 @@ ETagが欠落している場合、弱いETagである場合、長さや文字が
 
 ```mermaid
 flowchart TD
-    Start[scheduled開始] --> State[公式ETag状態を読む]
+    Start[scheduled開始] --> State[公式ETag stateを読む]
     Start --> HeadCurrent[currentをHEADする]
-    State --> Eligible{状態が正常かつcurrentのETag一致}
+    State --> Eligible{stateが正常かつcurrentのETag一致}
     HeadCurrent --> Eligible
     Eligible -->|いいえ| FullFetch[条件なしで公式データを取得]
     Eligible -->|はい| ConditionalFetch[If-None-Match付きで取得]
@@ -101,7 +81,7 @@ flowchart TD
     StreamCurrent -->|ETag一致| Monthly[current本文を解析せずmonthlyへ保存]
     StreamCurrent -->|nullまたは不一致| FullFetch
     Monthly --> Skip
-    FullProcess --> SaveState[全必須処理の後に状態を保存]
+    FullProcess --> SaveState[全必須処理の後にstateを保存]
     SaveState --> Done[正常終了]
     Skip --> Done
 ```
@@ -111,126 +91,127 @@ flowchart TD
 次をすべて満たす場合だけ`If-None-Match`を送る。
 
 1. `archive/current.json`が存在する。
-2. 状態オブジェクトがJSONとして解析でき、保存形式を満たす。
-3. 状態の`currentEtag`が`head()`で取得した`current`のETagと一致する。
-4. 状態の`officialEtag`が利用可能な強いETagである。
+2. state objectがJSONとして解析でき、保存形式を満たす。
+3. stateの`currentEtag`が`head()`で取得したcurrentのETagと一致する。
+4. stateの`officialEtag`が利用可能な強いETagである。
 
 currentが存在せずlegacyデータを使用する初回移行では、必ず条件なしの完全処理を行う。
 
 ### 304経路
 
-304を受け取った場合、保存済み状態によって公式データとcurrentの双方が前回の検証済み状態から変わっていないと判断する。currentと公式の本文は取得または解析しない。
+304を受け取った場合、保存済みstateによって公式データとcurrentの双方が前回の検証済み状態から変わっていないと判断する。currentと公式の本文は取得または解析しない。
 
-月次バックアップの補完を維持するため、当月の`monthly/YYYY-MM.json`を`head()`する。存在する場合はR2とKVを変更せず正常終了する。存在しない場合は次の順で作成する。
+月次backupの補完を維持するため、当月の`monthly/YYYY-MM.json`を`head()`する。存在する場合はR2とKVを変更せず正常終了する。存在しない場合は次の順で作成する。
 
-1. 状態の`currentEtag`を条件に`archive/current.json`を取得する。
-2. 条件不一致の場合は月次バックアップを作成せず、公式データを条件なしで再取得して完全処理へ切り替える。
+1. stateの`currentEtag`を条件に`archive/current.json`を取得する。
+2. 条件不一致の場合は月次backupを作成せず、公式データを条件なしで再取得して完全処理へ切り替える。
 3. current本文の`ReadableStream`をJSON解析せず、当月monthlyへ条件付きで新規作成する。
-4. monthlyキーが競合した場合は現行仕様と同じく保存済みとして扱う。
-
-### APIのKV cache miss経路
-
-APIのKV cache hitでは、従来どおりR2と公式サーバーへアクセスしない。cache missではstateの読み込みとcurrentの`head()`を並行して行い、stateの`currentEtag`と現在のcurrent R2 ETagが一致した場合だけ公式ETagを`If-None-Match`へ指定する。公式ETagとR2 ETagを相互比較しない。
-
-APIが304を受け取った場合は公式本文を読み込まず、currentを同じR2 ETagの条件付きGETで取得する。取得したcurrent本文だけを保存用スキーマで検証してクライアント用配列へ投影し、通常の統合結果と同じTTL 300秒でKVへ保存する。currentの条件付き取得が競合した場合は古い本文を返さず、公式を条件なしで再取得して通常の統合へ戻る。APIはstateを更新しない。
+4. monthly keyが競合した場合は保存済みとして扱う。
 
 ### 200経路
 
-200の場合は、現在の公式取得、検証、統合、日次バックアップ、current更新、KV削除、月次バックアップを維持する。
-
-公式ETag状態は次のすべてが完了した後で更新する。
+200の場合は公式取得、検証、archiveとの統合、必要な日次backup、current更新、KV削除、月次backupを行う。公式ETag stateは次のすべてが完了した後で更新する。
 
 1. 公式レスポンスの取得と検証
-2. 既存アーカイブとの統合
-3. 変更がある場合の日次バックアップとcurrent更新
+2. 既存archiveとの統合
+3. 変更がある場合の日次backupとcurrent更新
 4. 変更がある場合のKV削除
 5. 当月monthlyの作成または存在確認
 
-統合結果に変更がない場合も、公式レスポンスのETagと読み込み済み`current`のETagを状態へ保存する。公式のキー順や未知フィールド表現だけが変わり、統合結果が同一だった場合も、次回から新しいETagで条件付き取得できるようにする。
+統合結果に変更がない場合も、公式レスポンスのETagと読み込み済みcurrentのETagをstateへ保存する。公式のキー順や未知フィールド表現だけが変わり、統合結果が同一だった場合も、次回から新しいETagで条件付き取得できるようにする。
 
-状態PUTには、読み込み時の状態オブジェクトETagを使用する。状態が未作成の場合は存在しないことを条件にする。競合または保存失敗はアーカイブの正しさへ影響しないため、archiveを巻き戻さず、成功ログの`etagStateStatus`へ反映して次回の完全処理へ委ねる。状態保存専用のwarningログは出さない。
+state PUTには、読み込み時のstate object ETagを使用する。stateが未作成の場合は存在しないことを条件にする。競合または保存失敗はarchiveの正しさへ影響しないため、archiveを巻き戻さず、成功ログの`etagStateStatus`へ反映して次回の完全処理へ委ねる。state保存専用のwarningログは出さない。
+
+refresh成功後に公式ETag stateを保存してはならない。refreshは表示用KVと制御metadataだけを変更し、次回scheduledがstateとcurrentの対応を検証できる状態を維持する。
 
 ## 失敗時の扱い
 
-| 状況                                 | 扱い                                                                      |
-| ------------------------------------ | ------------------------------------------------------------------------- |
-| 状態が欠落または不正                 | 条件なしの完全処理へ切り替える                                            |
-| `current`のETagが状態と不一致        | 条件なしの完全処理へ切り替える                                            |
-| 公式レスポンスに強いETagがない       | 200本文を通常処理し、最適化状態は更新しない                               |
-| 条件付きGETが304                     | 公式本文とcurrent本文の処理を省略し、monthlyだけ確認する                  |
-| 条件付きGETが200                     | 現行の完全処理を行う                                                      |
-| 条件付きGETが304と200以外            | 現行の公式取得失敗としてR2とKVを変更しない                                |
-| current更新前に処理が失敗            | 状態を更新しない                                                          |
-| current更新後にKVまたはmonthlyが失敗 | 状態を更新しない。次回は完全処理または`current`のETag不一致から再確認する |
-| 状態の保存が失敗または競合           | currentを巻き戻さず`etagStateStatus`へ記録し、次回の完全処理へ委ねる      |
+| 状況                                 | 扱い                                                                     |
+| ------------------------------------ | ------------------------------------------------------------------------ |
+| stateが欠落または不正                | scheduledは条件なしの完全処理へ切り替える                                |
+| currentのETagがstateと不一致         | scheduledは条件なしの完全処理へ切り替える                                |
+| 公式レスポンスに強いETagがない       | 200本文を通常処理し、最適化stateは更新しない                             |
+| 条件付きGETが304                     | 公式本文とcurrent本文の処理を省略し、monthlyだけ確認する                 |
+| 条件付きGETが200                     | 現行の完全処理を行う                                                     |
+| 条件付きGETが304と200以外            | 公式取得失敗としてR2とKVを変更しない                                     |
+| current更新前に処理が失敗            | stateを更新しない                                                        |
+| current更新後にKVまたはmonthlyが失敗 | stateを更新しない。次回は完全処理またはcurrentのETag不一致から再確認する |
+| stateの保存が失敗または競合          | currentを巻き戻さず`etagStateStatus`へ記録し、次回の完全処理へ委ねる     |
+| refreshの公式取得またはmergeが失敗   | 表示用KV、archive、ETag stateを変更せず503を返す                         |
 
-状態をcurrent更新より先に保存してはならない。先に保存すると、currentへ反映されなかった公式ETagに対して翌日の取得が304となり、未反映の変更を省略する可能性がある。
+stateをcurrent更新より先に保存してはならない。先に保存すると、currentへ反映されなかった公式ETagに対して翌日の取得が304となり、未反映の変更を省略する可能性がある。
 
 ## 復元との整合性
 
-復元applyによって`archive/current.json`が置換されるとR2のETagが変わる。保存済み状態の`currentEtag`とは一致しなくなるため、次回scheduled処理は条件付き取得を使用せず、公式データを完全取得して復元後のcurrentと再統合する。
+復元applyによって`archive/current.json`が置換されるとR2のETagが変わる。保存済みstateの`currentEtag`とは一致しなくなるため、次回scheduled処理は条件付き取得を使用せず、公式データを完全取得して復元後のcurrentと再統合する。
 
-復元処理で状態オブジェクトを削除することは必須としない。明示的に削除する場合も、current更新成功後に行い、削除失敗によって復元済みcurrentを巻き戻さない。
+復元処理でstate objectを削除することは必須としない。明示的に削除する場合も、current更新成功後に行い、削除失敗によって復元済みcurrentを巻き戻さない。refresh制御metadataは復元の対象外とする。
 
 ## ログと計測
 
-更新成功ログには次を含む。ETag値自体は、調査に不要なため通常ログへ出力しない。
+更新成功ログには次を含める。ETag値自体は、調査に不要なため通常ログへ出力しない。
 
 | フィールド                | 値                                                |
 | ------------------------- | ------------------------------------------------- |
 | `officialFetchStatus`     | `modified`または`not-modified`                    |
 | `conditionalRequestUsed`  | 条件付きGETを送ったか                             |
-| `currentEtagMatchedState` | 状態と`current`のETagが一致したか                 |
+| `currentEtagMatchedState` | stateとcurrentのETagが一致したか                  |
 | `officialBodyProcessed`   | 公式本文を読み込み、解析したか                    |
 | `monthlyBackupStatus`     | `created`または`existing`                         |
 | `etagStateStatus`         | `saved`、`unchanged`、`unavailable`、`conflicted` |
 
-Workers Invocation LogsのCPU時間を`officialFetchStatus`別に集計する。導入前後の比較では経過時間ではなくCPU時間を使用する。
+Workers Invocation LogsのCPU時間を`officialFetchStatus`別に集計する。導入前後の比較では経過時間ではなくCPU時間を使用する。refreshのCPU時間はscheduledと別HTTPリクエストとして集計する。
 
 ## テスト・受入の確認観点
 
 実装の回帰テストと本番受入では、次の観点を確認対象とする。
 
-- 状態と`current`のETagが一致すると`If-None-Match`が送られる。
+- stateとcurrentのETagが一致するとscheduledから`If-None-Match`が送られる。
 - 304では公式本文とcurrent本文を読み込まず、統合、日次保存、current PUT、KV削除を行わない。
 - 304でも当月monthlyが欠けていればcurrentの元バイト列から作成する。
-- 304のmonthly作成中に`current`のETagが変わった場合は、古い本文を保存しない。
-- 状態欠落、不正、`current`のETag不一致では条件なしGETを行う。
-- 200で変更がある場合は、状態PUTが日次、current、KV、monthlyより後になる。
-- 200で変更がない場合も、新しい公式ETagと現在の`current`のETagを保存する。
-- current PUT、KV削除、monthly PUTの失敗時は状態を更新しない。
-- 状態PUTの失敗または競合で、確定済みcurrentを巻き戻さない。
+- 304のmonthly作成中にcurrentのETagが変わった場合は、古い本文を保存しない。
+- state欠落、不正、currentのETag不一致では条件なしGETを行う。
+- 200で変更がある場合は、state PUTが日次、current、KV、monthlyより後になる。
+- 200で変更がない場合も、新しい公式ETagと現在のcurrentのETagを保存する。
+- current PUT、KV削除、monthly PUTの失敗時はstateを更新しない。
+- state PUTの失敗または競合で、確定済みcurrentを巻き戻さない。
 - 304を公式取得エラーとして扱わない。
-- APIのKV cache hitではstate、R2、公式サーバーへアクセスしない。
-- APIのKV cache missで304を受けた場合はcurrentを条件付きで読み、クライアント用配列へ投影する。
-- APIの304後にcurrentが競合した場合は古い本文を返さず、条件なしの完全統合へ戻る。
-- 公式ETagが欠落または弱い場合は状態を更新しない。
-- 復元後を模した`current`のETag不一致では完全処理へ戻る。
+- GETのKV hitではR2、公式サーバー、stateへアクセスしない。
+- GETのKV missでは公式サーバーへアクセスせず、R2 snapshotを投影する。
+- refreshは公式取得、検証、merge、KV保存を行い、成功本文は`{news, metadata}`とするが、current、daily、monthly、公式ETag stateを変更しない。
+- 別refreshの実行中は公式取得前に202、5分cooldown中は429を返す。
+- refresh成功時は200と`{news, metadata}`を返す。
+- refreshの依存処理失敗時は503を返し、表示用KVを置き換えない。
+- refresh制御metadataのCAS競合で無条件上書きを行わない。
+- 復元後を模したcurrentのETag不一致ではscheduledが完全処理へ戻る。
 
 ## 受け入れ条件
 
-- 公式配信元が本番Workerからの`If-None-Match`付きGETに304を返すことを確認できる。
-- 304かつmonthly存在時に、公式本文とcurrent本文の読み込み、JSON解析、検証、統合、シリアライズを行わない。
-- 304経路でも月次バックアップの欠落を補完できる。
-- 200経路の安全性検証、日次バックアップ、ETag条件付きcurrent更新、KV削除、月次バックアップの順序を維持する。
-- 状態とcurrentの不一致時に、公式変更を取り逃がさず完全処理へ戻る。
-- 復元apply後の次回実行が完全処理になる。
-- 304と200を区別したCPU時間をWorkers Invocation Logsで確認できる。
-- 本番相当データで304経路がWorkers FreeのCPU上限10ms以内に収まる。
-- 304率を少なくとも14日間記録し、最適化の実効性を評価できる。
+- scheduledの304経路で公式本文とcurrent本文の読み込み、JSON解析、検証、統合、シリアライズを行わない。
+- scheduledの304経路でも月次backupの欠落を補完できる。
+- scheduledの200経路で安全性検証、日次backup、ETag条件付きcurrent更新、KV削除、月次backup、state保存の順序を維持する。
+- stateとcurrentの不一致時に、公式変更を取り逃がさず完全処理へ戻る。
+- refreshが表示用KVだけを更新し、永続archiveと公式ETag stateへ影響を与えない。
+- 別refreshの実行中とlease失効は202、cooldownは429、依存処理の失敗は503へ変換する。
+- `GET /`のshell応答が公式サーバー、R2、KVへのニュース取得を開始しない。
+- GETとrefreshのCPU時間をscheduledと別リクエストとして確認できる。
+- 復元apply後の次回scheduled実行が完全処理になる。
+- scheduledとrefreshを別々にWorkers Invocation Logsで計測できる。
 
 ## 実装箇所と検証対象
 
 主な実装箇所と関連文書は次のとおり。
 
-- `app/news-archive.ts`: 公式取得結果の200、304分岐、状態の読み書き、current HEAD、scheduled 304経路
-- `app/server.ts`: API cache missの条件付き取得、304時のcurrent投影、fallback
-- `app/__tests__/news-archive.test.ts`: 状態、条件付き取得、処理順、失敗経路のテスト
-- `app/__tests__/server.test.ts`: APIのKV hit/miss、304、競合、fallback、scheduled/heartbeatの回帰テスト
+- `app/news-archive.ts`: 公式取得結果の200、304分岐、stateの読み書き、current HEAD、scheduled 304経路
+- `app/server.ts`: 表示用GET、refresh、R2 leaseと制御metadata、KV投影
+- `app/routes/index.tsx`: ニュース取得を行わないSSR shell
+- `app/islands/KemonoFriends3NewsSearch.tsx`: shell表示後のGET、refresh呼び出し
+- `app/__tests__/news-archive.test.ts`: state、条件付き取得、scheduled処理順、失敗経路のテスト
+- `app/__tests__/server.test.ts`: GETのKV hit/miss、refresh、lease、cooldown、scheduled、heartbeatの回帰テスト
 - `docs/news-spec.md`: 共通契約と仕様文書の入口
 - `docs/official-news-spec.md`: 公式データとETagの契約
 - `docs/news-archive-scheduled-spec.md`: 定期実行の確定仕様
-- `docs/news-page-request-spec.md`: ページリクエストの確定仕様
-- `docs/news-archive-rollout.md`: 本番受け入れ状態とCPU計測結果の確認記録
+- `docs/news-page-request-spec.md`: ページ表示、GET、refreshの確定仕様
+- `docs/news-archive-rollout.md`: 本番受け入れ状態と運用確認
 
-本実装では新しいpackageやCron Triggerを追加しない。
+本実装では新しいCron Triggerを追加しない。scheduledは既存の`15 18 * * *`を使用する。

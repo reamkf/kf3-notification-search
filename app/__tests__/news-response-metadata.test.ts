@@ -36,6 +36,19 @@ describe("news response metadata", () => {
     expect(toNewsResponseMetadata(metadata)).toEqual({ source: "unknown", fetchedAt: null });
   });
 
+  it("supports archive snapshots in metadata and response headers", () => {
+    const metadata = createNewsCacheMetadata("archive-snapshot", fetchedAt);
+    expect(parseNewsCacheMetadata(metadata)).toEqual({
+      version: NEWS_CACHE_METADATA_VERSION,
+      source: "archive-snapshot",
+      fetchedAt,
+    });
+    expect(parseNewsResponseHeaders(createNewsResponseHeaders(metadata))).toEqual({
+      source: "archive-snapshot",
+      fetchedAt,
+    });
+  });
+
   it("creates response headers and reads them back", () => {
     const headers = createNewsResponseHeaders(createNewsCacheMetadata("merged", fetchedAt));
 

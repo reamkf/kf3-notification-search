@@ -2,13 +2,21 @@
 
 ## この文書の責務
 
-本書は、ユーザーのページ表示に伴う`GET /api/kf3-news`の仕様を定義する。APIは定期実行が確定した累積アーカイブを入力として、公式データと統合したクライアント用一覧を返す。
+本書は、ページ表示と表示用ニュースAPIの仕様を定義する。`GET /`はSSR shellだけを返し、ニュース取得は行わない。ブラウザはshell表示後に`GET /api/kf3-news`を呼び出し、必要に応じて`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
 
-この処理は表示用の結果キャッシュ以外の永続データを更新しない。`archive/current.json`、daily、monthly、公式ETag stateは定期実行だけが更新する。定期実行の仕様は [ニュースアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md)、保存形式と共通契約は [ニュース機能共通仕様](./news-spec.md) を参照する。
+表示用APIは永続archiveを更新しない。`archive/current.json`、daily、monthly、公式ETag stateはscheduledだけが更新する。refreshは表示用KVとrefresh制御metadataだけを変更する。保存形式と共通契約は [ニュース機能共通仕様](./news-spec.md)、永続archive更新は [ニュースアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md) を参照する。
 
-## APIレスポンス
+## `GET /`
 
-`GET /api/kf3-news`は、過去に保存したお知らせと現在の公式お知らせを統合した一覧を返す。APIレスポンス形式はトップレベルのJSON配列とする。
+`GET /`はニュース検索UIのSSR shellを返す。ニュース配列の取得、公式サーバーへのアクセス、R2 snapshotの読み込み、KVへの書き込みは行わない。
+
+ニュースデータはshell表示後の別HTTPリクエストで取得する。shellの応答とデータ取得のCPU時間を同じリクエストへ合算しない。GETからrefreshを開始したり、`waitUntil`でデータ取得を継続したりしない。
+
+## `GET /api/kf3-news`
+
+### 成功レスポンス
+
+`GET /api/kf3-news`の成功レスポンスはトップレベルのJSON配列とする。KV miss時はR2 snapshotの投影結果を同じ配列形式で直接返す。
 
 ```json
 [
@@ -26,94 +34,30 @@
 
 `category`がない、空文字、空白だけの場合、UIは分類ラベルを表示しない。`category`はカンマで分割し、値ごとに異なる背景色のラベルとして表示する。`【サイト】アプリ`は`アプリ`として表示し、`【サイト】`は表示しない。
 
-APIは入力順を維持して返す。日付順への並べ替えは画面側で行う。キャッシュmetadataは次のレスポンスヘッダーへ投影する。
+APIはsnapshotの入力順を維持して返す。日付順への並べ替えは画面側で行う。KV metadataは次のレスポンスヘッダーへ投影する。
 
 - `X-KF3-News-Source`
 - `X-KF3-News-Fetched-At`
 
-## 処理フロー
-
-```mermaid
-flowchart TD
-    Request[GET /api/kf3-news] --> Cache{KV value exists?}
-    Cache -->|yes| Cached[本文を再検証せず返す]
-    Cache -->|no| Eligibility[stateを読む + currentの存在・ETagを確認]
-    Eligibility --> CanUse{If-None-Matchを使える?}
-    CanUse -->|いいえ| Full[archiveと公式データを取得]
-    CanUse -->|はい| Conditional[公式データをIf-None-Match付き取得]
-    Conditional -->|304| Current[currentをstate ETagで条件付き取得]
-    Current -->|nullまたはETag不一致| Full
-    Current -->|一致| ValidateCurrent[currentを検証]
-    Conditional -->|200| Archive[archiveを読込]
-    Archive --> Merge[検証して統合]
-    Full --> Merge
-    Merge --> ToApi[API用配列へ変換]
-    ValidateCurrent --> ToApi
-    ToApi --> NormalCache[KVへTTL 300秒で保存]
-    Conditional -.->|公式取得・解析・検証・統合の失敗| Fallback[正常なarchiveだけを使用]
-    Fallback --> FallbackProjection[API用配列へ変換]
-    FallbackProjection --> FallbackCache[KVへTTL 60秒で保存]
-    NormalCache --> Response[トップレベル配列を返す]
-    FallbackCache --> Response
-    Request -.->|KVまたはarchiveの読み書き失敗| Error[HTTP 500]
-```
-
-## cache hit
+### KV hit
 
 1. KVの`kf3-news`を`getWithMetadata`で読み込む。
-2. キャッシュが存在すれば、Worker自身が保存した値として本文を再解析せずに返す。
-3. R2や公式サーバーへアクセスしない。
-4. KV metadataがあればレスポンスヘッダーへ変換する。metadataがない旧形式のKV valueや不正なmetadataでも、ニュース配列を壊さず`source`不明、取得日時不明として返す。
+2. 値が存在すれば、保存済みのJSON配列を本文へ返す。
+3. R2、公式サーバー、refresh制御metadataへアクセスしない。
+4. metadataがあればレスポンスヘッダーへ変換する。metadataがない旧形式のKV valueや不正なmetadataでも、ニュース配列を壊さずsource不明、取得日時不明として返す。
 
-旧形式のcache hitから、公式データ取得の失敗や`archive-fallback`を推測してはならない。
+KV hitから公式データ取得の失敗や`archive-fallback`を推測してはならない。
 
-## cache miss
+### KV miss
 
-### 条件付き取得を使えるかの確認
+KVに値がない場合は、公式データを取得せず、R2のsnapshotをクライアント用配列へ投影する。
 
-KVに値がない場合は、公式ETag stateと`archive/current.json`のR2 ETagを並行して確認する。次の条件を満たす場合だけ、stateの公式strong ETagを公式データの`If-None-Match`へ指定する。
+1. `archive/current.json`を読み、保存用スキーマを検証する。
+2. currentが存在しない場合だけlegacy `entries_merged_20241107.json`を読む。
+3. currentが存在するもののJSONまたは内容が不正な場合はlegacyへフォールバックせず、異常として扱う。
+4. 検証済みsnapshotをクライアント用配列へ投影し、表示用KVへ書き戻さず直接返す。
 
-1. `archive/current.json`が存在する。
-2. stateがJSONとして解析でき、保存形式を満たす。
-3. stateの`currentEtag`が現在のcurrent R2 ETagと一致する。
-4. stateの`officialEtag`が利用可能なstrong ETagである。
-
-公式ETagとR2 ETagを相互比較しない。stateが欠落・不正、currentがない、またはstateのcurrent ETagと現在のcurrent ETagが一致しない場合は、条件なしの公式GETへ戻る。APIはstateを更新しない。
-
-### 304経路
-
-公式データへの条件付きGETが304の場合は、公式本文を読み込まない。代わりに`archive/current.json`を、stateに保存されたcurrent ETagを条件に取得する。
-
-- currentの条件付き取得がETag一致で成功した場合、本文を保存用スキーマで検証する。
-- 検証済みcurrentをクライアント用配列へ投影し、通常結果としてKVへTTL 300秒で保存する。
-- 公式本文の再取得、公式JSONの解析、累積アーカイブとの統合は行わない。
-- currentの条件付き取得が`null`、ETag不一致、または取得エラーになった場合、古い本文を返さず、公式データの条件なしGETと通常の統合へ戻る。
-
-304は公式取得エラーではない。公式とcurrentが前回の検証済み状態から変わっていないことを利用する正常経路である。
-
-### 200または条件なし経路
-
-条件付きGETが200の場合、または条件付き取得を使えない場合は、公式データと累積アーカイブを読み込んで統合する。[ニュース機能共通仕様](./news-spec.md) の公式データ利用時の安全性検証を適用し、検証に失敗した公式データは採用しない。
-
-1. `archive/current.json`を読み、保存用スキーマを検証する。currentがない場合だけlegacyデータを読む。
-2. 公式レスポンスを取得し、HTTPステータス、本文サイズ、JSON構造、必須フィールド、ID一意性を検証する。
-3. 公式データの新規または変更項目を検証し、IDをキーに累積アーカイブへ統合する。同じIDには公式データを採用し、アーカイブにだけ存在するIDは残す。
-4. 統合結果をクライアント用配列へ投影する。
-5. 結果をKVの`kf3-news`へ保存して返す。
-
-APIでの統合は入力順を維持し、R2の累積アーカイブやバックアップを更新しない。
-
-## 公式データを利用できない場合
-
-公式データの取得、解析、検証、統合のいずれかに失敗した場合、正常な累積アーカイブがあればそれだけをクライアント用配列へ投影して返す。
-
-- `source`は`archive-fallback`とする。
-- `fetchedAt`はcache miss時に結果を確定してKVへ保存する直前のISO 8601日時とする。
-- fallbackのKV有効期間は60秒とする。
-- HTTP 200を返し、画面上に保存済みアーカイブを表示していることを明示する。
-- 公式データを利用できなくても、currentの更新、バックアップ作成、公式ETag stateの保存は行わない。
-
-累積アーカイブ自体を読み込めない場合は、公式データだけでは応答しない。KVの読み込みまたは結果の保存、currentの読み込みに失敗した場合もHTTP 500とする。
+R2 snapshotを読み込めない場合、または保存用スキーマの検証に失敗した場合はHTTP 500を返す。公式サーバーへのfallback取得やmergeは行わない。表示用KVへの書き込みはrefresh成功時だけ行う。
 
 ```json
 {
@@ -121,38 +65,91 @@ APIでの統合は入力順を維持し、R2の累積アーカイブやバック
 }
 ```
 
-これらの失敗は`news_api_error`として記録する。fallbackへ切り替えた場合は`news_api_fallback`を記録する。
+GETのR2 snapshotまたはKV処理の失敗は`news_api_error`として記録する。GETは`news_api_fallback`を記録しない。refreshの失敗は`news_refresh_failed`として記録する。
 
-## KVキャッシュ
+## `POST /api/kf3-news/refresh`
 
-通常の統合結果は、次のmetadataとともに同じKV keyへ保存する。
+refreshは、表示用データを最新化する公開APIである。公式データの取得、公式レスポンスの検証、currentまたはlegacyとのmerge、クライアント用配列への投影、KV保存を同じrefreshリクエストで完了する。
+
+refresh成功時は、保存した表示用配列と表示用metadataを`{ "news": [...], "metadata": { ... } }`形式で本文へ返す。refreshは`archive/current.json`、legacy、daily、monthly、公式ETag stateを更新しない。保存済みstateとcurrent ETagが対応する場合は条件付き公式取得を利用できるが、refreshから条件付き取得状態を保存せず、scheduledのETag最適化状態へ影響を与えない。
+
+### refresh制御
+
+refreshはR2のCAS leaseと5分cooldownで制限する。
+
+1. 制御metadataをR2から読み、CAS条件付きPUTでleaseを取得する。
+2. lease取得競合時は別refreshが実行中として扱い、公式取得を開始しない。
+3. lease取得後、最後の成功refreshから5分未満の場合はcooldownとして拒否し、公式取得を開始しない。
+4. 公式取得、検証、merge、KV保存が完了したらleaseを解放し、成功時刻を制御metadataへCAS保存する。
+5. 公式取得またはKV保存に失敗した場合もleaseを解放する。失敗したrefreshはcooldownを開始しない。
+6. leaseとcooldownの判定、取得、解放はCASで行い、無条件上書きに切り替えない。
+
+制御metadataの内容は表示用KVやarchiveの内容と混同せず、公式ETag stateとして利用しない。refreshの同時実行、cooldown、制御metadataのCAS失敗はHTTP契約へ変換する。
+
+### HTTP契約
+
+| HTTP | 条件                                                                          | 動作                                      |
+| ---: | ----------------------------------------------------------------------------- | ----------------------------------------- |
+|  202 | refreshが実行中で、成功結果がまだ利用できない                                 | 公式取得を開始せず、`Retry-After`を付ける |
+|  200 | lease取得済みでrefreshを実行し、公式取得、検証、merge、KV保存に成功した       | `{news, metadata}`を本文で返す            |
+|  429 | 最後の成功から5分未満                                                         | 公式取得を開始せず、`Retry-After`を付ける |
+|  503 | R2 lease、制御metadata、公式取得、検証、merge、KV保存などの依存処理に失敗した | 表示用KVとarchiveを変更せずエラーを返す   |
+|  405 | POST以外でrefresh endpointを呼び出した                                        | `Allow: POST`を返す                       |
+
+200レスポンスの本文は、次の`{news, metadata}`オブジェクトとする。`news`は表示用のニュース配列、`metadata`はcache metadataの`version`、`source`、`fetchedAt`を含む。GETだけが成功時にトップレベル配列を返す。
 
 ```json
 {
-  "version": 1,
-  "source": "merged",
-  "fetchedAt": "2026-08-09T12:34:56.789Z"
+  "news": [
+    {
+      "targetUrl": "/info/detail/1234567890.html",
+      "title": "お知らせのタイトル",
+      "newsDate": "2026年08月02日 12時00分00秒",
+      "updated": "",
+      "category": "お知らせ"
+    }
+  ],
+  "metadata": {
+    "version": 1,
+    "source": "merged",
+    "fetchedAt": "2026-08-12T12:34:56.789Z"
+  }
 }
 ```
 
-`source`は通常の統合結果では`merged`、公式データを利用できず累積アーカイブだけを返す場合は`archive-fallback`とする。KV valueは従来のニュース配列JSONを維持する。
+202レスポンス本文は`{"error":"ニュース更新が実行中です","leaseUntil":"..."}`、429レスポンス本文は`{"error":"ニュース更新はクールダウン中です","nextAvailableAt":"..."}`、503レスポンス本文は`{"error":"ニュース更新に失敗しました"}`とする。
 
-KVの読み込みまたは結果の保存に失敗した場合は、キャッシュを使わない応答へ切り替えずHTTP 500とする。KV valueの完全性は書き込み元で保証し、cache hit時には再検証しない。
+202、429では、再試行可能になるまでの秒数を`Retry-After`で返す。202は別refreshが実行中であり、leaseが期限切れになるまでの待機を示す。429はcooldown残り時間を指定する。503では、固定の短い再試行待ちを指定できる。内部エラー、R2 key、ETag、公式レスポンス本文、secretはレスポンスへ含めない。
+
+### refresh成功時の保存
+
+1. `archive/current.json`を読み、存在しない場合だけlegacyを読む。
+2. 公式レスポンスを取得し、HTTPステータス、本文サイズ、JSON構造、必須フィールド、ID一意性、安全性閾値を検証する。
+3. 公式データの新規または変更項目を検証し、IDをキーにsnapshotとmergeする。同じIDには公式データを採用し、snapshotにだけ存在するIDは残す。
+4. 統合結果をクライアント用配列へ投影する。
+5. 表示用KV `kf3-news`へTTL 300秒で保存し、metadataの`source`を`merged`、`fetchedAt`をrefresh成功時刻として記録する。
+6. 保存した配列とmetadataを`{news, metadata}`形式の200本文で返す。
+
+公式取得、検証、merge、KV保存のいずれかに失敗した場合、refreshはKVを置き換えず503を返す。refreshはarchive-fallbackを成功結果として返さない。古い表示を返す必要がある場合は、別途GETで既存KV snapshotを取得する。
+
+### refreshが行わないこと
+
+- `archive/current.json`の更新
+- dailyまたはmonthlyの作成、更新、削除
+- 公式ETag stateの保存、更新、削除
+- refresh制御metadata以外のR2書き込み
+- KV `kf3-news`の削除
+- GETリクエストからの公式取得
+- `waitUntil`によるrefresh処理の継続
+
+## scheduledとの分離
+
+永続archiveを確定する処理は、Cronから呼ばれる`updateNewsArchive`だけである。scheduledは公式ETag stateを使う条件付き取得、currentの検証済み更新、daily/monthly backup、必要時のKV削除を担当する。refreshで作った表示用KVは、scheduledがcurrentを更新したときに削除される。
+
+scheduledの詳細は [ニュースアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md)、ETag stateと304経路の共通設計は [ニュースアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
 
 ## 互換route
 
 互換性維持のため、`GET /entries_merged_20241107.json`と`HEAD /entries_merged_20241107.json`も残す。このrouteはR2オブジェクトを保存用スキーマで検証せず、そのバイト列をそのまま返す。レスポンスには1年間のimmutable cache指定と、取得できた場合はR2のHTTP ETagを付ける。
 
-legacyオブジェクトが存在しない場合、またはR2から取得できない場合は5xxとする。`archive/current.json`は公開しない。
-
-## この処理が行わないこと
-
-ユーザーのページリクエストでは、次の操作を行わない。
-
-- `archive/current.json`の更新
-- dailyまたはmonthlyの作成、更新、削除
-- 公式ETag stateの保存、更新、削除
-- KVの`kf3-news`の削除
-- 条件付きcurrent取得に失敗した古い本文の返却
-
-ETag stateと304経路の共通設計は [ニュースアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
+legacy objectが存在しない場合、またはR2から取得できない場合は5xxとする。`archive/current.json`は公開しない。

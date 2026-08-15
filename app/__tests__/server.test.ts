@@ -80,6 +80,7 @@ const createBindings = (
   options: BindingOptions = {},
 ): TestBindings => {
   const dataGets: string[] = [];
+  let currentHeadCalls = 0;
   const cacheValues = new Map<string, string>();
   const cacheMetadata = new Map<string, unknown>();
   const cachePuts: Array<{
@@ -108,8 +109,12 @@ const createBindings = (
       return null;
     },
     head: async (key: string) => {
-      if (key === CURRENT_ARCHIVE_KEY && currentText !== null)
-        return { etag: "current-etag" } as R2Object;
+      if (key === CURRENT_ARCHIVE_KEY && currentText !== null) {
+        currentHeadCalls += 1;
+        return {
+          etag: options.conditionalCurrentMismatch ? "new-current-etag" : "current-etag",
+        } as R2Object;
+      }
       return null;
     },
   } as unknown as R2Bucket;
@@ -150,6 +155,7 @@ const createBindings = (
   } as unknown as KVNamespace;
   const backup = {
     get: async () => null,
+    head: async () => null,
     put: async () => null,
   } as unknown as R2Bucket;
   return {
@@ -265,13 +271,13 @@ describe("Worker API handler", () => {
     expect(setup.cachePuts).toEqual([]);
   });
 
-  it("cache missではニュースの入力順とcategoryを維持する", async () => {
+  it("cache missでは公式取得せずarchive snapshotを返し、KVへ保存しない", async () => {
     const setup = createBindings(JSON.stringify(createDocument(2)));
-    const official = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
-    official.news[0] = { ...official.news[0], category: "event" };
     const fetchedAt = Date.parse("2026-08-09T12:34:56.789Z");
     const handler = createWorkerHandler({
-      fetcher: async () => createResponse(official),
+      fetcher: async () => {
+        throw new Error("unexpected fetch");
+      },
       clock: () => fetchedAt,
     });
     const response = await callFetch(
@@ -283,19 +289,26 @@ describe("Worker API handler", () => {
 
     expect(response.status).toBe(200);
     expect(body[0].targetUrl).toBe("/info/1");
-    expect(body[0].category).toBe("event");
     expect(body[1].targetUrl).toBe("/info/2");
-    expect(body.at(-1)?.targetUrl).toBe(`/info/${MIN_OFFICIAL_ENTRY_COUNT}`);
-    expect(JSON.parse(setup.cachePuts[0].value)[0].category).toBe("event");
-    expect(response.headers.get("X-KF3-News-Source")).toBe("merged");
+    expect(body).toHaveLength(2);
+    expect(response.headers.get("X-KF3-News-Source")).toBe("archive-snapshot");
     expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
-    expect(setup.cachePuts[0].expirationTtl).toBe(300);
-    expect(setup.cachePuts[0].metadata).toEqual(
-      createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z"),
-    );
+    expect(setup.cachePuts).toHaveLength(0);
   });
 
-  it("cache missの304では公式本文を読まずcurrentから返す", async () => {
+  it("cache missではrefresh制御metadataへアクセスしない", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    const response = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+    expect(response.status).toBe(200);
+    expect(setup.dataGets).not.toContain("control/news-refresh.json");
+    expect(setup.cachePuts).toHaveLength(0);
+  });
+
+  it("cache missでは公式取得せずcurrent snapshotを返す", async () => {
     const current = JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT, true));
     const setup = createBindings(current, undefined, {
       stateText: JSON.stringify({
@@ -319,42 +332,8 @@ describe("Worker API handler", () => {
     );
     expect(response.status).toBe(200);
     expect((await response.json()) as unknown[]).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
-    expect(requestHeaders[0].get("If-None-Match")).toBe('"official-etag"');
-    expect(setup.cachePuts[0].expirationTtl).toBe(300);
-    expect(setup.cachePuts[0].metadata).toEqual(
-      createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z"),
-    );
-  });
-
-  it("cache missの304後にcurrentが競合した場合は完全取得へ戻る", async () => {
-    const setup = createBindings(
-      JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT, true)),
-      undefined,
-      {
-        stateText: JSON.stringify({
-          version: 1,
-          officialEtag: '"official-etag"',
-          currentEtag: "current-etag",
-        }),
-        conditionalCurrentMismatch: true,
-      },
-    );
-    let calls = 0;
-    const handler = createWorkerHandler({
-      fetcher: async (_input, _init) => {
-        calls += 1;
-        if (calls === 1)
-          return new Response(null, { status: 304, headers: { etag: '"official-etag"' } });
-        return createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT));
-      },
-    });
-    const response = await callFetch(
-      handler,
-      new Request("https://example.com/api/kf3-news"),
-      setup.env,
-    );
-    expect(response.status).toBe(200);
-    expect(calls).toBe(2);
+    expect(requestHeaders).toHaveLength(0);
+    expect(setup.cachePuts).toHaveLength(0);
   });
 
   it("公式取得とcurrent読み込みが両方失敗した場合はarchive-readを優先する", async () => {
@@ -412,98 +391,219 @@ describe("Worker API handler", () => {
     });
   });
 
-  it("cache保存失敗時は5xxにしてarchive件数をlogへ残す", async () => {
-    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
-      cachePutError: true,
-    });
-    const logs: Record<string, unknown>[] = [];
+  it("GETのarchive snapshot失敗時は公式を使わず5xxにする", async () => {
+    const setup = createBindings("invalid");
+    let fetchCalls = 0;
     const handler = createWorkerHandler({
-      fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
-      logger: { log: () => undefined, error: (event) => logs.push(event) },
+      fetcher: async () => {
+        fetchCalls += 1;
+        return createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT));
+      },
     });
     const response = await callFetch(
       handler,
       new Request("https://example.com/api/kf3-news"),
       setup.env,
     );
-
     expect(response.status).toBe(500);
-    expect(setup.cachePuts).toEqual([]);
-    expect(logs[0]).toMatchObject({
-      event: "news_api_error",
-      stage: "unknown",
-      archiveCount: MIN_OFFICIAL_ENTRY_COUNT,
-    });
+    expect(fetchCalls).toBe(0);
+    expect(setup.cachePuts).toHaveLength(0);
   });
 
-  it("公式取得失敗時はarchiveのcategoryをTTL 60で返す", async () => {
-    const archive = createDocument(MIN_OFFICIAL_ENTRY_COUNT, true);
-    archive.news[0] = { ...archive.news[0], category: "archive" };
-    const setup = createBindings(JSON.stringify(archive));
-    const logs: Record<string, unknown>[] = [];
-    const handler = createWorkerHandler({
-      fetcher: async () => createResponse(null, false),
-      clock: () => Date.parse("2026-08-09T12:34:56.789Z"),
-      logger: { log: () => undefined, error: (event) => logs.push(event) },
-    });
-    const response = await callFetch(
-      handler,
-      new Request("https://example.com/api/kf3-news"),
-      setup.env,
-    );
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as Array<Record<string, unknown>>;
-    expect(body).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
-    expect(body[0].category).toBe("archive");
-    expect(JSON.parse(setup.cachePuts[0].value)[0].category).toBe("archive");
-    expect(response.headers.get("X-KF3-News-Source")).toBe("archive-fallback");
-    expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
-    expect(setup.cachePuts[0].expirationTtl).toBe(60);
-    expect(setup.cachePuts[0].metadata).toEqual(
-      createNewsCacheMetadata("archive-fallback", "2026-08-09T12:34:56.789Z"),
-    );
-    expect(logs[0]).toMatchObject({ event: "news_api_fallback", stage: "official-fetch" });
-  });
-
-  it("公式データの統合検証失敗時もarchiveをTTL 60で返す", async () => {
-    const archive = createDocument(MIN_OFFICIAL_ENTRY_COUNT, true);
+  it("refresh成功時は公式とのmerge結果をKVへ保存しmetadata付きで返す", async () => {
+    const archive = createDocument(1, true);
     const official = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
-    official.news[0].targetUrl = "//other.example/news";
+    official.news[0] = { ...official.news[0], category: "refresh" };
     const setup = createBindings(JSON.stringify(archive));
+    const originalData = setup.env.KF3_NOTIF_DATA;
+    let controlText: string | null = null;
+    let controlEtag = "control-etag-0";
+    setup.env.KF3_NOTIF_DATA = {
+      get: async (key: string, options?: unknown) => {
+        if (key === "control/news-refresh.json") {
+          return controlText === null ? null : createR2Object(controlText, controlEtag);
+        }
+        return originalData.get(key, options as never);
+      },
+      head: originalData.head.bind(originalData),
+      put: async (key: string, value: string) => {
+        if (key === "control/news-refresh.json") {
+          controlText = value;
+          controlEtag = `control-etag-${controlText.length}`;
+          return { etag: controlEtag } as R2Object;
+        }
+        return null;
+      },
+    } as unknown as R2Bucket;
     const logs: Record<string, unknown>[] = [];
     const handler = createWorkerHandler({
       fetcher: async () => createResponse(official),
-      logger: { log: () => undefined, error: (event) => logs.push(event) },
+      clock: () => Date.parse("2026-08-09T12:34:56.789Z"),
+      logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
     });
     const response = await callFetch(
       handler,
-      new Request("https://example.com/api/kf3-news"),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
       setup.env,
     );
+    const payload = (await response.json()) as {
+      news: Array<Record<string, unknown>>;
+      metadata: unknown;
+    };
 
     expect(response.status).toBe(200);
-    expect((await response.json()) as unknown[]).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
-    expect(response.headers.get("X-KF3-News-Source")).toBe("archive-fallback");
-    expect(setup.cachePuts[0].expirationTtl).toBe(60);
-    expect(setup.cachePuts[0].metadata).toMatchObject({
-      version: 1,
-      source: "archive-fallback",
-    });
-    expect(logs[0]).toMatchObject({ event: "news_api_fallback", stage: "official-validation" });
+    expect(payload.news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
+    expect(payload.news[0].category).toBe("refresh");
+    expect(payload.metadata).toEqual(createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z"));
+    expect(response.headers.get("X-KF3-News-Source")).toBe("merged");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(setup.cachePuts[0].expirationTtl).toBe(300);
+    expect(setup.cachePuts[0].metadata).toEqual(payload.metadata);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "news_refresh_succeeded",
+        archiveCount: MIN_OFFICIAL_ENTRY_COUNT,
+      }),
+    );
   });
 
-  it("archive失敗時は公式だけを返さず5xxにする", async () => {
-    const setup = createBindings(null, "invalid");
+  it("refreshのPOST以外は405とAllowを返す", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    const handler = createWorkerHandler();
+    for (const method of ["GET", "PUT", "PATCH"]) {
+      const response = await callFetch(
+        handler,
+        new Request("https://example.com/api/kf3-news/refresh", { method }),
+        setup.env,
+      );
+      expect(response.status).toBe(405);
+      expect(response.headers.get("allow")).toBe("POST");
+    }
+  });
+
+  it("refresh完了CAS失敗後もKV更新済みの成功を返し失敗ログを出さない", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    setup.cacheValues.set("kf3-news", "old-cache");
+    const originalData = setup.env.KF3_NOTIF_DATA;
+    let controlText: string | null = null;
+    let controlEtag = "control-0";
+    let puts = 0;
+    setup.env.KF3_NOTIF_DATA = {
+      get: async (key: string, options?: unknown) => {
+        if (key === "control/news-refresh.json") {
+          return controlText === null ? null : createR2Object(controlText, controlEtag);
+        }
+        return originalData.get(key, options as never);
+      },
+      head: originalData.head.bind(originalData),
+      put: async (key: string, value: string) => {
+        if (key !== "control/news-refresh.json") return null;
+        puts += 1;
+        if (puts > 1) return null;
+        controlText = value;
+        controlEtag = "control-1";
+        return { etag: controlEtag } as R2Object;
+      },
+    } as unknown as R2Bucket;
+    const logs: Record<string, unknown>[] = [];
+    const handler = createWorkerHandler({
+      fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+      logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+    const response = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+    expect(response.status).toBe(200);
+    expect(setup.cacheValues.get("kf3-news")).not.toBe("old-cache");
+    expect(logs).toContainEqual(expect.objectContaining({ event: "news_refresh_succeeded" }));
+    expect(logs).not.toContainEqual(expect.objectContaining({ event: "news_refresh_failed" }));
+  });
+
+  it("refresh中にcurrentが競合するとKVを更新せず503にする", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    let headCalls = 0;
+    const originalData = setup.env.KF3_NOTIF_DATA;
+    setup.env.KF3_NOTIF_DATA = {
+      get: originalData.get.bind(originalData),
+      head: async (key: string) => {
+        if (key === CURRENT_ARCHIVE_KEY) {
+          headCalls += 1;
+          return { etag: headCalls > 1 ? "changed-current" : "current-etag" } as R2Object;
+        }
+        return null;
+      },
+      put: originalData.put?.bind(originalData),
+    } as unknown as R2Bucket;
     const handler = createWorkerHandler({
       fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
     });
     const response = await callFetch(
       handler,
-      new Request("https://example.com/api/kf3-news"),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
       setup.env,
     );
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(503);
     expect(setup.cachePuts).toHaveLength(0);
+  });
+
+  it("refreshのlease失効時はKVを更新せず202にする", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    const originalData = setup.env.KF3_NOTIF_DATA;
+    let controlText: string | null = null;
+    setup.env.KF3_NOTIF_DATA = {
+      get: async (key: string, options?: unknown) => {
+        if (key === "control/news-refresh.json") {
+          if (controlText === null) return null;
+          return createR2Object(controlText, "control-etag");
+        }
+        return originalData.get(key, options as never);
+      },
+      head: originalData.head.bind(originalData),
+      put: async (key: string, _value: string) => {
+        if (key === "control/news-refresh.json") {
+          controlText = JSON.stringify({
+            version: 1,
+            status: "running",
+            token: "other-token",
+            leaseUntil: "2000-01-01T00:00:00.000Z",
+            cooldownUntil: null,
+            lastOutcome: null,
+          });
+          return { etag: "control-etag" } as R2Object;
+        }
+        return null;
+      },
+    } as unknown as R2Bucket;
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+    expect(response.status).toBe(202);
+    expect(setup.cachePuts).toHaveLength(0);
+  });
+
+  it("refresh失敗時は既存KVを維持して503にする", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    setup.cacheValues.set("kf3-news", "old-cache");
+    const logs: Record<string, unknown>[] = [];
+    const handler = createWorkerHandler({
+      fetcher: async () => createResponse(null, false),
+      logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+    const response = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+    expect(response.status).toBe(503);
+    expect(setup.cacheValues.get("kf3-news")).toBe("old-cache");
+    expect(setup.cachePuts).toHaveLength(0);
+    expect(logs).toContainEqual(expect.objectContaining({ event: "news_refresh_failed" }));
   });
 
   it("legacy routeのGETとHEAD互換性を維持する", async () => {

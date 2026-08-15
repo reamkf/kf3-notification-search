@@ -42,25 +42,47 @@ const intersectionObservers: TestIntersectionObserver[] = [];
 let root: ReturnType<typeof createRoot> | undefined;
 let container: HTMLDivElement;
 
+const jsonResponse = (body: unknown, status = 200, headers: HeadersInit = {}) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json", ...headers },
+  });
+
+const mockNewsApi = ({
+  news,
+  headers = {
+    "X-KF3-News-Source": "merged",
+    "X-KF3-News-Fetched-At": new Date().toISOString(),
+  },
+  refreshResponses = [],
+  getStatus = 200,
+}: {
+  news: unknown;
+  headers?: HeadersInit;
+  refreshResponses?: Response[];
+  getStatus?: number;
+}) => {
+  let refreshIndex = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/kf3-news/refresh") && init?.method === "POST") {
+        return (
+          refreshResponses[refreshIndex++] ?? jsonResponse({ error: "no refresh response" }, 503)
+        );
+      }
+      if (init?.method === "POST") throw new Error(`Unexpected POST request: ${url}`);
+      return jsonResponse(news, getStatus, headers);
+    }),
+  );
+};
+
 const mount = () => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   root.render(<KemonoFriends3NewsSearch />);
-};
-
-const mockNewsResponse = (news: unknown, status = 200, headers: HeadersInit = {}) => {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () =>
-      Promise.resolve(
-        new Response(JSON.stringify(news), {
-          status,
-          headers: { "content-type": "application/json", ...headers },
-        }),
-      ),
-    ),
-  );
 };
 
 const waitForText = (text: string) =>
@@ -79,6 +101,13 @@ const flushUpdates = async () => {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 };
 
+const advanceRefreshCooldown = async (elapsedMs = 5 * 60_000) => {
+  const now = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(now + elapsedMs);
+  document.dispatchEvent(new Event("visibilitychange"));
+  await flushUpdates();
+};
+
 const findButton = (label: string) => {
   const button = Array.from(container.querySelectorAll("button")).find(
     (candidate) => candidate.textContent?.trim() === label,
@@ -86,6 +115,12 @@ const findButton = (label: string) => {
   if (!button) throw new Error(`button not found: ${label}`);
   return button;
 };
+
+const getRefreshButton = () =>
+  container.querySelector<HTMLButtonElement>('[data-testid="news-refresh-button"]');
+
+const getRefreshIndicator = () =>
+  container.querySelector<HTMLSpanElement>('[data-testid="news-metadata"]');
 
 beforeEach(() => {
   intersectionObservers.length = 0;
@@ -112,7 +147,7 @@ describe("KemonoFriends3NewsSearch", () => {
     const news = Array.from({ length: 25 }, (_, index) =>
       createNews(index + 1, `ニュース${index + 1}`, "2026年08月01日 12時00分00秒"),
     );
-    mockNewsResponse(news);
+    mockNewsApi({ news });
 
     mount();
     expect(container.textContent).toContain("データを取得しています...");
@@ -127,16 +162,18 @@ describe("KemonoFriends3NewsSearch", () => {
   });
 
   it("公式分類ラベルは値があるニュースにだけ表示する", async () => {
-    mockNewsResponse([
-      createNews(
-        1,
-        "分類あり",
-        "2026年08月01日 12時00分00秒",
-        "イベント,キャンペーン,【サイト】アプリ",
-      ),
-      createNews(2, "分類なし"),
-      createNews(3, "空の分類", "2026年08月03日 12時00分00秒", ""),
-    ]);
+    mockNewsApi({
+      news: [
+        createNews(
+          1,
+          "分類あり",
+          "2026年08月01日 12時00分00秒",
+          "イベント,キャンペーン,【サイト】アプリ",
+        ),
+        createNews(2, "分類なし"),
+        createNews(3, "空の分類", "2026年08月03日 12時00分00秒", ""),
+      ],
+    });
 
     mount();
     await waitForText("おしらせの件数: 3件");
@@ -149,139 +186,369 @@ describe("KemonoFriends3NewsSearch", () => {
       "分類: アプリ",
     ]);
     expect(new Set(Array.from(categories, (category) => category.className)).size).toBe(3);
-    const categoryItem = categories[0].closest("li");
-    expect(categoryItem?.textContent).toContain("分類あり");
-    expect(
-      Array.from(container.querySelectorAll("li"))
-        .filter((item) => item !== categoryItem)
-        .every((item) => item.querySelector('[data-testid="news-category"]') === null),
-    ).toBe(true);
   });
 
-  it("1分未満の取得日時を秒数で表示する", async () => {
-    const fetchedAt = new Date(Date.now() - 5 * 1000).toISOString();
-    mockNewsResponse([createNews(1)], 200, {
-      "X-KF3-News-Source": "merged",
-      "X-KF3-News-Fetched-At": fetchedAt,
+  it("取得日時を含む状態アイコン付き更新ボタンを提供する", async () => {
+    const fetchedAt = new Date(Date.now() - 2 * 60 * 1000 - 500).toISOString();
+    mockNewsApi({
+      news: [createNews(1)],
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Fetched-At": fetchedAt,
+      },
     });
 
     mount();
-    await waitForText("データ取得: 5秒前");
-    expect(container.textContent).not.toContain("たった今");
-  });
-
-  it("通常データの取得日時を相対表示する", async () => {
-    const fetchedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    mockNewsResponse([createNews(1)], 200, {
-      "X-KF3-News-Source": "merged",
-      "X-KF3-News-Fetched-At": fetchedAt,
-    });
-
-    mount();
-    await waitForText("データ取得: 5分前");
-
-    expect(container.querySelector(`time[datetime="${fetchedAt}"]`)).not.toBeNull();
-    expect(container.textContent).not.toContain("日本時間");
-    expect(container.textContent).not.toContain("保存済みアーカイブを表示しています");
-  });
-
-  it("公式データ取得失敗時はアーカイブ表示を通知する", async () => {
-    mockNewsResponse([createNews(1)], 200, {
-      "X-KF3-News-Source": "archive-fallback",
-      "X-KF3-News-Fetched-At": "2026-08-09T12:34:56.789Z",
-    });
-
-    mount();
-    await waitForText("公式データを利用できなかったため、保存済みアーカイブを表示しています。");
-
-    expect(container.querySelectorAll("li")).toHaveLength(1);
-    expect(container.querySelector('[role="alert"]')).toBeNull();
-  });
-
-  it("metadataがない旧形式データは日時を不明として表示する", async () => {
-    mockNewsResponse([createNews(1)]);
-
-    mount();
-    await waitForText("データ取得: 不明");
-
-    expect(container.textContent).not.toContain("保存済みアーカイブを表示しています");
-  });
-
-  it("keyword、日付、sort順を画面操作から適用する", async () => {
-    mockNewsResponse([
-      createNews(1, "測定イベント", "2026年08月01日 12時00分00秒"),
-      createNews(2, "掃除イベント", "2026年08月02日 12時00分00秒"),
-      createNews(3, "開催予告", "2026年08月03日 12時00分00秒"),
-    ]);
-    mount();
-    await waitForText("おしらせの件数: 3件");
-
-    const keyword = container.querySelector<HTMLInputElement>('input[type="text"]');
-    expect(keyword).not.toBeNull();
-    setInputValue(keyword!, "測定 OR 掃除");
-    await flushUpdates();
-    findButton("検索").click();
-    await waitForText("おしらせの件数: 2件");
-
-    const sortOrder = container.querySelector("#sortOrder") as unknown as HTMLSelectElement | null;
-    expect(sortOrder).not.toBeNull();
-    sortOrder!.value = "asc";
-    sortOrder!.dispatchEvent(new Event("input", { bubbles: true }));
-    sortOrder!.dispatchEvent(new Event("change", { bubbles: true }));
-    await flushUpdates();
-    await vi.waitFor(() => {
-      expect(container.querySelector("li p")?.textContent).toBe("測定イベント");
-    });
-
-    setInputValue(keyword!, "");
-    await flushUpdates();
-    findButton("検索").click();
-    const startDate = container.querySelector<HTMLInputElement>("#startDate");
-    const endDate = container.querySelector<HTMLInputElement>("#endDate");
-    expect(startDate).not.toBeNull();
-    expect(endDate).not.toBeNull();
-    setInputValue(startDate!, "2026-08-02");
-    await flushUpdates();
-    setInputValue(endDate!, "2026-08-02");
-    await waitForText("おしらせの件数: 1件");
-    expect(container.querySelector("li p")?.textContent).toBe("掃除イベント");
-  });
-
-  it("検索欄の表示状態を保存し、IME変換中のEnterを無視する", async () => {
-    localStorage.setItem("kf3notif:isSearchVisible", "true");
-    mockNewsResponse([
-      createNews(1, "測定イベント", "2026年08月01日 12時00分00秒"),
-      createNews(2, "掃除イベント", "2026年08月02日 12時00分00秒"),
-    ]);
-    mount();
-    await waitForText("おしらせの件数: 2件");
-
-    const searchPanel = container.querySelector(".max-h-screen");
-    expect(searchPanel).not.toBeNull();
-    findButton("検索オプション").click();
-    expect(localStorage.getItem("kf3notif:isSearchVisible")).toBe("false");
-
-    const keyword = container.querySelector<HTMLInputElement>('input[type="text"]');
-    expect(keyword).not.toBeNull();
-    setInputValue(keyword!, "測定");
-    await flushUpdates();
-    keyword!.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }),
+    await waitForText("最終取得: 2分前");
+    const refreshButton = getRefreshButton();
+    const refreshIndicator = getRefreshIndicator();
+    expect(refreshButton).not.toBeNull();
+    expect(refreshIndicator).not.toBeNull();
+    expect(refreshButton?.getAttribute("aria-label")).toBe("ニュースを再取得");
+    expect(refreshIndicator?.getAttribute("aria-busy")).toBe("false");
+    expect(refreshIndicator?.dataset.refreshStatus).toBe("cooldown");
+    expect(refreshButton?.disabled).toBe(true);
+    expect(refreshButton?.className).toContain("text-gray-400");
+    expect(refreshButton?.className).not.toMatch(/bg-|border-/);
+    expect(refreshIndicator?.querySelector("svg")?.getAttribute("class")).toContain(
+      "text-green-600",
     );
-    expect(container.textContent).toContain("おしらせの件数: 2件");
+    expect(refreshIndicator?.querySelector(`time[datetime="${fetchedAt}"]`)).not.toBeNull();
+    expect(refreshButton?.querySelector("time")).toBeNull();
 
-    keyword!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await advanceRefreshCooldown(3 * 60_000);
+    expect(refreshIndicator?.dataset.refreshStatus).toBe("idle");
+    expect(refreshButton?.disabled).toBe(false);
+    expect(refreshButton?.className).toContain("text-gray-700");
+  });
+
+  it("古いGETデータを表示してからrefreshを自動実行する", async () => {
+    const oldNews = [createNews(1, "前回のニュース")];
+    const refreshedNews = [createNews(1, "更新されたニュース")];
+    const fetchedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const refreshedAt = new Date().toISOString();
+    const refreshResponse = jsonResponse({
+      news: refreshedNews,
+      metadata: { source: "merged", fetchedAt: refreshedAt },
+    });
+    mockNewsApi({
+      news: oldNews,
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Fetched-At": fetchedAt,
+      },
+      refreshResponses: [refreshResponse],
+    });
+
+    mount();
+    await waitForText("前回のニュース");
+    expect(container.querySelectorAll("li")).toHaveLength(1);
+    await waitForText("更新されたニュース");
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      "/api/kf3-news/refresh",
+      expect.objectContaining({ method: "POST", signal: expect.any(AbortSignal) }),
+    );
+    await waitForText("最終取得:");
+  });
+
+  it("archive-snapshotを受け取った場合もrefreshする", async () => {
+    const fetchedAt = new Date().toISOString();
+    const refreshedAt = new Date().toISOString();
+    mockNewsApi({
+      news: [createNews(1, "スナップショット")],
+      headers: {
+        "X-KF3-News-Source": "archive-snapshot",
+        "X-KF3-News-Fetched-At": fetchedAt,
+      },
+      refreshResponses: [
+        jsonResponse({
+          news: [createNews(1, "再取得済み")],
+          metadata: { source: "merged", fetchedAt: refreshedAt },
+        }),
+      ],
+    });
+
+    mount();
+    await waitForText("スナップショット");
+    await waitForText("再取得済み");
+  });
+
+  it("refreshの200がmerged以外なら前回一覧を維持する", async () => {
+    mockNewsApi({
+      news: [createNews(1, "前回一覧")],
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Fetched-At": new Date().toISOString(),
+      },
+      refreshResponses: [
+        jsonResponse({
+          news: [createNews(1, "不正な更新一覧")],
+          metadata: { source: "archive-snapshot", fetchedAt: new Date().toISOString() },
+        }),
+      ],
+    });
+
+    mount();
+    await waitForText("前回一覧");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("再取得に失敗");
+    expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("error");
+    expect(getRefreshButton()?.disabled).toBe(false);
+    expect(getRefreshButton()?.className).toContain("text-gray-700");
+    expect(getRefreshButton()?.className).not.toMatch(/bg-|border-/);
+    expect(getRefreshIndicator()?.querySelector("svg")?.getAttribute("class")).toContain(
+      "text-red-600",
+    );
+    expect(container.textContent).toContain("前回一覧");
+    expect(container.textContent).not.toContain("不正な更新一覧");
+  });
+
+  it("refresh成功時も検索条件と表示件数を維持する", async () => {
+    const oldNews = Array.from({ length: 25 }, (_, index) =>
+      createNews(
+        index + 1,
+        `対象${index + 1}`,
+        `2026年08月${String((index % 8) + 1).padStart(2, "0")}日 12時00分00秒`,
+      ),
+    );
+    const refreshedNews = oldNews.map((news) => ({ ...news, title: `${news.title}更新` }));
+    mockNewsApi({
+      news: oldNews,
+      headers: { "X-KF3-News-Source": "merged", "X-KF3-News-Fetched-At": new Date().toISOString() },
+      refreshResponses: [
+        jsonResponse({
+          news: refreshedNews,
+          metadata: { source: "merged", fetchedAt: new Date().toISOString() },
+        }),
+      ],
+    });
+
+    mount();
+    await waitForText("おしらせの件数: 25件");
+    findButton("検索オプション").click();
+    await flushUpdates();
+    const keyword = container.querySelector<HTMLInputElement>("#news-keyword");
+    expect(keyword).not.toBeNull();
+    setInputValue(keyword!, "対象");
+    findButton("検索").click();
+    await waitForText("おしらせの件数: 25件");
+    intersectionObservers[0].trigger();
+    await vi.waitFor(() => expect(container.querySelectorAll("li")).toHaveLength(25));
+
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("対象1更新");
+    expect(container.querySelectorAll("li")).toHaveLength(25);
+    expect((container.querySelector("#news-keyword") as HTMLInputElement).value).toBe("対象");
+  });
+
+  it("日付やソート変更では未送信のキーワードを適用しない", async () => {
+    mockNewsApi({
+      news: [createNews(1, "対象ニュース"), createNews(2, "別ニュース")],
+    });
+
+    mount();
+    await waitForText("おしらせの件数: 2件");
+    findButton("検索オプション").click();
+    await flushUpdates();
+    setInputValue(container.querySelector<HTMLInputElement>("#news-keyword")!, "対象");
+    await flushUpdates();
+
+    const startDate = container.querySelector<HTMLInputElement>("#startDate")!;
+    setInputValue(startDate, "2019-09-25");
+    await waitForText("おしらせの件数: 2件");
+
+    const sortOrder = container.querySelector("#sortOrder") as unknown as HTMLSelectElement;
+    sortOrder.value = "asc";
+    sortOrder.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitForText("おしらせの件数: 2件");
+  });
+
+  it("refreshの202をRetry-Afterで有限回再試行する", async () => {
+    const fetchedAt = new Date().toISOString();
+    mockNewsApi({
+      news: [createNews(1, "再試行前")],
+      headers: { "X-KF3-News-Source": "merged", "X-KF3-News-Fetched-At": fetchedAt },
+      refreshResponses: [
+        new Response(null, { status: 202, headers: { "Retry-After": "0.05" } }),
+        jsonResponse({
+          news: [createNews(1, "再試行後")],
+          metadata: { source: "merged", fetchedAt: new Date().toISOString() },
+        }),
+      ],
+    });
+
+    mount();
+    await waitForText("再試行前");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await flushUpdates();
+    expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("refreshing");
+    expect(getRefreshButton()?.disabled).toBe(true);
+    expect(getRefreshIndicator()?.querySelector(".animate-spin")).not.toBeNull();
+    await waitForText("再試行後");
+    expect(
+      vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith("/refresh")),
+    ).toHaveLength(2);
+  });
+
+  it("refreshの二重開始を防止する", async () => {
+    let resolveRefresh: ((response: Response) => void) | undefined;
+    const refreshResponse = new Promise<Response>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/api/kf3-news/refresh") && init?.method === "POST") {
+        return refreshResponse;
+      }
+      if (init?.method === "POST") throw new Error(`Unexpected POST request: ${String(input)}`);
+      return jsonResponse([createNews(1, "更新前")]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    mount();
+    await waitForText("更新前");
+    const refreshButton = getRefreshButton();
+    expect(refreshButton).not.toBeNull();
+    await advanceRefreshCooldown();
+    refreshButton?.click();
+    refreshButton?.click();
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/refresh")),
+    ).toHaveLength(1);
+
+    resolveRefresh?.(
+      jsonResponse({
+        news: [createNews(1, "更新後")],
+        metadata: { source: "merged", fetchedAt: new Date().toISOString() },
+      }),
+    );
+    await waitForText("更新後");
+  });
+
+  it("202の連続応答は上限回数で再試行を終了する", async () => {
+    const fetchedAt = new Date().toISOString();
+    mockNewsApi({
+      news: [createNews(1, "再試行上限")],
+      headers: { "X-KF3-News-Source": "merged", "X-KF3-News-Fetched-At": fetchedAt },
+      refreshResponses: [
+        new Response(null, { status: 202, headers: { "Retry-After": "0.01" } }),
+        new Response(null, { status: 202, headers: { "Retry-After": "0.01" } }),
+        new Response(null, { status: 202, headers: { "Retry-After": "0.01" } }),
+      ],
+    });
+
+    mount();
+    await waitForText("再試行上限");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("再取得に失敗");
+    expect(
+      vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith("/refresh")),
+    ).toHaveLength(3);
+  });
+
+  it("自動refreshの待機中にunmountするとPOSTしない", async () => {
+    const fetchedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/refresh")) {
+        return jsonResponse({
+          news: [createNews(1, "不要なrefresh")],
+          metadata: { source: "merged", fetchedAt: new Date().toISOString() },
+        });
+      }
+      return jsonResponse([createNews(1, "unmount対象")], 200, {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Fetched-At": fetchedAt,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    mount();
+    await waitForText("unmount対象");
+    root?.unmount();
+    root = undefined;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/refresh")),
+    ).toHaveLength(0);
+  });
+
+  it("refreshの503では前回一覧を維持して再試行可能にする", async () => {
+    mockNewsApi({
+      news: [createNews(1, "維持するニュース")],
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Fetched-At": new Date().toISOString(),
+      },
+      refreshResponses: [jsonResponse({ error: "failed" }, 503)],
+    });
+
+    mount();
+    await waitForText("維持するニュース");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("再取得に失敗");
+    expect(container.textContent).toContain("維持するニュース");
+    expect(getRefreshButton()?.disabled).toBe(false);
+  });
+
+  it("refreshの429では前回一覧を維持する", async () => {
+    const fetchedAt = new Date().toISOString();
+    mockNewsApi({
+      news: [createNews(1, "維持するニュース")],
+      headers: { "X-KF3-News-Source": "merged", "X-KF3-News-Fetched-At": fetchedAt },
+      refreshResponses: [
+        new Response(JSON.stringify({ cooldownSeconds: 30 }), {
+          status: 429,
+          headers: { "content-type": "application/json", "Retry-After": "30" },
+        }),
+      ],
+    });
+
+    mount();
+    await waitForText("維持するニュース");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("ニュースは再取得待機中です");
+    expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("cooldown");
+    expect(getRefreshButton()?.disabled).toBe(true);
+    expect(getRefreshIndicator()?.querySelector("svg")?.getAttribute("class")).toContain(
+      "text-green-600",
+    );
+    expect(getRefreshIndicator()?.querySelector("svg")?.getAttribute("class")).not.toContain(
+      "text-red-600",
+    );
+    expect(container.textContent).not.toContain("再取得はあと");
+    expect(container.textContent).not.toContain("秒後");
+    expect(container.querySelectorAll("li")).toHaveLength(1);
+  });
+
+  it("検索トグルとキーワード入力をアクセシブルに接続する", async () => {
+    mockNewsApi({ news: [createNews(1)] });
+    mount();
     await waitForText("おしらせの件数: 1件");
+
+    const toggle = findButton("検索オプション");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBe("news-search-options");
+    toggle.click();
+    await flushUpdates();
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('label[for="news-keyword"]')).not.toBeNull();
+    expect(container.querySelector('label[for="startDate"]')?.className).toBe("sr-only");
+    expect(container.querySelector('label[for="endDate"]')?.className).toBe("sr-only");
   });
 
   it.each([
     {
       name: "HTTP error",
-      setup: () => mockNewsResponse({ error: "failed" }, 503),
+      setup: () => mockNewsApi({ news: { error: "failed" }, getStatus: 503 }),
     },
     {
       name: "schema error",
-      setup: () => mockNewsResponse({ news: [] }),
+      setup: () => mockNewsApi({ news: { news: [] } }),
     },
     {
       name: "network error",

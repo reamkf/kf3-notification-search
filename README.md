@@ -19,8 +19,9 @@
 
 ## お知らせ一覧取得フロー
 
-`GET /api/kf3-news`のcache hit、cache miss、公式データとの統合、scheduledによるアーカイブ更新、ETag条件付き取得の詳細は、次のdocsを参照してください。
+`GET /`はSSR shellだけを返します。shell表示後の`GET /api/kf3-news`はKV snapshotを即時返し、KV miss時はR2 currentまたはlegacy snapshotを投影します。公式取得、検証、mergeを行う`POST /api/kf3-news/refresh`は別リクエストで、実行中は202、成功時は`{news, metadata}`を表示用KVへ保存して200、cooldownは429、依存障害は503を返します。refreshはR2 CAS leaseと5分cooldownで制限し、Cloudflare Rate LimitingとWAFで保護します。永続archiveの更新はscheduledだけが行い、restoreはsnapshotからcurrentを復元します。
 
+- [ニュース機能共通仕様](./docs/news-spec.md)
 - [ニュースページリクエスト仕様](./docs/news-page-request-spec.md)
 - [ニュースアーカイブ定期実行更新仕様](./docs/news-archive-scheduled-spec.md)
 - [ニュースアーカイブETag条件付き取得の実装仕様](./docs/news-archive-etag-optimization.md)
