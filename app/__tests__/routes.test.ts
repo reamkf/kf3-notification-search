@@ -12,7 +12,7 @@ const createNotFoundContext = (
   const render = vi.fn(() => renderedResponse);
   const request = new Request("https://example.com/missing", { method });
   const context = {
-    req: { method, raw: request },
+    req: { method, raw: request, url: request.url, header: () => ({}) },
     env: { ASSETS: { fetch: assetFetch } },
     status,
     render,
@@ -27,6 +27,10 @@ describe("404 handler", () => {
 
     expect(await notFoundHandler(setup.context)).toBe(assetResponse);
     expect(setup.assetFetch).toHaveBeenCalledOnce();
+    expect(setup.assetFetch).toHaveBeenCalledWith("https://example.com/missing", {
+      method,
+      headers: {},
+    });
     expect(setup.status).not.toHaveBeenCalled();
   });
 

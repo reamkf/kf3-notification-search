@@ -1,5 +1,4 @@
 import honox from "honox/vite";
-import { defaultOptions as devServerDefaultOptions } from "@hono/vite-dev-server";
 import { defineConfig } from "vite";
 import adapter from "@hono/vite-dev-server/cloudflare";
 import build from "@hono/vite-build/cloudflare-workers";
@@ -16,7 +15,11 @@ export default defineConfig({
       },
       devServer: {
         adapter,
-        handleHotUpdate: devServerDefaultOptions.handleHotUpdate,
+        handleHotUpdate({ server, modules }) {
+          if (!modules.some((module) => module.ssrModule)) return;
+          server.hot.send({ type: "full-reload" });
+          return [];
+        },
       },
     }),
     build(),
