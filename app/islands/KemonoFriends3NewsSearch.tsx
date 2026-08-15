@@ -566,6 +566,8 @@ const KemonoFriends3NewsSearch = () => {
     [filteredNews, visibleNewsCount],
   );
   const numberOfNews = filteredNews.length;
+  const totalNewsCount = newsPayload?.data.length ?? 0;
+  const isKeywordSearchApplied = normalizeQuery(appliedSearchKeyword).length > 0;
   const hasMoreNews = visibleNewsCount < numberOfNews;
   const isInitialLoading = initialLoadStatus === "loading";
   const isRefreshing = refreshState.status === "refreshing";
@@ -773,7 +775,9 @@ const KemonoFriends3NewsSearch = () => {
           </div>
 
           <div class="flex items-center gap-3 mt-0">
-            <span class={METADATA_TEXT_CLASS}>おしらせの件数: {numberOfNews}件</span>
+            {isKeywordSearchApplied && (
+              <span class={METADATA_TEXT_CLASS}>検索結果: {numberOfNews}件</span>
+            )}
             {metadata && (
               <div class="ml-auto flex items-center gap-1.5">
                 <span
@@ -790,6 +794,8 @@ const KemonoFriends3NewsSearch = () => {
                     ) : (
                       lastFetchedText
                     )}
+                    {" ･ "}
+                    {totalNewsCount}件
                   </span>
                 </span>
                 <button

@@ -151,7 +151,7 @@ describe("KemonoFriends3NewsSearch", () => {
 
     mount();
     expect(container.textContent).toContain("データを取得しています...");
-    await waitForText("おしらせの件数: 25件");
+    await waitForText("･ 25件");
     expect(container.querySelectorAll("li")).toHaveLength(20);
     expect(intersectionObservers).toHaveLength(1);
     expect(intersectionObservers[0].observe).toHaveBeenCalledOnce();
@@ -159,6 +159,26 @@ describe("KemonoFriends3NewsSearch", () => {
     intersectionObservers[0].trigger();
     await vi.waitFor(() => expect(container.querySelectorAll("li")).toHaveLength(25));
     expect(intersectionObservers[0].disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("検索時だけヒット件数を表示し、全件数は維持する", async () => {
+    const news = Array.from({ length: 25 }, (_, index) =>
+      createNews(index + 1, index < 3 ? `対象${index + 1}` : `別のお知らせ${index + 1}`),
+    );
+    mockNewsApi({ news });
+
+    mount();
+    await waitForText("･ 25件");
+    expect(container.textContent).not.toContain("検索結果:");
+
+    findButton("検索オプション").click();
+    await flushUpdates();
+    setInputValue(container.querySelector<HTMLInputElement>("#news-keyword")!, "対象");
+    await flushUpdates();
+    findButton("検索").click();
+
+    await waitForText("検索結果: 3件");
+    expect(container.textContent).toContain("･ 25件");
   });
 
   it("公式分類ラベルは値があるお知らせにだけ表示する", async () => {
@@ -176,7 +196,7 @@ describe("KemonoFriends3NewsSearch", () => {
     });
 
     mount();
-    await waitForText("おしらせの件数: 3件");
+    await waitForText("･ 3件");
 
     const categories = container.querySelectorAll('[data-testid="news-category"]');
     expect(categories).toHaveLength(3);
@@ -200,6 +220,7 @@ describe("KemonoFriends3NewsSearch", () => {
 
     mount();
     await waitForText("最終取得: 2分前");
+    expect(container.textContent).toContain("最終取得: 2分前 ･ 1件");
     const refreshButton = getRefreshButton();
     const refreshIndicator = getRefreshIndicator();
     expect(refreshButton).not.toBeNull();
@@ -325,14 +346,16 @@ describe("KemonoFriends3NewsSearch", () => {
     });
 
     mount();
-    await waitForText("おしらせの件数: 25件");
+    await waitForText("･ 25件");
     findButton("検索オプション").click();
     await flushUpdates();
     const keyword = container.querySelector<HTMLInputElement>("#news-keyword");
     expect(keyword).not.toBeNull();
     setInputValue(keyword!, "対象");
+    await flushUpdates();
     findButton("検索").click();
-    await waitForText("おしらせの件数: 25件");
+    await waitForText("検索結果: 25件");
+    expect(container.textContent).toContain("･ 25件");
     intersectionObservers[0].trigger();
     await vi.waitFor(() => expect(container.querySelectorAll("li")).toHaveLength(25));
 
@@ -349,7 +372,7 @@ describe("KemonoFriends3NewsSearch", () => {
     });
 
     mount();
-    await waitForText("おしらせの件数: 2件");
+    await waitForText("･ 2件");
     findButton("検索オプション").click();
     await flushUpdates();
     setInputValue(container.querySelector<HTMLInputElement>("#news-keyword")!, "対象");
@@ -357,12 +380,12 @@ describe("KemonoFriends3NewsSearch", () => {
 
     const startDate = container.querySelector<HTMLInputElement>("#startDate")!;
     setInputValue(startDate, "2019-09-25");
-    await waitForText("おしらせの件数: 2件");
+    await waitForText("･ 2件");
 
     const sortOrder = container.querySelector("#sortOrder") as unknown as HTMLSelectElement;
     sortOrder.value = "asc";
     sortOrder.dispatchEvent(new Event("change", { bubbles: true }));
-    await waitForText("おしらせの件数: 2件");
+    await waitForText("･ 2件");
   });
 
   it("refreshの202をRetry-Afterで有限回再試行する", async () => {
@@ -528,7 +551,7 @@ describe("KemonoFriends3NewsSearch", () => {
   it("検索トグルとキーワード入力をアクセシブルに接続する", async () => {
     mockNewsApi({ news: [createNews(1)] });
     mount();
-    await waitForText("おしらせの件数: 1件");
+    await waitForText("･ 1件");
 
     const toggle = findButton("検索オプション");
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
