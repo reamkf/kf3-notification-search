@@ -101,9 +101,9 @@ currentがまだなく、legacyデータから移行する初回実行では、�
 
 - keyは`monthly/YYYY-MM.json`とし、年月はJSTで判定する。
 - 各月で最初に正常に到達した実行が、本番反映済みのarchiveを保存する。
-- 200または条件なしのfull経路では、同じ月のobjectを上書きしないため、事前の`head()`や`get()`は行わず、毎回`If-None-Match: *`の条件付きPUTを1回だけ実行する。
+- 200または条件なしのfull経路では、先に当月monthlyを`head()`し、存在すればPUTせず保存済みとして扱う。欠落時だけ`If-None-Match: *`の条件付きPUTを実行する。
 - 304経路では先に当月monthlyを`head()`し、存在すればPUTしない。欠落時だけcurrentをstateのETagで条件付き取得し、ETag一致時のraw bodyをmonthlyへ保存する。条件付き取得が`null`または不一致ならfull経路へ戻る。
-- full経路のPUTが`R2Object`を返した場合は新規作成、条件不一致で`null`を返した場合は保存済みとして扱い、既存本文は取得しない。304経路も条件付きPUTの`null`を保存済みとして扱う。
+- 条件付きPUTが`R2Object`を返した場合は新規作成、条件不一致で`null`を返した場合は保存済みとして扱う。別実行との競合で既存monthlyへのPUTがR2のBucket Lockエラー`10069`になった場合も保存済みとして扱い、既存本文は取得しない。
 - currentの内容変更がない実行でも、月次backupが欠けていれば作成する。
 
 日次および月次backupの内容は、復元dry-runまたは運用上の完全性監査で厳密に検証する。
@@ -124,8 +124,9 @@ currentがまだなく、legacyデータから移行する初回実行では、�
 - 日次backupの保存に失敗した場合は、currentとKVを変更しない。
 - current更新が競合した場合は、KV削除と月次backupへ進まない。先に作成済みの日次backupは残す。
 - KV削除に失敗した場合、current更新は巻き戻さず、月次backupの作成へも進まない。scheduled処理は失敗として終了し、既存cacheは有効期限によって解消される。月次backupが欠けている場合は、次回の正常実行で作成を再試行する。
-- 月次backupの条件付きPUTが`null`を返した場合は、別実行が保存済みとして扱う。
-- 月次backupの条件付きPUTが例外になった場合は失敗とし、current更新は巻き戻さない。次回の正常実行で月次backup作成を再試行する。
+- 月次backupが`head()`で存在した場合は、保存済みとして扱い、PUTと本文取得を行わない。
+- 月次backupの条件付きPUTが`null`を返した場合、または別実行との競合でBucket Lockエラー`10069`になった場合は、保存済みとして扱う。
+- 月次backupの確認または保存で、それ以外の例外が発生した場合は失敗とし、current更新は巻き戻さない。次回の正常実行で月次backup作成を再試行する。
 
 公式取得または検証が失敗した場合は、current、backup、公式ETag state、KVを変更しない。state保存が失敗または競合した場合だけは、確定済みcurrentを巻き戻さず、次回の完全処理へ委ねる。
 

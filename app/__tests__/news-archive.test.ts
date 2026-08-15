@@ -98,8 +98,10 @@ const createMutableBucket = (
     failPutKeys?: Set<string>;
     putErrors?: Map<string, unknown>;
     concurrentPutObjects?: Map<string, FakeStoredObject>;
+    putErrorsAfterConcurrentPutObjects?: Map<string, unknown>;
     nullPutKeys?: Set<string>;
     putCalls?: PutCall[];
+    headCalls?: string[];
   } = {},
 ) => {
   const objects = new Map(Object.entries(initial));
@@ -124,6 +126,7 @@ const createMutableBucket = (
       return toBody(object);
     },
     head: async (key: string) => {
+      options.headCalls?.push(key);
       const object = objects.get(key);
       return object ? ({ etag: object.etag } as unknown as R2Object) : null;
     },
@@ -135,6 +138,9 @@ const createMutableBucket = (
       if (options.nullPutKeys?.has(key)) return null;
       const concurrentObject = options.concurrentPutObjects?.get(key);
       if (concurrentObject) objects.set(key, concurrentObject);
+      if (options.putErrorsAfterConcurrentPutObjects?.has(key)) {
+        throw options.putErrorsAfterConcurrentPutObjects.get(key);
+      }
       const existing = objects.get(key);
       const onlyIf = putOptions?.onlyIf;
       if (onlyIf) {
@@ -565,9 +571,12 @@ describe("アーカイブ更新トランザクション", () => {
     backupOptions: {
       failPutKeys?: Set<string>;
       putErrors?: Map<string, unknown>;
+      concurrentPutObjects?: Map<string, FakeStoredObject>;
+      putErrorsAfterConcurrentPutObjects?: Map<string, unknown>;
       nullPutKeys?: Set<string>;
       initial?: Record<string, FakeStoredObject>;
       putCalls?: PutCall[];
+      headCalls?: string[];
     } = {},
     cacheFailure = false,
     dataOptions: {
@@ -702,10 +711,11 @@ describe("アーカイブ更新トランザクション", () => {
   it("304でmonthlyが欠けている場合はcurrentのraw bodyを保存する", async () => {
     const monthlyKey = buildBackupKeys(transactionNowMs).monthlyKey;
     const backupPuts: PutCall[] = [];
+    const headCalls: string[] = [];
     const setup = createDependencies(
       asStoredObject(createSortedDocument(MIN_OFFICIAL_ENTRY_COUNT), "current-etag"),
       createDocument(MIN_OFFICIAL_ENTRY_COUNT),
-      { putCalls: backupPuts },
+      { putCalls: backupPuts, headCalls },
       false,
       {
         initial: {
@@ -725,6 +735,7 @@ describe("アーカイブ更新トランザクション", () => {
     expect(backupPuts).toHaveLength(1);
     expect(backupPuts[0].key).toBe(monthlyKey);
     expect(backupPuts[0].value).toBeInstanceOf(Object);
+    expect(headCalls).toEqual([monthlyKey]);
     expect(setup.timeline).toContain(`data:get:${CURRENT_ARCHIVE_KEY}`);
   });
 
@@ -963,7 +974,7 @@ describe("アーカイブ更新トランザクション", () => {
     );
     const result = await updateNewsArchive(setup.dependencies);
     expect(result.monthlyBackupStatus).toBe("existing");
-    expect(setup.timeline).toEqual([`data:get:${CURRENT_ARCHIVE_KEY}`, `backup:put:${monthlyKey}`]);
+    expect(setup.timeline).toEqual([`data:get:${CURRENT_ARCHIVE_KEY}`]);
   });
 
   it("current初回作成ではlegacyと同じ内容でもdailyとcurrentを作る", async () => {
@@ -1050,7 +1061,6 @@ describe("アーカイブ更新トランザクション", () => {
     expect(setup.timeline).toContain(`data:put:${CURRENT_ARCHIVE_KEY}`);
     expect(setup.timeline).toContain("cache:delete:kf3-news");
     expect(setup.timeline).toContain(`backup:put:${monthlyKey}`);
-    expect(setup.timeline.some((entry) => entry.includes(":head:"))).toBe(false);
     expect(setup.logger.errors[0]).toMatchObject({
       event: "news_archive_update_failed",
       stage: "monthly-backup",
@@ -1070,7 +1080,39 @@ describe("アーカイブ更新トランザクション", () => {
     const result = await updateNewsArchive(setup.dependencies);
     expect(result.monthlyBackupStatus).toBe("existing");
     expect(setup.timeline).toContain(`backup:put:${monthlyKey}`);
-    expect(setup.timeline.some((entry) => entry.includes(":head:"))).toBe(false);
+  });
+
+  it("既存monthlyはHEADで確認してPUTせず保存済みとして扱う", async () => {
+    const current = asStoredObject(createDocument(1), "current-read-etag");
+    const monthlyKey = buildBackupKeys(transactionNowMs).monthlyKey;
+    const headCalls: string[] = [];
+    const setup = createDependencies(current, createDocument(MIN_OFFICIAL_ENTRY_COUNT), {
+      initial: { [monthlyKey]: asStoredObject(createDocument(1), "monthly-etag") },
+      headCalls,
+    });
+    const result = await updateNewsArchive(setup.dependencies);
+    expect(result.monthlyBackupStatus).toBe("existing");
+    expect(headCalls).toEqual([monthlyKey]);
+    expect(setup.timeline).not.toContain(`backup:put:${monthlyKey}`);
+    expect(setup.logger.errors).toEqual([]);
+  });
+
+  it("monthly PUTのBucket Lock競合は保存済みとして扱い、競合側の内容を保持する", async () => {
+    const current = asStoredObject(createDocument(1), "current-read-etag");
+    const monthlyKey = buildBackupKeys(transactionNowMs).monthlyKey;
+    const concurrentMonthly = asStoredObject(createDocument(2), "locked-monthly-etag");
+    const setup = createDependencies(current, createDocument(MIN_OFFICIAL_ENTRY_COUNT), {
+      concurrentPutObjects: new Map([[monthlyKey, concurrentMonthly]]),
+      putErrorsAfterConcurrentPutObjects: new Map([
+        [monthlyKey, new Error("put: The object is locked by the bucket policy. (10069)")],
+      ]),
+    });
+    const result = await updateNewsArchive(setup.dependencies);
+    const storedMonthly = await setup.dependencies.backupBucket.get(monthlyKey);
+    expect(result.monthlyBackupStatus).toBe("existing");
+    expect(setup.timeline).toContain(`backup:put:${monthlyKey}`);
+    expect(await storedMonthly?.text()).toBe(concurrentMonthly.text);
+    expect(setup.logger.errors).toEqual([]);
   });
 
   it("汎用Errorの秘密値と制御文字を除去し、長さを制限する", async () => {

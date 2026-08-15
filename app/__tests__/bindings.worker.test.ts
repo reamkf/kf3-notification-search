@@ -179,17 +179,19 @@ describe("Cloudflare bindings", () => {
     expect(await bindings.KF3_NOTIF_BACKUP.get(buildBackupKeys(nowMs).monthlyKey)).toBeNull();
   });
 
-  it("既存monthlyはheadせず条件付きPUTだけでexistingにする", async () => {
+  it("既存monthlyはHEADで確認してPUTしない", async () => {
     const nowMs = Date.parse("2026-08-01T18:15:00Z");
     const currentDocument = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
     const monthlyKey = buildBackupKeys(nowMs).monthlyKey;
     await bindings.KF3_NOTIF_DATA.put(CURRENT_ARCHIVE_KEY, JSON.stringify(currentDocument));
     await bindings.KF3_NOTIF_BACKUP.put(monthlyKey, "existing monthly");
+    let putCalls = 0;
     const backupBucket = {
-      put: bindings.KF3_NOTIF_BACKUP.put.bind(bindings.KF3_NOTIF_BACKUP),
-      head: async () => {
-        throw new Error("head must not be called");
+      put: async (...args: Parameters<R2Bucket["put"]>) => {
+        putCalls += 1;
+        return bindings.KF3_NOTIF_BACKUP.put(...args);
       },
+      head: bindings.KF3_NOTIF_BACKUP.head.bind(bindings.KF3_NOTIF_BACKUP),
     } as unknown as R2Bucket;
 
     const result = await updateNewsArchive({
@@ -203,6 +205,7 @@ describe("Cloudflare bindings", () => {
 
     expect(result.updated).toBe(false);
     expect(result.monthlyBackupStatus).toBe("existing");
+    expect(putCalls).toBe(0);
     expect(await (await bindings.KF3_NOTIF_BACKUP.get(monthlyKey))?.text()).toBe(
       "existing monthly",
     );

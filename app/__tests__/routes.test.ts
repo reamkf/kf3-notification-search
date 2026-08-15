@@ -10,14 +10,18 @@ const createNotFoundContext = (
   const status = vi.fn();
   const renderedResponse = new Response("404 Not Found", { status: 404 });
   const render = vi.fn(() => renderedResponse);
-  const request = new Request("https://example.com/missing", { method });
+  const request = new Request("https://example.com/missing", {
+    method,
+    redirect: "manual",
+    headers: { accept: "text/html" },
+  });
   const context = {
     req: { method, raw: request, url: request.url, header: () => ({}) },
     env: { ASSETS: { fetch: assetFetch } },
     status,
     render,
   } as unknown as Parameters<typeof notFoundHandler>[0];
-  return { context, status, render, assetFetch, renderedResponse };
+  return { context, request, status, render, assetFetch, renderedResponse };
 };
 
 describe("404 handler", () => {
@@ -27,10 +31,10 @@ describe("404 handler", () => {
 
     expect(await notFoundHandler(setup.context)).toBe(assetResponse);
     expect(setup.assetFetch).toHaveBeenCalledOnce();
-    expect(setup.assetFetch).toHaveBeenCalledWith("https://example.com/missing", {
-      method,
-      headers: {},
-    });
+    expect(setup.assetFetch).toHaveBeenCalledWith(setup.request);
+    expect(setup.request.method).toBe(method);
+    expect(setup.request.redirect).toBe("manual");
+    expect(setup.request.headers.get("accept")).toBe("text/html");
     expect(setup.status).not.toHaveBeenCalled();
   });
 

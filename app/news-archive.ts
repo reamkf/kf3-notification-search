@@ -642,6 +642,8 @@ const asArchiveError = (
 
 const contentType = "application/json; charset=utf-8";
 const createIfAbsentCondition = () => ({ etagDoesNotMatch: "*" });
+const isObjectLockedByBucketPolicy = (error: unknown) =>
+  error instanceof Error && /\(10069\)\s*$/.test(error.message);
 
 const putDailyBackup = async (bucket: R2Bucket, key: string, archiveText: string) => {
   let result: R2Object | null;
@@ -683,11 +685,26 @@ const putCurrentArchive = async (
   return result.etag;
 };
 
+const hasMonthlyBackup = async (bucket: R2Bucket, key: string): Promise<boolean> => {
+  try {
+    return (await bucket.head(key)) !== null;
+  } catch (error) {
+    throw asArchiveError(error, "monthly-backup", "月次バックアップの確認に失敗しました", {
+      key,
+    });
+  }
+};
+
 const putMonthlyBackup = async (
   bucket: R2Bucket,
   key: string,
   archiveValue: string | R2ObjectBody["body"],
+  options: { monthlyMissingChecked?: boolean } = {},
 ): Promise<MonthlyBackupStatus> => {
+  if (!options.monthlyMissingChecked && (await hasMonthlyBackup(bucket, key))) {
+    return "existing";
+  }
+
   let result: R2Object | null;
   try {
     result = await bucket.put(key, archiveValue, {
@@ -695,19 +712,12 @@ const putMonthlyBackup = async (
       httpMetadata: { contentType },
     });
   } catch (error) {
+    if (isObjectLockedByBucketPolicy(error)) return "existing";
     throw asArchiveError(error, "monthly-backup", "月次バックアップの保存に失敗しました", {
       key,
     });
   }
   return result ? "created" : "existing";
-};
-
-const hasMonthlyBackup = async (bucket: R2Bucket, key: string): Promise<boolean> => {
-  try {
-    return (await bucket.head(key)) !== null;
-  } catch (error) {
-    throw asArchiveError(error, "monthly-backup", "月次バックアップの確認に失敗しました");
-  }
 };
 
 const saveOfficialFetchState = async (
@@ -822,6 +832,7 @@ export const updateNewsArchive = async (
       dependencies.backupBucket,
       backupKeys.monthlyKey,
       currentObject.body,
+      { monthlyMissingChecked: true },
     );
     const processingMs = Math.max(0, (dependencies.clock?.() ?? Date.now()) - startedAt);
     const result: NewsArchiveUpdateResult = {

@@ -2,10 +2,7 @@ import type { NotFoundHandler } from "hono";
 
 const handler: NotFoundHandler = async (c) => {
   if ((c.req.method === "GET" || c.req.method === "HEAD") && c.env.ASSETS) {
-    const assetResponse = await c.env.ASSETS.fetch(c.req.url, {
-      method: c.req.method,
-      headers: c.req.header(),
-    });
+    const assetResponse = await c.env.ASSETS.fetch(c.req.raw);
     if (assetResponse.status !== 404) {
       return assetResponse;
     }
