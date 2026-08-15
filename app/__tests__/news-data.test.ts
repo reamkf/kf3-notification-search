@@ -21,7 +21,7 @@ import { newsArraySchema, storedNewsDocumentSchema, storedNewsSchema } from "../
 const createNews = (id: number, overrides: Record<string, unknown> = {}) => ({
   id,
   targetUrl: `/info/${id}`,
-  title: `ニュース${id}`,
+  title: `お知らせ${id}`,
   newsDate: "2026年08月01日 12時00分00秒",
   updated: "2026年08月01日 12時00分00秒",
   ...overrides,
@@ -79,7 +79,7 @@ describe("保存用スキーマ", () => {
     const expected = [
       {
         targetUrl: "/info/1",
-        title: "ニュース1",
+        title: "お知らせ1",
         newsDate: "2026年08月01日 12時00分00秒",
         updated: "2026年08月01日 12時00分00秒",
         category: "event",
@@ -95,7 +95,7 @@ describe("保存用スキーマ", () => {
     expect(projectValidatedClientNews({ news: [createNews(1)] })).toEqual([
       {
         targetUrl: "/info/1",
-        title: "ニュース1",
+        title: "お知らせ1",
         newsDate: "2026年08月01日 12時00分00秒",
         updated: "2026年08月01日 12時00分00秒",
       },

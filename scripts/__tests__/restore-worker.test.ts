@@ -14,7 +14,7 @@ const snapshotKey = "daily/2026/08/02/2026-08-01T18-15-00Z-abc123def456.json";
 const createNews = (id: number, newsDate = "2026年08月01日 12時00分00秒") => ({
   id,
   targetUrl: `/info/${id}`,
-  title: `ニュース${id}`,
+  title: `お知らせ${id}`,
   newsDate,
   updated: newsDate,
 });

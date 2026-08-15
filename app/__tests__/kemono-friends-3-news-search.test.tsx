@@ -6,7 +6,7 @@ import KemonoFriends3NewsSearch from "../islands/KemonoFriends3NewsSearch";
 
 const createNews = (
   id: number,
-  title = `ニュース${id}`,
+  title = `お知らせ${id}`,
   newsDate = `2026年08月${String(id).padStart(2, "0")}日 12時00分00秒`,
   category?: string,
 ) => ({
@@ -145,7 +145,7 @@ afterEach(() => {
 describe("KemonoFriends3NewsSearch", () => {
   it("取得中から成功へ遷移し、20件ずつ追加表示する", async () => {
     const news = Array.from({ length: 25 }, (_, index) =>
-      createNews(index + 1, `ニュース${index + 1}`, "2026年08月01日 12時00分00秒"),
+      createNews(index + 1, `お知らせ${index + 1}`, "2026年08月01日 12時00分00秒"),
     );
     mockNewsApi({ news });
 
@@ -161,7 +161,7 @@ describe("KemonoFriends3NewsSearch", () => {
     expect(intersectionObservers[0].disconnect).toHaveBeenCalledOnce();
   });
 
-  it("公式分類ラベルは値があるニュースにだけ表示する", async () => {
+  it("公式分類ラベルは値があるお知らせにだけ表示する", async () => {
     mockNewsApi({
       news: [
         createNews(
@@ -204,7 +204,7 @@ describe("KemonoFriends3NewsSearch", () => {
     const refreshIndicator = getRefreshIndicator();
     expect(refreshButton).not.toBeNull();
     expect(refreshIndicator).not.toBeNull();
-    expect(refreshButton?.getAttribute("aria-label")).toBe("ニュースを再取得");
+    expect(refreshButton?.getAttribute("aria-label")).toBe("お知らせを再取得");
     expect(refreshIndicator?.getAttribute("aria-busy")).toBe("false");
     expect(refreshIndicator?.dataset.refreshStatus).toBe("cooldown");
     expect(refreshButton?.disabled).toBe(true);
@@ -223,8 +223,8 @@ describe("KemonoFriends3NewsSearch", () => {
   });
 
   it("古いGETデータを表示してからrefreshを自動実行する", async () => {
-    const oldNews = [createNews(1, "前回のニュース")];
-    const refreshedNews = [createNews(1, "更新されたニュース")];
+    const oldNews = [createNews(1, "前回のお知らせ")];
+    const refreshedNews = [createNews(1, "更新されたお知らせ")];
     const fetchedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     const refreshedAt = new Date().toISOString();
     const refreshResponse = jsonResponse({
@@ -241,9 +241,9 @@ describe("KemonoFriends3NewsSearch", () => {
     });
 
     mount();
-    await waitForText("前回のニュース");
+    await waitForText("前回のお知らせ");
     expect(container.querySelectorAll("li")).toHaveLength(1);
-    await waitForText("更新されたニュース");
+    await waitForText("更新されたお知らせ");
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       "/api/kf3-news/refresh",
       expect.objectContaining({ method: "POST", signal: expect.any(AbortSignal) }),
@@ -345,7 +345,7 @@ describe("KemonoFriends3NewsSearch", () => {
 
   it("日付やソート変更では未送信のキーワードを適用しない", async () => {
     mockNewsApi({
-      news: [createNews(1, "対象ニュース"), createNews(2, "別ニュース")],
+      news: [createNews(1, "対象お知らせ"), createNews(2, "別お知らせ")],
     });
 
     mount();
@@ -477,7 +477,7 @@ describe("KemonoFriends3NewsSearch", () => {
 
   it("refreshの503では前回一覧を維持して再試行可能にする", async () => {
     mockNewsApi({
-      news: [createNews(1, "維持するニュース")],
+      news: [createNews(1, "維持するお知らせ")],
       headers: {
         "X-KF3-News-Source": "merged",
         "X-KF3-News-Fetched-At": new Date().toISOString(),
@@ -486,18 +486,18 @@ describe("KemonoFriends3NewsSearch", () => {
     });
 
     mount();
-    await waitForText("維持するニュース");
+    await waitForText("維持するお知らせ");
     await advanceRefreshCooldown();
     getRefreshButton()?.click();
     await waitForText("再取得に失敗");
-    expect(container.textContent).toContain("維持するニュース");
+    expect(container.textContent).toContain("維持するお知らせ");
     expect(getRefreshButton()?.disabled).toBe(false);
   });
 
   it("refreshの429では前回一覧を維持する", async () => {
     const fetchedAt = new Date().toISOString();
     mockNewsApi({
-      news: [createNews(1, "維持するニュース")],
+      news: [createNews(1, "維持するお知らせ")],
       headers: { "X-KF3-News-Source": "merged", "X-KF3-News-Fetched-At": fetchedAt },
       refreshResponses: [
         new Response(JSON.stringify({ cooldownSeconds: 30 }), {
@@ -508,10 +508,10 @@ describe("KemonoFriends3NewsSearch", () => {
     });
 
     mount();
-    await waitForText("維持するニュース");
+    await waitForText("維持するお知らせ");
     await advanceRefreshCooldown();
     getRefreshButton()?.click();
-    await waitForText("ニュースは再取得待機中です");
+    await waitForText("お知らせは再取得待機中です");
     expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("cooldown");
     expect(getRefreshButton()?.disabled).toBe(true);
     expect(getRefreshIndicator()?.querySelector("svg")?.getAttribute("class")).toContain(

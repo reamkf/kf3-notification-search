@@ -1,10 +1,10 @@
-# ニュースアーカイブ条件付き復元runbook
+# お知らせアーカイブ条件付き復元runbook
 
 ## 目的と適用範囲
 
 本runbookは、`archive/current.json`が破損した場合に、dailyまたはmonthlyのsnapshotから条件付きで復元する手順を定義する。
 
-復元APIのrequest形式、snapshot keyの制約、dry-run/applyのエラーコードは [ニュース機能共通仕様の復元仕様](./news-spec.md#復元仕様) を参照する。本書はAPI契約の全表を再掲せず、運用担当者が行う確認と操作だけを記載する。
+復元APIのrequest形式、snapshot keyの制約、dry-run/applyのエラーコードは [お知らせ機能共通仕様の復元仕様](./news-spec.md#復元仕様) を参照する。本書はAPI契約の全表を再掲せず、運用担当者が行う確認と操作だけを記載する。
 
 - `wrangler.restore.toml`のlocalhost専用Workerを使用する。
 - 復元Workerはdeployしない。

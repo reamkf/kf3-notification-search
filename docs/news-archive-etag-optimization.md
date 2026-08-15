@@ -1,8 +1,8 @@
-# ニュースアーカイブETag条件付き取得の実装仕様
+# お知らせアーカイブETag条件付き取得の実装仕様
 
 ## 状態
 
-本書は、scheduled処理と表示用refreshで公式ETagを利用する現行実装の仕様を示す。表示用APIの`GET /api/kf3-news`は公式取得やETag条件付き取得を行わず、KV snapshotまたはR2 snapshotを返す。`POST /api/kf3-news/refresh`は保存済みstateとcurrent ETagが対応する場合だけ条件付き取得を利用するが、公式ETag stateを書き換えず、scheduledの最適化状態へ影響を与えない。公式レスポンスのデータ形式とHTTP ETagの契約は [公式ニュース配信仕様](./official-news-spec.md) を参照する。
+本書は、scheduled処理と表示用refreshで公式ETagを利用する現行実装の仕様を示す。表示用APIの`GET /api/kf3-news`は公式取得やETag条件付き取得を行わず、KV snapshotまたはR2 snapshotを返す。`POST /api/kf3-news/refresh`は保存済みstateとcurrent ETagが対応する場合だけ条件付き取得を利用するが、公式ETag stateを書き換えず、scheduledの最適化状態へ影響を与えない。公式レスポンスのデータ形式とHTTP ETagの契約は [公式お知らせ配信仕様](./official-news-spec.md) を参照する。
 
 ## 目的
 
@@ -193,7 +193,7 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`別に集計する。
 - stateとcurrentの不一致時に、公式変更を取り逃がさず完全処理へ戻る。
 - refreshが表示用KVだけを更新し、永続archiveと公式ETag stateへ影響を与えない。
 - 別refreshの実行中とlease失効は202、cooldownは429、依存処理の失敗は503へ変換する。
-- `GET /`のshell応答が公式サーバー、R2、KVへのニュース取得を開始しない。
+- `GET /`のshell応答が公式サーバー、R2、KVへのお知らせ取得を開始しない。
 - GETとrefreshのCPU時間をscheduledと別リクエストとして確認できる。
 - 復元apply後の次回scheduled実行が完全処理になる。
 - scheduledとrefreshを別々にWorkers Invocation Logsで計測できる。
@@ -204,7 +204,7 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`別に集計する。
 
 - `app/news-archive.ts`: 公式取得結果の200、304分岐、stateの読み書き、current HEAD、scheduled 304経路
 - `app/server.ts`: 表示用GET、refresh、R2 leaseと制御metadata、KV投影
-- `app/routes/index.tsx`: ニュース取得を行わないSSR shell
+- `app/routes/index.tsx`: お知らせ取得を行わないSSR shell
 - `app/islands/KemonoFriends3NewsSearch.tsx`: shell表示後のGET、refresh呼び出し
 - `app/__tests__/news-archive.test.ts`: state、条件付き取得、scheduled処理順、失敗経路のテスト
 - `app/__tests__/server.test.ts`: GETのKV hit/miss、refresh、lease、cooldown、scheduled、heartbeatの回帰テスト

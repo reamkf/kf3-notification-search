@@ -76,7 +76,7 @@ const openNewsSearch = async (page: Page, options = {}) => {
   await expect(page.getByText("おしらせの件数: 3件")).toBeVisible();
 };
 
-test("ニュース一覧を新しい順に表示し、公式サイトへのリンクを生成する", async ({ page }) => {
+test("お知らせ一覧を新しい順に表示し、公式サイトへのリンクを生成する", async ({ page }) => {
   await openNewsSearch(page);
   const items = page.locator("ul > li");
 
@@ -88,7 +88,7 @@ test("ニュース一覧を新しい順に表示し、公式サイトへのリ�
   );
 });
 
-test("公式分類ラベルを値があるニュースにだけ表示する", async ({ page }) => {
+test("公式分類ラベルを値があるお知らせにだけ表示する", async ({ page }) => {
   await openNewsSearch(page);
 
   const categories = page.getByTestId("news-category");
@@ -112,7 +112,7 @@ test("データ取得日時を相対表示し、取得直後は再取得ボタ�
   const metadata = page.getByTestId("news-metadata");
   const reloadButton = page.getByTestId("news-refresh-button");
   await expect(metadata.getByText(/最終取得:/)).toBeVisible();
-  await expect(reloadButton).toHaveAttribute("aria-label", "ニュースを再取得");
+  await expect(reloadButton).toHaveAttribute("aria-label", "お知らせを再取得");
   await expect(metadata).toHaveAttribute("aria-busy", "false");
   await expect(metadata).toHaveAttribute("data-refresh-status", "cooldown");
   await expect(reloadButton).toBeDisabled();
@@ -182,7 +182,7 @@ test("archive-snapshot表示後に自動再取得する", async ({ page }) => {
   await expect(page.getByText("測定イベント更新のお知らせ")).toBeVisible();
 });
 
-test("キーワード、並び順、期間でニュースを絞り込む", async ({ page }) => {
+test("キーワード、並び順、期間でお知らせを絞り込む", async ({ page }) => {
   await openNewsSearch(page);
   await page.getByRole("button", { name: "検索オプション" }).click();
   await page.getByLabel("キーワード検索:").fill("測定 OR 掃除");
@@ -214,7 +214,7 @@ test("検索オプションの表示状態を再読み込み後も保持する",
   );
 });
 
-test("APIエラー時にエラーを表示し、ニュース一覧を表示しない", async ({ page }) => {
+test("APIエラー時にエラーを表示し、お知らせ一覧を表示しない", async ({ page }) => {
   await page.route("**/api/kf3-news", (route) =>
     route.fulfill({
       status: 500,
@@ -250,15 +250,15 @@ test("refreshの429では前回一覧を維持し、再取得ボタンを無効�
   await expect(reloadButton).not.toHaveClass(/bg-|border-/);
   await expect(metadata.locator("svg")).toHaveClass(/text-green-600/);
   await expect(reloadButton).toBeDisabled();
-  await expect(page.getByText("ニュースは再取得待機中です")).toBeAttached();
+  await expect(page.getByText("お知らせは再取得待機中です")).toBeAttached();
   await expect(page.getByText(/再取得はあと|秒後/)).toHaveCount(0);
   await expect(page.locator("ul > li")).toHaveCount(3);
 });
 
-test("20件を超えるニュースをスクロールに応じて追加表示する", async ({ page }) => {
+test("20件を超えるお知らせをスクロールに応じて追加表示する", async ({ page }) => {
   const manyNews = Array.from({ length: 25 }, (_, index) => ({
     targetUrl: `/info/${index + 1}`,
-    title: `ニュース${index + 1}`,
+    title: `お知らせ${index + 1}`,
     newsDate: `2026年08月${String((index % 8) + 1).padStart(2, "0")}日 12時00分00秒`,
     updated: "",
   }));
@@ -281,9 +281,9 @@ test("20件を超えるニュースをスクロールに応じて追加表示す
   const items = page.locator("ul > li");
   await expect(items).toHaveCount(20);
 
-  await page.getByText("ニュースを読み込んでいます...").scrollIntoViewIfNeeded();
+  await page.getByText("お知らせを読み込んでいます...").scrollIntoViewIfNeeded();
   await expect(items).toHaveCount(25);
-  await expect(page.getByText("ニュースを読み込んでいます...")).toHaveCount(0);
+  await expect(page.getByText("お知らせを読み込んでいます...")).toHaveCount(0);
 });
 
 test("検索結果が0件でもエラーや追加読み込みを表示しない", async ({ page }) => {
@@ -295,5 +295,5 @@ test("検索結果が0件でもエラーや追加読み込みを表示しない"
   await expect(page.getByText("おしらせの件数: 0件")).toBeVisible();
   await expect(page.locator("ul > li")).toHaveCount(0);
   await expect(page.getByRole("alert")).toHaveCount(0);
-  await expect(page.getByText("ニュースを読み込んでいます...")).toHaveCount(0);
+  await expect(page.getByText("お知らせを読み込んでいます...")).toHaveCount(0);
 });

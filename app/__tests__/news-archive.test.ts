@@ -26,7 +26,7 @@ import { parseJapaneseNewsDate, MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 const createNews = (id: number) => ({
   id,
   targetUrl: `/info/${id}`,
-  title: `ニュース${id}`,
+  title: `お知らせ${id}`,
   newsDate: "2026年08月01日 12時00分00秒",
   updated: "2026年08月01日 12時00分00秒",
 });

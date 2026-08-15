@@ -20,7 +20,7 @@ const bindings = env as unknown as WorkerBindings;
 const createNews = (id: number) => ({
   id,
   targetUrl: `/info/${id}`,
-  title: `ニュース${id}`,
+  title: `お知らせ${id}`,
   newsDate: "2026年08月01日 12時00分00秒",
   updated: "",
 });

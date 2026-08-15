@@ -465,8 +465,8 @@ export const fetchOfficialNews = async (
       throw new NewsArchiveError(
         "official-fetch",
         controller.signal.aborted
-          ? "公式ニュースの取得がタイムアウトしました"
-          : "公式ニュースの取得に失敗しました",
+          ? "公式お知らせの取得がタイムアウトしました"
+          : "公式お知らせの取得に失敗しました",
       );
     }
 
@@ -490,7 +490,7 @@ export const fetchOfficialNews = async (
       };
     }
     if (response.status !== 200) {
-      throw new NewsArchiveError("official-fetch", "公式ニュースのHTTPステータスが不正です", {
+      throw new NewsArchiveError("official-fetch", "公式お知らせのHTTPステータスが不正です", {
         status: response.status,
       });
     }
@@ -501,7 +501,7 @@ export const fetchOfficialNews = async (
       ({ text, byteLength } = await readResponseBody(response));
     } catch (error) {
       if (controller.signal.aborted) {
-        throw new NewsArchiveError("official-fetch", "公式ニュースの取得がタイムアウトしました");
+        throw new NewsArchiveError("official-fetch", "公式お知らせの取得がタイムアウトしました");
       }
       throw error;
     }
@@ -509,7 +509,7 @@ export const fetchOfficialNews = async (
     try {
       parsed = JSON.parse(text);
     } catch {
-      throw new NewsArchiveError("official-parse", "公式ニュースJSONの解析に失敗しました", {
+      throw new NewsArchiveError("official-parse", "公式お知らせJSONの解析に失敗しました", {
         byteLength,
       });
     }
@@ -518,12 +518,12 @@ export const fetchOfficialNews = async (
       document = validateParsedOfficialNewsDocumentShape(parsed);
     } catch (error) {
       if (error instanceof NewsDataError && error.stage === "document-validation") {
-        throw new NewsArchiveError("official-parse", "公式ニュースの構造が無効です", {
+        throw new NewsArchiveError("official-parse", "公式お知らせの構造が無効です", {
           byteLength,
         });
       }
       if (error instanceof NewsDataError) throw error;
-      throw new NewsArchiveError("official-parse", "公式ニュースの検証に失敗しました", {
+      throw new NewsArchiveError("official-parse", "公式お知らせの検証に失敗しました", {
         byteLength,
       });
     }
@@ -872,7 +872,7 @@ export const updateNewsArchive = async (
       try {
         await dependencies.cache.delete("kf3-news");
       } catch (error) {
-        throw asArchiveError(error, "cache-delete", "ニュースキャッシュの削除に失敗しました");
+        throw asArchiveError(error, "cache-delete", "お知らせキャッシュの削除に失敗しました");
       }
     }
 
@@ -927,7 +927,7 @@ export const updateNewsArchive = async (
         if (fullResults[0].status === "rejected") throw fullResults[0].reason;
         if (fullResults[1].status === "rejected") throw fullResults[1].reason;
         if (fullResults[1].value.status !== "modified") {
-          throw new NewsArchiveError("official-fetch", "公式ニュースの応答形式が不正です");
+          throw new NewsArchiveError("official-fetch", "公式お知らせの応答形式が不正です");
         }
         return await completeModified(fullResults[1].value, fullResults[0].value);
       }
@@ -941,14 +941,14 @@ export const updateNewsArchive = async (
     if (archiveResult.status === "rejected") throw archiveResult.reason;
     if (officialResult.status === "rejected") throw officialResult.reason;
     if (officialResult.value.status !== "modified") {
-      throw new NewsArchiveError("official-fetch", "公式ニュースの応答形式が不正です");
+      throw new NewsArchiveError("official-fetch", "公式お知らせの応答形式が不正です");
     }
     return await completeModified(officialResult.value, archiveResult.value);
   } catch (error) {
     const archiveError = asArchiveError(
       error,
       "archive-validation",
-      "ニュースアーカイブの更新に失敗しました",
+      "お知らせアーカイブの更新に失敗しました",
     );
     logger.error({
       event: "news_archive_update_failed",

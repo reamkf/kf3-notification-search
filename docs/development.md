@@ -105,7 +105,7 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - 内容変更がない2回目はdailyとcurrentが増えず、monthlyは既存扱いになる
 - local testがproduction bucketを変更していない
 - 304経路で公式本文とcurrent本文の不要な処理を行わない
-- `GET /`がニュース取得なしでshellを返す
+- `GET /`がお知らせ取得なしでshellを返す
 - GETのKV hitが外部I/Oを行わず、KV missがR2 snapshotだけを投影する
 - refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
 - refreshが表示用KVだけを更新し、current、daily、monthly、公式ETag stateを変更しない
@@ -124,7 +124,7 @@ bunx tsc --noEmit
 bun run build
 ```
 
-全ゲートとローカルscheduled確認が成功し、導入状態ドキュメントの受け入れ条件を確認した後にdeployする。本番外部状態と受け入れ項目は [ニュースアーカイブ導入状態](./news-archive-rollout.md) を参照する。
+全ゲートとローカルscheduled確認が成功し、導入状態ドキュメントの受け入れ条件を確認した後にdeployする。本番外部状態と受け入れ項目は [お知らせアーカイブ導入状態](./news-archive-rollout.md) を参照する。
 
 ### Healthchecks.io
 
@@ -158,7 +158,7 @@ curl -i "https://<worker-host>/api/kf3-news"
 curl -i -X POST "https://<worker-host>/api/kf3-news/refresh"
 ```
 
-`GET /`がshellだけを返し、GETがKV snapshotまたはR2 snapshotを返し、refreshが実行中202、成功200、cooldown429、依存障害503の契約に従うことを確認する。refresh成功後もcurrent、daily、monthly、公式ETag stateが変更されていないことを確認する。ニュースの仕様は [ニュース機能共通仕様](./news-spec.md)、ページ取得は [ニュースページリクエスト仕様](./news-page-request-spec.md)、定期実行は [ニュースアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md) を参照する。
+`GET /`がshellだけを返し、GETがKV snapshotまたはR2 snapshotを返し、refreshが実行中202、成功200、cooldown429、依存障害503の契約に従うことを確認する。refresh成功後もcurrent、daily、monthly、公式ETag stateが変更されていないことを確認する。お知らせの仕様は [お知らせ機能共通仕様](./news-spec.md)、ページ取得は [お知らせページリクエスト仕様](./news-page-request-spec.md)、定期実行は [お知らせアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md) を参照する。
 
 ### CloudflareダッシュボードからGit連携で自動デプロイ
 

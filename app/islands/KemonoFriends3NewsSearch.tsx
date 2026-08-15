@@ -230,7 +230,7 @@ const parseCooldownMs = async (response: Response) => {
   return DEFAULT_RETRY_AFTER_MS;
 };
 
-// ニュースデータをキーワードでフィルター
+// お知らせデータをキーワードでフィルター
 const filterNewsByKeyword = (newsArray: Array<News>, query: string) => {
   const normalizedQuery = normalizeQuery(query);
   if (!normalizedQuery) return newsArray;
@@ -269,7 +269,7 @@ const filterNewsByDate = (newsArray: Array<News>, start: string, end: string) =>
   });
 };
 
-// ニュースデータをソート
+// お知らせデータをソート
 const getSortedNews = (data: Array<News>, sortOrder: string) => {
   return [...data].sort((a, b) => {
     const aDate = parseDateString(a.newsDate);
@@ -278,7 +278,7 @@ const getSortedNews = (data: Array<News>, sortOrder: string) => {
   });
 };
 
-// ニュースデータの検索・表示コンポーネント
+// お知らせデータの検索・表示コンポーネント
 const KemonoFriends3NewsSearch = () => {
   const [initialLoadStatus, setInitialLoadStatus] = useState<InitialLoadStatus>("loading");
   const [initialErrorMessage, setInitialErrorMessage] = useState<string | null>(null);
@@ -417,7 +417,7 @@ const KemonoFriends3NewsSearch = () => {
 
   refreshNewsRef.current = refreshNews;
 
-  // コンポーネント初回レンダリング時にニュースデータを取得
+  // コンポーネント初回レンダリング時にお知らせデータを取得
   useEffect(() => {
     mountedRef.current = true;
     const controller = new AbortController();
@@ -594,11 +594,11 @@ const KemonoFriends3NewsSearch = () => {
   const lastFetchedText = formatRelativeFetchedAt(metadata?.fetchedAt ?? null, relativeNow);
   const refreshStatusMessage =
     refreshState.status === "refreshing"
-      ? "ニュースを再取得しています"
+      ? "お知らせを再取得しています"
       : refreshState.status === "error"
-        ? "ニュースの再取得に失敗しました"
+        ? "お知らせの再取得に失敗しました"
         : refreshState.status === "cooldown" && isCooldownActive
-          ? "ニュースは再取得待機中です"
+          ? "お知らせは再取得待機中です"
           : "";
   const refreshButtonClasses = isRefreshDisabled
     ? "text-gray-400"
@@ -797,9 +797,9 @@ const KemonoFriends3NewsSearch = () => {
                   data-testid="news-refresh-button"
                   onClick={() => refreshNewsRef.current?.()}
                   disabled={isRefreshDisabled}
-                  aria-label="ニュースを再取得"
+                  aria-label="お知らせを再取得"
                   aria-describedby="news-refresh-status"
-                  title="ニュースを再取得"
+                  title="お知らせを再取得"
                   class={`inline-flex min-h-7 cursor-pointer items-center justify-center rounded p-1 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed ${refreshButtonClasses}`}
                 >
                   <ReloadIcon />
@@ -852,7 +852,7 @@ const KemonoFriends3NewsSearch = () => {
 
           {hasMoreNews && (
             <div ref={loadMoreRef} class="flex justify-center py-4" role="status">
-              <span class="text-sm text-gray-500">ニュースを読み込んでいます...</span>
+              <span class="text-sm text-gray-500">お知らせを読み込んでいます...</span>
             </div>
           )}
         </div>

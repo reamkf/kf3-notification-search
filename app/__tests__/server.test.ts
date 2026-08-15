@@ -20,7 +20,7 @@ import { createNewsCacheMetadata } from "../news-response-metadata";
 const createNews = (id: number, category?: string) => ({
   id,
   targetUrl: `/info/${id}`,
-  title: `ニュース${id}`,
+  title: `お知らせ${id}`,
   newsDate: "2026年08月01日 12時00分00秒",
   updated: "2026年08月01日 12時00分00秒",
   ...(category !== undefined ? { category } : {}),

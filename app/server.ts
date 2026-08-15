@@ -55,7 +55,7 @@ const defaultLogger: ArchiveLogger = {
 const getOldNewsObject = async (bucket: WorkerBindings["KF3_NOTIF_DATA"]) => {
   const object = await bucket.get(LEGACY_ARCHIVE_KEY);
   if (!object) {
-    throw new Error("旧ニュースデータがR2に見つかりません");
+    throw new Error("旧お知らせデータがR2に見つかりません");
   }
   return object;
 };
@@ -68,7 +68,7 @@ const getErrorStage = (error: unknown) => {
 const createApiErrorLog = (error: unknown, archiveCount: number | null = null) => ({
   event: "news_api_error",
   stage: getErrorStage(error),
-  error: "ニュースAPI処理に失敗しました",
+  error: "お知らせAPI処理に失敗しました",
   originalError: serializeArchiveErrorForLog(error),
   archiveCount,
 });
@@ -76,7 +76,7 @@ const createApiErrorLog = (error: unknown, archiveCount: number | null = null) =
 const createRefreshErrorLog = (error: unknown, archiveCount: number | null = null) => ({
   event: "news_refresh_failed",
   stage: getErrorStage(error),
-  error: "ニュース更新に失敗しました",
+  error: "お知らせ更新に失敗しました",
   originalError: serializeArchiveErrorForLog(error),
   archiveCount,
 });
@@ -147,7 +147,7 @@ const getRefreshNewsUnconditionally = async (
   if (archiveResult.status === "rejected") throw archiveResult.reason;
   if (officialResult.status === "rejected") throw officialResult.reason;
   if (officialResult.value.status !== "modified") {
-    throw new NewsArchiveError("official-fetch", "公式ニュースの応答形式が不正です");
+    throw new NewsArchiveError("official-fetch", "公式お知らせの応答形式が不正です");
   }
   const merged = mergeValidatedNewsDocument(
     archiveResult.value.document,
@@ -210,8 +210,8 @@ const createRefreshBusyResponse = (
   const headers = getRetryHeaders(result.retryAfterSeconds);
   const body =
     result.status === "running"
-      ? { error: "ニュース更新が実行中です", leaseUntil: result.leaseUntil }
-      : { error: "ニュース更新はクールダウン中です", nextAvailableAt: result.nextAvailableAt };
+      ? { error: "お知らせ更新が実行中です", leaseUntil: result.leaseUntil }
+      : { error: "お知らせ更新はクールダウン中です", nextAvailableAt: result.nextAvailableAt };
   if (result.status === "cooldown") {
     headers.set("x-kf3-news-refresh-next-available-at", result.nextAvailableAt);
   }
@@ -251,7 +251,7 @@ const createNewsApp = (dependencies: ServerDependencies) => {
       return createJsonResponse(JSON.stringify(snapshot.clientNews), metadata);
     } catch (error) {
       logger.error(createApiErrorLog(error, archiveCount));
-      return context.json({ error: "ニュースデータの取得に失敗しました" }, 500);
+      return context.json({ error: "お知らせデータの取得に失敗しました" }, 500);
     }
   });
 
@@ -277,8 +277,8 @@ const createNewsApp = (dependencies: ServerDependencies) => {
           stage: "refresh-control",
           error:
             acquired.status === "running"
-              ? "ニュース更新が実行中です"
-              : "ニュース更新はクールダウン中です",
+              ? "お知らせ更新が実行中です"
+              : "お知らせ更新はクールダウン中です",
           archiveCount,
           reason: acquired.status,
           retryAfterSeconds: acquired.retryAfterSeconds,
@@ -304,7 +304,7 @@ const createNewsApp = (dependencies: ServerDependencies) => {
           dependencies.clock?.() ?? Date.now(),
         ))
       ) {
-        return new Response(JSON.stringify({ error: "ニュース更新のleaseが失効しました" }), {
+        return new Response(JSON.stringify({ error: "お知らせ更新のleaseが失効しました" }), {
           status: 202,
           headers: getRetryHeaders(1),
         });
@@ -352,7 +352,7 @@ const createNewsApp = (dependencies: ServerDependencies) => {
           logger.error(createRefreshErrorLog(completionError, archiveCount));
         }
       }
-      return context.json({ error: "ニュース更新に失敗しました" }, 503);
+      return context.json({ error: "お知らせ更新に失敗しました" }, 503);
     }
   };
 

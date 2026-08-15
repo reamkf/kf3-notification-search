@@ -1,12 +1,12 @@
-# ニュース機能共通仕様
+# お知らせ機能共通仕様
 
 ## この仕様の位置づけ
 
-本書は、ニュース表示、表示用データの更新、永続アーカイブ、復元に関する共通契約と各処理仕様への入口を定義する。実行主体ごとの処理順、書き込み責務、失敗時の扱いは次の文書に分けて記載する。
+本書は、お知らせ表示、表示用データの更新、永続アーカイブ、復元に関する共通契約と各処理仕様への入口を定義する。実行主体ごとの処理順、書き込み責務、失敗時の扱いは次の文書に分けて記載する。
 
 | 実行主体          | 入口                                 | 主な責務                                                    | 書き込み可能なデータ                                                   |
 | ----------------- | ------------------------------------ | ----------------------------------------------------------- | ---------------------------------------------------------------------- |
-| ページ表示        | `GET /`                              | ニュース表示用のSSR shellを返す                             | なし                                                                   |
+| ページ表示        | `GET /`                              | お知らせ表示用のSSR shellを返す                             | なし                                                                   |
 | 表示データ取得    | `GET /api/kf3-news`                  | KVの表示用snapshotを返し、KV miss時はR2 snapshotを投影する  | なし                                                                   |
 | 表示データrefresh | `POST /api/kf3-news/refresh`         | 公式データを取得、検証、mergeし、成功結果をKVへ保存して返す | 表示用KV、refresh制御metadata                                          |
 | 定期実行          | Cronから呼ばれるscheduled handler    | 公式データを検証し、累積アーカイブとバックアップを更新する  | `archive/current.json`、daily、monthly、公式ETag state、必要時のKV削除 |
@@ -14,12 +14,12 @@
 
 ### 実行主体ごとの詳細
 
-- [公式ニュース配信仕様](./official-news-spec.md) は、公式データ形式、HTTP応答、ETagの契約を扱う。
-- [ニュースページリクエスト仕様](./news-page-request-spec.md) は、`/`、`GET /api/kf3-news`、`POST /api/kf3-news/refresh`の表示フローとHTTP契約を扱う。
+- [公式お知らせ配信仕様](./official-news-spec.md) は、公式データ形式、HTTP応答、ETagの契約を扱う。
+- [お知らせページリクエスト仕様](./news-page-request-spec.md) は、`/`、`GET /api/kf3-news`、`POST /api/kf3-news/refresh`の表示フローとHTTP契約を扱う。
 - [定期実行更新仕様](./news-archive-scheduled-spec.md) は、Cron実行、currentとバックアップの更新、公式データの安全性検証、heartbeat、構造化ログを扱う。
-- [ニュースアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) は、scheduled処理における公式ETagと304経路の最適化を扱う。
-- [ニュースアーカイブ導入状態](./news-archive-rollout.md) は、デプロイ後の受け入れ確認、公開refreshの保護、障害時の運用確認を扱う。
-- [ニュースアーカイブ条件付き復元runbook](./news-archive-restore-runbook.md) は、復元操作の手順を扱う。
+- [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) は、scheduled処理における公式ETagと304経路の最適化を扱う。
+- [お知らせアーカイブ導入状態](./news-archive-rollout.md) は、デプロイ後の受け入れ確認、公開refreshの保護、障害時の運用確認を扱う。
+- [お知らせアーカイブ条件付き復元runbook](./news-archive-restore-runbook.md) は、復元操作の手順を扱う。
 
 ## 共通の境界
 
@@ -47,13 +47,13 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。`archive/cu
 
 ### ページ表示とデータ取得の分離
 
-`GET /`はSSR shellだけを返し、ニュースデータを取得しない。ブラウザのニュース取得は、shell表示後に`GET /api/kf3-news`へ送る別のHTTPリクエストで行う。GETからrefreshをdispatchしたり、`waitUntil`で公式取得を継続したりしない。refreshが必要な場合は`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
+`GET /`はSSR shellだけを返し、お知らせデータを取得しない。ブラウザのお知らせ取得は、shell表示後に`GET /api/kf3-news`へ送る別のHTTPリクエストで行う。GETからrefreshをdispatchしたり、`waitUntil`で公式取得を継続したりしない。refreshが必要な場合は`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
 
 この分離により、shellの応答時間と公式取得、検証、mergeのCPU時間を別リクエストとして計測する。refresh実行中もGETは既存のKV snapshotを返し、refreshが成功するまで表示用KVを置き換えない。
 
 ## 利用者から見た共通の振る舞い
 
-- `GET /`はニュースデータを含まないSSR shellを返す。
+- `GET /`はお知らせデータを含まないSSR shellを返す。
 - `GET /api/kf3-news`はKV snapshotを即時返却する。
 - GETのKV missでは、currentまたはlegacyのsnapshotをクライアント用配列へ投影して直接返す。表示用KVへの書き込み、公式取得、mergeは行わない。
 - `POST /api/kf3-news/refresh`の成功時は、公式側の更新を反映した配列と表示用metadataをKVへ保存し、`{news, metadata}`形式で返す。
@@ -66,7 +66,7 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。`archive/cu
 
 | 種別             | 名前またはキー                                     | 役割                                                  |
 | ---------------- | -------------------------------------------------- | ----------------------------------------------------- |
-| 公式ニュース配信 | `docs/official-news-spec.md`                       | 公式データ形式、HTTP応答、ETagの契約                  |
+| 公式お知らせ配信 | `docs/official-news-spec.md`                       | 公式データ形式、HTTP応答、ETagの契約                  |
 | 本番R2           | `KF3_NOTIF_DATA/archive/current.json`              | 通常使用する累積アーカイブ                            |
 | 本番R2           | `KF3_NOTIF_DATA/archive/official-fetch-state.json` | scheduledの公式ETagとcurrent R2 ETagの対応状態        |
 | 本番R2           | `KF3_NOTIF_DATA/entries_merged_20241107.json`      | 初回移行と互換配信用のlegacyデータ                    |
@@ -110,7 +110,7 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。`archive/cu
 
 ## 公式データとETag
 
-公式サーバーのニュースデータ形式とHTTP ETagの契約は [公式ニュース配信仕様](./official-news-spec.md) にまとめる。scheduled処理はこの外部契約を使って条件付き取得を行い、公式ETag stateを更新する。refreshは公式データを取得して表示用データを作るが、公式ETag stateを更新しない。ETag stateの保存とscheduledの条件付き取得は [ニュースアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
+公式サーバーのお知らせデータ形式とHTTP ETagの契約は [公式お知らせ配信仕様](./official-news-spec.md) にまとめる。scheduled処理はこの外部契約を使って条件付き取得を行い、公式ETag stateを更新する。refreshは公式データを取得して表示用データを作るが、公式ETag stateを更新しない。ETag stateの保存とscheduledの条件付き取得は [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
 
 ## 公式データ利用時の安全性検証
 
@@ -137,7 +137,7 @@ scheduledで検証に失敗した場合は、R2とKVを変更せず処理全体�
 
 ## 復元仕様
 
-復元機能は本番Workerの公開APIではない。`wrangler.restore.toml`でlocalhost専用Workerを起動し、remote binding経由で本番R2とKVを操作する。復元Worker自体はデプロイしない。実際の操作手順は [ニュースアーカイブ条件付き復元runbook](./news-archive-restore-runbook.md) を参照する。
+復元機能は本番Workerの公開APIではない。`wrangler.restore.toml`でlocalhost専用Workerを起動し、remote binding経由で本番R2とKVを操作する。復元Worker自体はデプロイしない。実際の操作手順は [お知らせアーカイブ条件付き復元runbook](./news-archive-restore-runbook.md) を参照する。
 
 復元APIは`POST http://127.0.0.1:8790/restore`で、`daily/...json`または`monthly/...json`のsnapshotだけを受け付ける。日次キーは`daily/YYYY/MM/DD/<filename>.json`、月次キーは`monthly/YYYY-MM.json`に限定し、日次の`filename`には英数字、ピリオド、アンダースコア、ハイフンだけを許可する。request URLのhostnameが`localhost`、`127.0.0.1`、`[::1]`のいずれでもない場合は拒否する。
 
@@ -210,4 +210,4 @@ KV削除に失敗した場合は、currentがすでに復元済みであるこ�
 - GETから公式取得を開始しない。`waitUntil`でrefresh処理を継続しない。
 - `archive/current.json`を公開routeから直接返さない。
 - legacyデータ、daily snapshot、monthly snapshotを削除または上書きしない。
-- CloudflareのRate LimitingとWAFの推奨運用は [ニュースアーカイブ導入状態](./news-archive-rollout.md) を参照する。
+- CloudflareのRate LimitingとWAFの推奨運用は [お知らせアーカイブ導入状態](./news-archive-rollout.md) を参照する。

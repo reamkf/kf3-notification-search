@@ -1,10 +1,10 @@
-# ニュースアーカイブ導入状態
+# お知らせアーカイブ導入状態
 
 ## 導入対象
 
 本番Workerは次の処理を提供する。
 
-- `GET /`はニュース取得を行わないSSR shellを返す。
+- `GET /`はお知らせ取得を行わないSSR shellを返す。
 - `GET /api/kf3-news`はKV snapshotを即時返却し、KV miss時はR2のcurrentまたはlegacy snapshotを投影する。
 - `POST /api/kf3-news/refresh`は公式データを取得、検証、mergeし、成功結果を表示用KVへ保存して`{news, metadata}`形式で200を返す。実行中は202、cooldownは429、依存障害は503を返す。
 - refreshはR2 CAS leaseと5分cooldownで制限し、Cloudflare Rate LimitingとWAFで公開routeを保護する。
@@ -12,7 +12,7 @@
 - scheduledの`updateNewsArchive`だけが公式データを永続archiveへ反映し、daily、monthly、公式ETag stateを更新する。
 - restoreはlocalhost専用Workerとしてsnapshotからcurrentを条件付きで復元する。
 
-共通契約は [ニュース機能共通仕様](./news-spec.md)、APIは [ニュースページリクエスト仕様](./news-page-request-spec.md)、scheduledは [ニュースアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md)、ETagは [ニュースアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
+共通契約は [お知らせ機能共通仕様](./news-spec.md)、APIは [お知らせページリクエスト仕様](./news-page-request-spec.md)、scheduledは [お知らせアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md)、ETagは [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
 
 ## 外部状態の確認項目
 
@@ -21,7 +21,7 @@
 | 項目                     | 確認内容                                                                                                                                        |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | 本番Worker               | 現HEADに対応するWorker versionへ反映され、`GET /`、GET、refresh、scheduledが有効                                                                |
-| HTTP `/`                 | SSR shellだけを返し、レスポンス中にニュース配列を含まず、shell処理中にニュース取得を開始しない                                                  |
+| HTTP `/`                 | SSR shellだけを返し、レスポンス中にお知らせ配列を含まず、shell処理中にお知らせ取得を開始しない                                                  |
 | HTTP GET                 | KV hitがR2と公式サーバーへアクセスせず、KV missがR2 currentまたはlegacyを投影して直接返し、KVへ書き戻さない                                     |
 | HTTP refresh             | 実行中は202、成功時は200と`{news, metadata}`を返し、KVへ同じ表示用データを保存する                                                              |
 | refresh制御              | 別refreshの実行中は202、5分cooldown中は429、依存障害は503を返し、無条件上書きを行わない                                                         |
@@ -55,7 +55,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 
 ## 受け入れ条件
 
-- [ ] `GET /`がニュース取得なしのSSR shellを返す。
+- [ ] `GET /`がお知らせ取得なしのSSR shellを返す。
 - [ ] GETのKV hitがKVだけで完了する。
 - [ ] GETのKV missがR2 currentまたはlegacyだけを投影して直接返し、KVへの書き込み、公式取得、mergeを行わない。
 - [ ] refresh実行中が202と`Retry-After`を返し、成功時は200と`{news, metadata}`を返して表示用KVへ保存する。
@@ -87,7 +87,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 
 ## rollback
 
-復元操作の具体的な手順は [ニュースアーカイブ条件付き復元runbook](./news-archive-restore-runbook.md) を参照する。
+復元操作の具体的な手順は [お知らせアーカイブ条件付き復元runbook](./news-archive-restore-runbook.md) を参照する。
 
 - HTTP API、SSR shell、Worker export、refresh制御にregressionがある場合は、反映直前に記録した正常なWorker versionへ戻す。
 - `archive/current.json`だけが不正な場合は、restore runbookに従ってaccount、snapshot digest、current ETagを確認してから復元する。

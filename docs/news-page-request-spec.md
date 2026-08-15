@@ -1,16 +1,16 @@
-# ニュースページリクエスト仕様
+# お知らせページリクエスト仕様
 
 ## この文書の責務
 
-本書は、ページ表示と表示用ニュースAPIの仕様を定義する。`GET /`はSSR shellだけを返し、ニュース取得は行わない。ブラウザはshell表示後に`GET /api/kf3-news`を呼び出し、必要に応じて`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
+本書は、ページ表示と表示用お知らせAPIの仕様を定義する。`GET /`はSSR shellだけを返し、お知らせ取得は行わない。ブラウザはshell表示後に`GET /api/kf3-news`を呼び出し、必要に応じて`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
 
-表示用APIは永続archiveを更新しない。`archive/current.json`、daily、monthly、公式ETag stateはscheduledだけが更新する。refreshは表示用KVとrefresh制御metadataだけを変更する。保存形式と共通契約は [ニュース機能共通仕様](./news-spec.md)、永続archive更新は [ニュースアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md) を参照する。
+表示用APIは永続archiveを更新しない。`archive/current.json`、daily、monthly、公式ETag stateはscheduledだけが更新する。refreshは表示用KVとrefresh制御metadataだけを変更する。保存形式と共通契約は [お知らせ機能共通仕様](./news-spec.md)、永続archive更新は [お知らせアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md) を参照する。
 
 ## `GET /`
 
-`GET /`はニュース検索UIのSSR shellを返す。ニュース配列の取得、公式サーバーへのアクセス、R2 snapshotの読み込み、KVへの書き込みは行わない。
+`GET /`はお知らせ検索UIのSSR shellを返す。お知らせ配列の取得、公式サーバーへのアクセス、R2 snapshotの読み込み、KVへの書き込みは行わない。
 
-ニュースデータはshell表示後の別HTTPリクエストで取得する。shellの応答とデータ取得のCPU時間を同じリクエストへ合算しない。GETからrefreshを開始したり、`waitUntil`でデータ取得を継続したりしない。
+お知らせデータはshell表示後の別HTTPリクエストで取得する。shellの応答とデータ取得のCPU時間を同じリクエストへ合算しない。GETからrefreshを開始したり、`waitUntil`でデータ取得を継続したりしない。
 
 ## `GET /api/kf3-news`
 
@@ -44,7 +44,7 @@ APIはsnapshotの入力順を維持して返す。日付順への並べ替えは
 1. KVの`kf3-news`を`getWithMetadata`で読み込む。
 2. 値が存在すれば、保存済みのJSON配列を本文へ返す。
 3. R2、公式サーバー、refresh制御metadataへアクセスしない。
-4. metadataがあればレスポンスヘッダーへ変換する。metadataがない旧形式のKV valueや不正なmetadataでも、ニュース配列を壊さずsource不明、取得日時不明として返す。
+4. metadataがあればレスポンスヘッダーへ変換する。metadataがない旧形式のKV valueや不正なmetadataでも、お知らせ配列を壊さずsource不明、取得日時不明として返す。
 
 KV hitから公式データ取得の失敗や`archive-fallback`を推測してはならない。
 
@@ -61,7 +61,7 @@ R2 snapshotを読み込めない場合、または保存用スキーマの検証
 
 ```json
 {
-  "error": "ニュースデータの取得に失敗しました"
+  "error": "お知らせデータの取得に失敗しました"
 }
 ```
 
@@ -96,7 +96,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 |  503 | R2 lease、制御metadata、公式取得、検証、merge、KV保存などの依存処理に失敗した | 表示用KVとarchiveを変更せずエラーを返す   |
 |  405 | POST以外でrefresh endpointを呼び出した                                        | `Allow: POST`を返す                       |
 
-200レスポンスの本文は、次の`{news, metadata}`オブジェクトとする。`news`は表示用のニュース配列、`metadata`はcache metadataの`version`、`source`、`fetchedAt`を含む。GETだけが成功時にトップレベル配列を返す。
+200レスポンスの本文は、次の`{news, metadata}`オブジェクトとする。`news`は表示用のお知らせ配列、`metadata`はcache metadataの`version`、`source`、`fetchedAt`を含む。GETだけが成功時にトップレベル配列を返す。
 
 ```json
 {
@@ -117,7 +117,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 }
 ```
 
-202レスポンス本文は`{"error":"ニュース更新が実行中です","leaseUntil":"..."}`、429レスポンス本文は`{"error":"ニュース更新はクールダウン中です","nextAvailableAt":"..."}`、503レスポンス本文は`{"error":"ニュース更新に失敗しました"}`とする。
+202レスポンス本文は`{"error":"お知らせ更新が実行中です","leaseUntil":"..."}`、429レスポンス本文は`{"error":"お知らせ更新はクールダウン中です","nextAvailableAt":"..."}`、503レスポンス本文は`{"error":"お知らせ更新に失敗しました"}`とする。
 
 202、429では、再試行可能になるまでの秒数を`Retry-After`で返す。202は別refreshが実行中であり、leaseが期限切れになるまでの待機を示す。429はcooldown残り時間を指定する。503では、固定の短い再試行待ちを指定できる。内部エラー、R2 key、ETag、公式レスポンス本文、secretはレスポンスへ含めない。
 
@@ -146,7 +146,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 
 永続archiveを確定する処理は、Cronから呼ばれる`updateNewsArchive`だけである。scheduledは公式ETag stateを使う条件付き取得、currentの検証済み更新、daily/monthly backup、必要時のKV削除を担当する。refreshで作った表示用KVは、scheduledがcurrentを更新したときに削除される。
 
-scheduledの詳細は [ニュースアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md)、ETag stateと304経路の共通設計は [ニュースアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
+scheduledの詳細は [お知らせアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md)、ETag stateと304経路の共通設計は [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
 
 ## 互換route
 

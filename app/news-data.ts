@@ -157,7 +157,7 @@ const jsonValuesEqual = (left: unknown, right: unknown): boolean => {
 const parseDocument = (value: unknown, stage = "document-validation"): StoredNewsDocument => {
   const result = v.safeParse(storedNewsDocumentSchema, value);
   if (!result.success) {
-    throw new NewsDataError(stage, "保存用ニュースデータの形式が無効です", {
+    throw new NewsDataError(stage, "保存用お知らせデータの形式が無効です", {
       issues: summarizeValidationIssues(result.issues),
     });
   }
@@ -185,7 +185,7 @@ const isLeapYear = (year: number) => year % 4 === 0 && (year % 100 !== 0 || year
 export const parseJapaneseNewsDate = (value: string): number => {
   const match = /^(\d{4})年(\d{2})月(\d{2})日 (\d{2})時(\d{2})分(\d{2})秒$/.exec(value);
   if (!match) {
-    throw new NewsDataError("date-validation", "ニュース日時の形式が無効です");
+    throw new NewsDataError("date-validation", "お知らせ日時の形式が無効です");
   }
 
   const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
@@ -233,7 +233,7 @@ const validateUniqueIdsAndDates = (document: StoredNewsDocument) => {
   const ids = new Set<number>();
   for (const news of document.news) {
     if (ids.has(news.id)) {
-      throw new NewsDataError("document-validation", "ニュースIDが重複しています", {
+      throw new NewsDataError("document-validation", "お知らせIDが重複しています", {
         id: news.id,
       });
     }
@@ -258,18 +258,18 @@ const validateParsedStoredNewsDocumentInternal = (
   validateDates: boolean,
 ): StoredNewsDocument => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new NewsDataError("document-validation", "保存用ニュースデータの形式が無効です");
+    throw new NewsDataError("document-validation", "保存用お知らせデータの形式が無効です");
   }
   const news = (value as Record<string, unknown>).news;
   if (!Array.isArray(news)) {
-    throw new NewsDataError("document-validation", "保存用ニュースデータの形式が無効です");
+    throw new NewsDataError("document-validation", "保存用お知らせデータの形式が無効です");
   }
 
   const ids = new Set<number>();
   for (let index = 0; index < news.length; index += 1) {
     const item = news[index];
     if (typeof item !== "object" || item === null || Array.isArray(item)) {
-      throw new NewsDataError("document-validation", "保存用ニュースデータの形式が無効です", {
+      throw new NewsDataError("document-validation", "保存用お知らせデータの形式が無効です", {
         index,
       });
     }
@@ -286,14 +286,14 @@ const validateParsedStoredNewsDocumentInternal = (
       typeof candidate.updated !== "string" ||
       (candidate.category !== undefined && typeof candidate.category !== "string")
     ) {
-      throw new NewsDataError("document-validation", "保存用ニュースデータの形式が無効です", {
+      throw new NewsDataError("document-validation", "保存用お知らせデータの形式が無効です", {
         index,
       });
     }
 
     const storedNews = item as StoredNews;
     if (ids.has(storedNews.id)) {
-      throw new NewsDataError("document-validation", "ニュースIDが重複しています", {
+      throw new NewsDataError("document-validation", "お知らせIDが重複しています", {
         id: storedNews.id,
       });
     }
@@ -342,11 +342,11 @@ const validateOfficialOrigin = (officialOrigin: string) => {
   try {
     resolvedOrigin = new URL("/", officialOrigin).origin;
   } catch {
-    throw new NewsDataError("official-validation", "公式ニュースのoriginが無効です");
+    throw new NewsDataError("official-validation", "公式お知らせのoriginが無効です");
   }
 
   if (resolvedOrigin !== officialOrigin) {
-    throw new NewsDataError("official-validation", "公式ニュースのoriginが無効です");
+    throw new NewsDataError("official-validation", "公式お知らせのoriginが無効です");
   }
   return resolvedOrigin;
 };
@@ -355,14 +355,14 @@ const validateOfficialEntry = (news: StoredNews) => {
   if (!news.targetUrl.startsWith("/")) {
     throw new NewsDataError(
       "official-validation",
-      "公式ニュースURLは相対パスである必要があります",
+      "公式お知らせURLは相対パスである必要があります",
       {
         id: news.id,
       },
     );
   }
   if (news.targetUrl.startsWith("//") || news.targetUrl.startsWith("/\\")) {
-    throw new NewsDataError("official-validation", "公式ニュースURLのoriginが不正です", {
+    throw new NewsDataError("official-validation", "公式お知らせURLのoriginが不正です", {
       id: news.id,
     });
   }
@@ -396,7 +396,7 @@ const validateOfficialDocumentConstraints = (
       "MIN_OFFICIAL_ENTRY_COUNT",
       MIN_OFFICIAL_ENTRY_COUNT,
       document.news.length,
-      "公式ニュース件数が閾値未満です",
+      "公式お知らせ件数が閾値未満です",
     );
   }
 
@@ -414,7 +414,7 @@ export const validateParsedOfficialNewsDocumentShape = (value: unknown): StoredN
       "MIN_OFFICIAL_ENTRY_COUNT",
       MIN_OFFICIAL_ENTRY_COUNT,
       document.news.length,
-      "公式ニュース件数が閾値未満です",
+      "公式お知らせ件数が閾値未満です",
     );
   }
   return document;
@@ -438,7 +438,7 @@ export const validateOfficialNewsDocument = (
         "MAX_UPDATED_EXISTING_ENTRY_COUNT",
         MAX_UPDATED_EXISTING_ENTRY_COUNT,
         updatedCount,
-        "既存ニュースの変更件数が閾値を超えています",
+        "既存お知らせの変更件数が閾値を超えています",
       );
     }
   }
@@ -464,7 +464,7 @@ export const validateParsedOfficialNewsDocument = (
         "MAX_UPDATED_EXISTING_ENTRY_COUNT",
         MAX_UPDATED_EXISTING_ENTRY_COUNT,
         updatedCount,
-        "既存ニュースの変更件数が閾値を超えています",
+        "既存お知らせの変更件数が閾値を超えています",
       );
     }
   }
@@ -527,7 +527,7 @@ const mergeValidatedDocument = (
         "MIN_OFFICIAL_ENTRY_COUNT",
         MIN_OFFICIAL_ENTRY_COUNT,
         official.news.length,
-        "公式ニュース件数が閾値未満です",
+        "公式お知らせ件数が閾値未満です",
       );
     }
   }
@@ -547,7 +547,7 @@ const mergeValidatedDocument = (
           "MAX_UPDATED_EXISTING_ENTRY_COUNT",
           MAX_UPDATED_EXISTING_ENTRY_COUNT,
           updatedCount,
-          "既存ニュースの変更件数が閾値を超えています",
+          "既存お知らせの変更件数が閾値を超えています",
         );
       }
       existingById.set(news.id, news);

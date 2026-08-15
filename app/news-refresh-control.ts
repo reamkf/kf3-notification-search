@@ -205,7 +205,7 @@ export const acquireNewsRefreshLease = async (
       nextAvailableAt: current.control.cooldownUntil!,
     };
   }
-  throw new Error("ニュース更新制御の取得競合が解消しませんでした");
+  throw new Error("お知らせ更新制御の取得競合が解消しませんでした");
 };
 
 export const completeNewsRefreshLease = async (

@@ -1,14 +1,14 @@
-# ニュースアーカイブ定期実行更新仕様
+# お知らせアーカイブ定期実行更新仕様
 
 ## この文書の責務
 
 本書は、Cronから呼び出されるscheduled handler、具体的には`updateNewsArchive`の仕様を定義する。定期実行は、公式データを検証して累積archiveの正しさを確定し、必要なbackupを保存する唯一の通常更新経路である。
 
-`GET /`はSSR shellだけを返し、`GET /api/kf3-news`はKVまたはR2 snapshotを返す。GETのR2投影結果はKVへ書き戻さない。`POST /api/kf3-news/refresh`は表示用KVを更新するが、archive、backup、公式ETag stateを変更しない。表示用データのrefreshと永続archiveのscheduled更新は別HTTPリクエスト、別実行として扱い、`waitUntil`でscheduledまたはrefreshの処理を継続しない。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [ニュース機能共通仕様](./news-spec.md)、表示APIは [ニュースページリクエスト仕様](./news-page-request-spec.md) を参照する。
+`GET /`はSSR shellだけを返し、`GET /api/kf3-news`はKVまたはR2 snapshotを返す。GETのR2投影結果はKVへ書き戻さない。`POST /api/kf3-news/refresh`は表示用KVを更新するが、archive、backup、公式ETag stateを変更しない。表示用データのrefreshと永続archiveのscheduled更新は別HTTPリクエスト、別実行として扱い、`waitUntil`でscheduledまたはrefreshの処理を継続しない。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [お知らせ機能共通仕様](./news-spec.md)、表示APIは [お知らせページリクエスト仕様](./news-page-request-spec.md) を参照する。
 
 ## 実行時刻と更新対象
 
-リポジトリ上のCron設定は`15 18 * * *`で、毎日18:15 UTC、JSTでは翌日03:15に実行する。backupの日付には実際の処理開始時刻ではなく`ScheduledController.scheduledTime`を使用する。本番Cronの登録状況と受け入れ確認は [ニュースアーカイブ導入状態](./news-archive-rollout.md) を参照する。
+リポジトリ上のCron設定は`15 18 * * *`で、毎日18:15 UTC、JSTでは翌日03:15に実行する。backupの日付には実際の処理開始時刻ではなく`ScheduledController.scheduledTime`を使用する。本番Cronの登録状況と受け入れ確認は [お知らせアーカイブ導入状態](./news-archive-rollout.md) を参照する。
 
 定期実行が更新または削除できる対象は次のとおりである。
 
@@ -112,7 +112,7 @@ currentがまだなく、legacyデータから移行する初回実行では、�
 
 ## 公式データ検証の定期実行への適用
 
-公式データの取得と統合には、[ニュース機能共通仕様](./news-spec.md) の公式データ利用時の安全性検証を適用する。200経路では、検証済みの既存IDで初期化したMapへ公式項目を追加または置換する。このアルゴリズムにより、統合後の件数が更新前より減らず、更新前のすべてのIDが残ることを保証し、統合後の全件再走査は行わない。
+公式データの取得と統合には、[お知らせ機能共通仕様](./news-spec.md) の公式データ利用時の安全性検証を適用する。200経路では、検証済みの既存IDで初期化したMapへ公式項目を追加または置換する。このアルゴリズムにより、統合後の件数が更新前より減らず、更新前のすべてのIDが残ることを保証し、統合後の全件再走査は行わない。
 
 定期実行で公式取得または検証に失敗した場合は、current、backup、公式ETag state、KVを変更せず処理全体を失敗させる。閾値を変更する場合は、実際の公式データが仕様変更されたことを確認し、定数とテストを同時に更新する。
 
@@ -162,7 +162,7 @@ refresh成功ログには表示用KVの更新、公式件数、merge後件数、
 
 ## 公式データの閾値と障害調査
 
-閾値の正式な値と検証内容は、[ニュース機能共通仕様の公式データ利用時の安全性検証](./news-spec.md#公式データ利用時の安全性検証) を参照する。この節では、scheduledまたはrefreshで閾値超過や公式取得失敗が発生したときの調査方法を定義する。
+閾値の正式な値と検証内容は、[お知らせ機能共通仕様の公式データ利用時の安全性検証](./news-spec.md#公式データ利用時の安全性検証) を参照する。この節では、scheduledまたはrefreshで閾値超過や公式取得失敗が発生したときの調査方法を定義する。
 
 scheduled更新またはrefreshに失敗した場合は、Workers Logsでそれぞれ`news_archive_update_failed`または`news_refresh_failed`を確認し、次の項目を順に見る。
 
@@ -202,4 +202,4 @@ state PUTには、読み込み時のstate object ETagを使用する。stateが�
 
 stateをcurrent更新より先に保存してはならない。先に保存すると、currentへ反映されなかった公式ETagに対して翌日の取得が304となり、未反映の変更を省略する可能性がある。
 
-ETag条件付き取得の共通設計は [ニュースアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
+ETag条件付き取得の共通設計は [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
