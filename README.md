@@ -21,17 +21,17 @@
 
 `GET /`はSSR shellだけを返します。shell表示後の`GET /api/kf3-news`はKV snapshotを即時返し、KV miss時はR2 currentまたはlegacy snapshotを投影します。公式取得、検証、mergeを行う`POST /api/kf3-news/refresh`は別リクエストで、実行中は202、成功時は`{news, metadata}`を表示用KVへ保存して200、cooldownは429、依存障害は503を返します。refreshはR2 CAS leaseと5分cooldownで制限し、Cloudflare Rate LimitingとWAFで保護します。永続archiveの更新はscheduledだけが行い、restoreはsnapshotからcurrentを復元します。
 
-- [お知らせ機能共通仕様](./docs/news-spec.md)
-- [お知らせページリクエスト仕様](./docs/news-page-request-spec.md)
-- [お知らせアーカイブ定期実行更新仕様](./docs/news-archive-scheduled-spec.md)
-- [お知らせアーカイブETag条件付き取得の実装仕様](./docs/news-archive-etag-optimization.md)
+- [機能共通仕様](./docs/news-spec.md)
+- [ページリクエスト仕様](./docs/news-page-request-spec.md)
+- [アーカイブ定期実行更新仕様](./docs/news-archive-scheduled-spec.md)
+- [アーカイブETag条件付き取得の実装仕様](./docs/news-archive-etag-optimization.md)
 - [公式お知らせ配信仕様](./docs/official-news-spec.md)
 
 ## 公式データの閾値と障害調査
 
 公式データの安全性検証、閾値、障害時のWorkers Logs調査は、次のdocsに集約しています。
 
-- [お知らせ機能共通仕様の公式データ利用時の安全性検証](./docs/news-spec.md#公式データ利用時の安全性検証)
+- [機能共通仕様の公式データ利用時の安全性検証](./docs/news-spec.md#公式データ利用時の安全性検証)
 - [定期実行仕様の公式データ閾値と障害調査](./docs/news-archive-scheduled-spec.md#公式データの閾値と障害調査)
 - [お知らせアーカイブ導入状態](./docs/news-archive-rollout.md)
 
@@ -40,4 +40,4 @@
 復元APIの契約とエラーコード、dry-run/applyの運用手順は次のdocsを参照してください。復元Workerはlocalhost専用で、deployや公開routeの追加は行いません。
 
 - [復元APIの契約](./docs/news-spec.md#復元仕様)
-- [お知らせアーカイブ条件付き復元runbook](./docs/news-archive-restore-runbook.md)
+- [アーカイブ条件付き復元runbook](./docs/news-archive-restore-runbook.md)
