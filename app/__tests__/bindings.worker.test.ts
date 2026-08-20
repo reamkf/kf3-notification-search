@@ -11,6 +11,7 @@ import {
   buildBackupKeys,
   updateNewsArchive,
 } from "../news-archive";
+import { NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION } from "../news-archive-queue";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createNewsCacheMetadata } from "../news-response-metadata";
 import { createWorkerHandler } from "../server";
@@ -33,6 +34,7 @@ const createIfAbsentCondition = () => ({ etagDoesNotMatch: "*" });
 const logger = { log: () => undefined, error: () => undefined };
 
 type WorkerFetch = NonNullable<ExportedHandler<WorkerBindings>["fetch"]>;
+type WorkerQueue = NonNullable<ReturnType<typeof createWorkerHandler>["queue"]>;
 
 const callFetch = async (handler: ReturnType<typeof createWorkerHandler>, request: Request) =>
   (await handler.fetch?.(
@@ -40,6 +42,39 @@ const callFetch = async (handler: ReturnType<typeof createWorkerHandler>, reques
     bindings as Parameters<WorkerFetch>[1],
     createExecutionContext() as unknown as Parameters<WorkerFetch>[2],
   )) as unknown as Response;
+
+const callQueue = async (
+  handler: ReturnType<typeof createWorkerHandler>,
+  body: unknown = {
+    version: NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
+    reason: "refresh-detected-change",
+    detectedAt: "2026-08-01T18:14:00.000Z",
+    addedCount: MIN_OFFICIAL_ENTRY_COUNT - 1,
+    updatedCount: 0,
+    requiresInitialization: false,
+  },
+) => {
+  const ack = vi.fn();
+  const retry = vi.fn();
+  await handler.queue?.(
+    {
+      queue: "kf3-notif-archive-update",
+      messages: [
+        {
+          id: "message-1",
+          timestamp: new Date("2026-08-01T18:15:00Z"),
+          body,
+          attempts: 1,
+          ack,
+          retry,
+        },
+      ],
+    } as unknown as Parameters<WorkerQueue>[0],
+    bindings as Parameters<WorkerQueue>[1],
+    createExecutionContext() as unknown as Parameters<WorkerQueue>[2],
+  );
+  return { ack, retry };
+};
 
 beforeEach(async () => {
   await reset();
@@ -99,6 +134,55 @@ describe("Cloudflare bindings", () => {
     expect(await bindings.KF3_NOTIF_CACHE.get("kf3-news")).toBeNull();
     const monthly = await bindings.KF3_NOTIF_BACKUP.get(result.monthlyBackupKey);
     expect(await monthly?.text()).toBe(currentJson);
+  });
+
+  it("Queue consumerが実R2のcurrentを更新してrefresh由来の実KVを維持する", async () => {
+    await bindings.KF3_NOTIF_DATA.put(CURRENT_ARCHIVE_KEY, JSON.stringify(createDocument(1)));
+    await bindings.KF3_NOTIF_CACHE.put("kf3-news", "fresh-refresh-cache");
+    const officialDocument = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    const logs: Record<string, unknown>[] = [];
+    const handler = createWorkerHandler({
+      fetcher: async () => new Response(JSON.stringify(officialDocument)),
+      clock: () => Date.parse("2026-08-01T18:15:00Z"),
+      logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+
+    const result = await callQueue(handler);
+
+    expect(result.ack).toHaveBeenCalledOnce();
+    expect(result.retry).not.toHaveBeenCalled();
+    const current = await bindings.KF3_NOTIF_DATA.get(CURRENT_ARCHIVE_KEY);
+    expect(JSON.parse((await current?.text()) ?? "").news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
+    expect(await bindings.KF3_NOTIF_CACHE.get("kf3-news")).toBe("fresh-refresh-cache");
+    expect(logs).toContainEqual(
+      expect.objectContaining({ event: "news_archive_update", trigger: "queue" }),
+    );
+  });
+
+  it("current初期化messageが実R2のlegacyからcurrentを作成する", async () => {
+    const legacyDocument = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    await bindings.KF3_NOTIF_DATA.put(LEGACY_ARCHIVE_KEY, JSON.stringify(legacyDocument));
+    await bindings.KF3_NOTIF_CACHE.put("kf3-news", "fresh-refresh-cache");
+    const handler = createWorkerHandler({
+      fetcher: async () => new Response(JSON.stringify(legacyDocument)),
+      clock: () => Date.parse("2026-08-01T18:15:00Z"),
+      logger,
+    });
+
+    const result = await callQueue(handler, {
+      version: NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
+      reason: "refresh-current-missing",
+      detectedAt: "2026-08-01T18:14:00.000Z",
+      addedCount: 0,
+      updatedCount: 0,
+      requiresInitialization: true,
+    });
+
+    expect(result.ack).toHaveBeenCalledOnce();
+    expect(result.retry).not.toHaveBeenCalled();
+    const current = await bindings.KF3_NOTIF_DATA.get(CURRENT_ARCHIVE_KEY);
+    expect(JSON.parse((await current?.text()) ?? "").news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
+    expect(await bindings.KF3_NOTIF_CACHE.get("kf3-news")).toBe("fresh-refresh-cache");
   });
 
   it("実R2のIf-None-Match:*は既存objectを上書きしない", async () => {

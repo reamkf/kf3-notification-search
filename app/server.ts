@@ -17,15 +17,22 @@ import {
   type NewsFetcher,
 } from "./news-archive";
 import {
+  NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
+  isNewsArchiveUpdateMessage,
+  type NewsArchiveUpdateMessage,
+} from "./news-archive-queue";
+import {
   NewsDataError,
   mergeValidatedNewsDocument,
   projectValidatedClientNews,
   type ValidatedNewsMergeResult,
 } from "./news-data";
 import {
+  NEWS_REFRESH_FINALIZATION_LEASE_MS,
   acquireNewsRefreshLease,
   completeNewsRefreshLease,
   hasActiveNewsRefreshLease,
+  renewNewsRefreshLease,
   type NewsRefreshAcquireResult,
 } from "./news-refresh-control";
 import {
@@ -134,6 +141,9 @@ const readArchiveSnapshot = async (env: WorkerBindings) => {
 type RefreshNewsResult = {
   news: ReturnType<typeof projectValidatedClientNews>;
   currentEtag: string | null;
+  currentExists: boolean;
+  addedCount: number;
+  updatedCount: number;
 };
 
 const getRefreshNewsUnconditionally = async (
@@ -159,6 +169,9 @@ const getRefreshNewsUnconditionally = async (
   return {
     news: projectValidatedClientNews(merged.document),
     currentEtag: archiveResult.value.etag,
+    currentExists: archiveResult.value.currentExists,
+    addedCount: merged.stats.addedCount,
+    updatedCount: merged.stats.updatedCount,
   };
 };
 
@@ -181,6 +194,9 @@ const getRefreshNews = async (
       return {
         news: projectValidatedClientNews(current.document),
         currentEtag: current.etag,
+        currentExists: true,
+        addedCount: 0,
+        updatedCount: 0,
       };
     }
     return getRefreshNewsUnconditionally(env, dependencies);
@@ -194,6 +210,9 @@ const getRefreshNews = async (
   return {
     news: projectValidatedClientNews(merged.document),
     currentEtag: archive.etag,
+    currentExists: archive.currentExists,
+    addedCount: merged.stats.addedCount,
+    updatedCount: merged.stats.updatedCount,
   };
 };
 
@@ -202,6 +221,12 @@ const getRetryHeaders = (retryAfterSeconds: number) =>
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "retry-after": String(retryAfterSeconds),
+  });
+
+const createRefreshLeaseExpiredResponse = () =>
+  new Response(JSON.stringify({ error: "お知らせ更新のleaseが失効しました" }), {
+    status: 202,
+    headers: getRetryHeaders(1),
   });
 
 const createRefreshBusyResponse = (
@@ -297,18 +322,14 @@ const createNewsApp = (dependencies: ServerDependencies) => {
         }
       }
       archiveCount = result.news.length;
-      if (
-        !(await hasActiveNewsRefreshLease(
-          context.env.KF3_NOTIF_DATA,
-          token,
-          dependencies.clock?.() ?? Date.now(),
-        ))
-      ) {
-        return new Response(JSON.stringify({ error: "お知らせ更新のleaseが失効しました" }), {
-          status: 202,
-          headers: getRetryHeaders(1),
-        });
-      }
+      const leaseRenewal = await renewNewsRefreshLease(
+        context.env.KF3_NOTIF_DATA,
+        token,
+        dependencies.clock?.() ?? Date.now(),
+        NEWS_REFRESH_FINALIZATION_LEASE_MS,
+      );
+      if (leaseRenewal !== "updated") return createRefreshLeaseExpiredResponse();
+
       const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
       const metadata = createNewsCacheMetadata("merged", fetchedAt);
       const responseJson = JSON.stringify(result.news);
@@ -316,6 +337,34 @@ const createNewsApp = (dependencies: ServerDependencies) => {
         expirationTtl: normalCacheTtl,
         metadata,
       });
+      const deleteWrittenCache = async () => {
+        try {
+          await context.env.KF3_NOTIF_CACHE.delete(cacheKey);
+        } catch (cleanupError) {
+          logger.error({
+            event: "news_refresh_cache_cleanup_failed",
+            originalError: serializeArchiveErrorForLog(cleanupError),
+          });
+        }
+      };
+      try {
+        const currentAfterCachePut = await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY);
+        if ((result.currentEtag ?? null) !== (currentAfterCachePut?.etag ?? null)) {
+          throw new NewsArchiveError("etag-conflict", "refreshのKV保存中にcurrentが競合しました");
+        }
+      } catch (error) {
+        await deleteWrittenCache();
+        throw error;
+      }
+      if (
+        !(await hasActiveNewsRefreshLease(
+          context.env.KF3_NOTIF_DATA,
+          token,
+          dependencies.clock?.() ?? Date.now(),
+        ))
+      ) {
+        return createRefreshLeaseExpiredResponse();
+      }
       let leaseCompletion: string;
       try {
         leaseCompletion = await completeNewsRefreshLease(
@@ -331,10 +380,46 @@ const createNewsApp = (dependencies: ServerDependencies) => {
           originalError: serializeArchiveErrorForLog(error),
         });
       }
+      if (leaseCompletion === "token-mismatch") {
+        return createRefreshLeaseExpiredResponse();
+      }
+      const requiresInitialization = !result.currentExists;
+      const archiveChanged = result.addedCount > 0 || result.updatedCount > 0;
+      const archiveUpdateNeeded = requiresInitialization || archiveChanged;
+      let archiveUpdateQueueStatus: "not-needed" | "queued" | "failed" = "not-needed";
+      if (archiveUpdateNeeded) {
+        const message: NewsArchiveUpdateMessage = {
+          version: NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
+          reason: requiresInitialization ? "refresh-current-missing" : "refresh-detected-change",
+          detectedAt: fetchedAt,
+          addedCount: result.addedCount,
+          updatedCount: result.updatedCount,
+          requiresInitialization,
+        };
+        try {
+          await context.env.KF3_ARCHIVE_UPDATE_QUEUE.send(message);
+          archiveUpdateQueueStatus = "queued";
+          logger.log({ event: "news_archive_update_queued", ...message });
+        } catch (error) {
+          archiveUpdateQueueStatus = "failed";
+          logger.error({
+            event: "news_archive_update_enqueue_failed",
+            error: serializeArchiveErrorForLog(error),
+            addedCount: result.addedCount,
+            updatedCount: result.updatedCount,
+          });
+        }
+      }
       logger.log({
         event: "news_refresh_succeeded",
         archiveCount,
         mergedCount: result.news.length,
+        addedCount: result.addedCount,
+        updatedCount: result.updatedCount,
+        requiresInitialization,
+        archiveChanged,
+        archiveUpdateNeeded,
+        archiveUpdateQueueStatus,
         leaseCompletion,
       });
       return createRefreshResponse(result.news, metadata);
@@ -366,10 +451,27 @@ const createNewsApp = (dependencies: ServerDependencies) => {
   return baseApp;
 };
 
+const runArchiveUpdate = (
+  env: WorkerBindings,
+  dependencies: ServerDependencies,
+  nowMs: number,
+  trigger: "scheduled" | "queue",
+) =>
+  (dependencies.updater ?? updateNewsArchive)({
+    dataBucket: env.KF3_NOTIF_DATA,
+    backupBucket: env.KF3_NOTIF_BACKUP,
+    cache: env.KF3_NOTIF_CACHE,
+    fetcher: dependencies.fetcher ?? fetch,
+    nowMs,
+    logger: dependencies.logger ?? defaultLogger,
+    trigger,
+    invalidateDisplayCache: trigger !== "queue",
+  });
+
 export const createWorkerHandler = (
   dependencies: ServerDependencies = {},
   options: { useHonoxApp?: boolean } = {},
-): ExportedHandler<WorkerBindings> => {
+): ExportedHandler<WorkerBindings, unknown> => {
   const baseApp = createNewsApp(dependencies);
   let app = baseApp;
   let honoxInitialized = false;
@@ -388,24 +490,49 @@ export const createWorkerHandler = (
         context as unknown as globalThis.ExecutionContext,
       ) as unknown as globalThis.Response) as NonNullable<ExportedHandler<WorkerBindings>["fetch"]>,
     scheduled: async (controller, env) => {
-      const updater = dependencies.updater ?? updateNewsArchive;
       const logger = dependencies.logger ?? defaultLogger;
       const heartbeatFetcher = dependencies.heartbeatFetcher ?? fetch;
       await sendHeartbeat(env.HEALTHCHECKS_PING_URL, "heartbeat-start", heartbeatFetcher, logger);
       try {
-        await updater({
-          dataBucket: env.KF3_NOTIF_DATA,
-          backupBucket: env.KF3_NOTIF_BACKUP,
-          cache: env.KF3_NOTIF_CACHE,
-          fetcher: dependencies.fetcher ?? fetch,
-          nowMs: controller.scheduledTime,
-          logger,
-        });
+        await runArchiveUpdate(env, dependencies, controller.scheduledTime, "scheduled");
       } catch (error) {
         await sendHeartbeat(env.HEALTHCHECKS_PING_URL, "heartbeat-fail", heartbeatFetcher, logger);
         throw error;
       }
       await sendHeartbeat(env.HEALTHCHECKS_PING_URL, "heartbeat-success", heartbeatFetcher, logger);
+    },
+    queue: async (batch, env) => {
+      const logger = dependencies.logger ?? defaultLogger;
+      for (const message of batch.messages) {
+        if (!isNewsArchiveUpdateMessage(message.body)) {
+          logger.error({
+            event: "news_archive_queue_invalid_message",
+            messageId: message.id,
+          });
+          message.ack();
+          continue;
+        }
+        try {
+          await runArchiveUpdate(env, dependencies, dependencies.clock?.() ?? Date.now(), "queue");
+          logger.log({
+            event: "news_archive_queue_succeeded",
+            messageId: message.id,
+            reason: message.body.reason,
+            detectedAt: message.body.detectedAt,
+            addedCount: message.body.addedCount,
+            updatedCount: message.body.updatedCount,
+            requiresInitialization: message.body.requiresInitialization,
+          });
+          message.ack();
+        } catch (error) {
+          logger.error({
+            event: "news_archive_queue_failed",
+            messageId: message.id,
+            error: serializeArchiveErrorForLog(error),
+          });
+          message.retry({ delaySeconds: 60 });
+        }
+      }
     },
   };
 };

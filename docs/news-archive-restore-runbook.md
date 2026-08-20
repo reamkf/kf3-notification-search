@@ -91,7 +91,7 @@ applyでは次の順序で処理される。
 3. `GET /api/kf3-news`がトップレベル配列を返すことを確認する。
 4. APIの件数、最古日、最新日をdry-run結果と比較する。
 5. snapshot digest、更新後ETag、KV削除結果、API確認結果が運用記録と一致することを確認する。
-6. current ETagが復元前から変わったことを確認する。次回scheduledはETag条件付き取得ではなく、公式データの完全取得とcurrentの再統合へ戻る。
+6. current ETagが復元前から変わったことを確認する。次回のQueue consumerまたはscheduled fallbackはETag条件付き取得ではなく、公式データの完全取得とcurrentの再統合へ戻る。
 7. refresh制御metadataが変更されていないことを確認する。refreshの次回実行は通常のleaseと5分cooldownの契約に従う。
 8. Cloudflare Rate LimitingとWAFのイベントに、復元作業による意図しない公開refreshやroute変更がないことを確認する。
 
@@ -119,4 +119,4 @@ R2からsnapshotを読み込めない場合だけ、legacy objectを使う緊急
 - API確認結果
 - refresh制御metadataに変更がないことの確認
 - Rate LimitingとWAFのイベント確認結果（refreshの200、202、429、503契約への影響）
-- 復元後のscheduled処理確認結果
+- 復元後のQueue consumerまたはscheduled fallbackの処理確認結果

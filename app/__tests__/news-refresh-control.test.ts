@@ -3,9 +3,11 @@ import type { R2Bucket, R2Object, R2ObjectBody } from "@cloudflare/workers-types
 import {
   NEWS_REFRESH_CONTROL_KEY,
   NEWS_REFRESH_COOLDOWN_MS,
+  NEWS_REFRESH_FINALIZATION_LEASE_MS,
   acquireNewsRefreshLease,
   completeNewsRefreshLease,
   parseNewsRefreshControl,
+  renewNewsRefreshLease,
 } from "../news-refresh-control";
 
 const object = (text: string, etag: string): R2ObjectBody =>
@@ -55,6 +57,43 @@ describe("news refresh control", () => {
     const recovered = await acquireNewsRefreshLease(setup.bucket, 61_000);
     expect(recovered.status).toBe("acquired");
     expect(recovered.status === "acquired" && recovered.token).not.toBe(first.token);
+  });
+
+  it("renews the active token before finalization without reviving expired leases", async () => {
+    const setup = createBucket();
+    const acquired = await acquireNewsRefreshLease(setup.bucket, 0);
+    expect(acquired.status).toBe("acquired");
+    if (acquired.status !== "acquired") return;
+
+    expect(
+      await renewNewsRefreshLease(
+        setup.bucket,
+        acquired.token,
+        59_000,
+        NEWS_REFRESH_FINALIZATION_LEASE_MS,
+      ),
+    ).toBe("updated");
+    expect(setup.read()).toMatchObject({
+      status: "running",
+      token: acquired.token,
+      leaseUntil: new Date(59_000 + NEWS_REFRESH_FINALIZATION_LEASE_MS).toISOString(),
+    });
+    expect(await acquireNewsRefreshLease(setup.bucket, 61_000)).toMatchObject({
+      status: "running",
+    });
+    expect(await renewNewsRefreshLease(setup.bucket, "wrong", 61_000)).toBe("inactive");
+
+    const expired = createBucket(
+      JSON.stringify({
+        version: 1,
+        status: "running",
+        token: "expired-token",
+        leaseUntil: new Date(60_000).toISOString(),
+        cooldownUntil: null,
+        lastOutcome: null,
+      }),
+    );
+    expect(await renewNewsRefreshLease(expired.bucket, "expired-token", 60_000)).toBe("inactive");
   });
 
   it("returns cooldown only after a successful token-matched completion", async () => {
