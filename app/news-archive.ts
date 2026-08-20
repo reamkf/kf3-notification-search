@@ -580,6 +580,8 @@ export type ArchiveLogger = {
   error: (event: Record<string, unknown>) => void;
 };
 
+export type NewsArchiveUpdateTrigger = "scheduled" | "queue" | "manual";
+
 export type NewsArchiveUpdateDependencies = {
   dataBucket: R2Bucket;
   backupBucket: R2Bucket;
@@ -588,6 +590,7 @@ export type NewsArchiveUpdateDependencies = {
   nowMs: number;
   clock?: () => number;
   logger?: ArchiveLogger;
+  trigger?: NewsArchiveUpdateTrigger;
 };
 
 export type MonthlyBackupStatus = "created" | "existing" | "not-checked";
@@ -769,6 +772,7 @@ export const updateNewsArchive = async (
   const logResult = (result: NewsArchiveUpdateResult) => {
     logger.log({
       event: "news_archive_update",
+      trigger: dependencies.trigger ?? "manual",
       executedAtUtc: new Date(dependencies.nowMs).toISOString(),
       updateStatus: result.updated ? "updated" : "unchanged",
       updated: result.updated,
@@ -963,6 +967,7 @@ export const updateNewsArchive = async (
     );
     logger.error({
       event: "news_archive_update_failed",
+      trigger: dependencies.trigger ?? "manual",
       stage: archiveError.stage,
       error: archiveError.message,
       details: archiveError.details,

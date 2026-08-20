@@ -3,6 +3,7 @@ import type {
   ExecutionContext,
   Fetcher,
   KVNamespace,
+  Queue,
   R2Bucket,
   R2Object,
   R2ObjectBody,
@@ -13,6 +14,10 @@ import {
   OFFICIAL_FETCH_STATE_KEY,
   type NewsArchiveUpdateDependencies,
 } from "../news-archive";
+import {
+  NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
+  type NewsArchiveUpdateMessage,
+} from "../news-archive-queue";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createWorkerHandler } from "../server";
 import { createNewsCacheMetadata } from "../news-response-metadata";
@@ -63,15 +68,18 @@ type TestBindings = {
     metadata?: unknown;
   }>;
   cacheDeletes: string[];
+  queueMessages: NewsArchiveUpdateMessage[];
 };
 
 type BindingOptions = {
   cacheGetError?: boolean;
   cachePutError?: boolean;
+  queueSendError?: boolean;
   legacyMissing?: boolean;
   stateText?: string;
   stateEtag?: string;
   conditionalCurrentMismatch?: boolean;
+  currentChangesOnCachePut?: boolean;
 };
 
 const createBindings = (
@@ -81,6 +89,9 @@ const createBindings = (
 ): TestBindings => {
   const dataGets: string[] = [];
   let currentHeadCalls = 0;
+  let currentEtag = "current-etag";
+  let controlText: string | null = null;
+  let controlEtag = "control-etag-0";
   const cacheValues = new Map<string, string>();
   const cacheMetadata = new Map<string, unknown>();
   const cachePuts: Array<{
@@ -90,9 +101,13 @@ const createBindings = (
     metadata?: unknown;
   }> = [];
   const cacheDeletes: string[] = [];
+  const queueMessages: NewsArchiveUpdateMessage[] = [];
   const dataBucket = {
     get: async (key: string, getOptions?: { onlyIf?: { etagMatches?: string } }) => {
       dataGets.push(key);
+      if (key === "control/news-refresh.json") {
+        return controlText === null ? null : createR2Object(controlText, controlEtag);
+      }
       if (
         key === CURRENT_ARCHIVE_KEY &&
         getOptions?.onlyIf?.etagMatches !== undefined &&
@@ -101,7 +116,7 @@ const createBindings = (
         return { etag: "new-current-etag" } as R2Object;
       }
       if (key === CURRENT_ARCHIVE_KEY && currentText !== null)
-        return createR2Object(currentText, "current-etag");
+        return createR2Object(currentText, currentEtag);
       if (key === LEGACY_ARCHIVE_KEY && !options.legacyMissing)
         return createR2Object(legacyText, "legacy-etag");
       if (key === OFFICIAL_FETCH_STATE_KEY && options.stateText !== undefined)
@@ -112,10 +127,16 @@ const createBindings = (
       if (key === CURRENT_ARCHIVE_KEY && currentText !== null) {
         currentHeadCalls += 1;
         return {
-          etag: options.conditionalCurrentMismatch ? "new-current-etag" : "current-etag",
+          etag: options.conditionalCurrentMismatch ? "new-current-etag" : currentEtag,
         } as R2Object;
       }
       return null;
+    },
+    put: async (key: string, value: string) => {
+      if (key !== "control/news-refresh.json") return null;
+      controlText = value;
+      controlEtag = `control-etag-${controlText.length}`;
+      return { etag: controlEtag } as R2Object;
     },
   } as unknown as R2Bucket;
   const cache = {
@@ -146,6 +167,7 @@ const createBindings = (
         expirationTtl: putOptions.expirationTtl,
         metadata: putOptions.metadata,
       });
+      if (options.currentChangesOnCachePut) currentEtag = "changed-current-etag";
     },
     delete: async (key: string) => {
       cacheDeletes.push(key);
@@ -158,18 +180,26 @@ const createBindings = (
     head: async () => null,
     put: async () => null,
   } as unknown as R2Bucket;
+  const archiveUpdateQueue = {
+    send: async (message: NewsArchiveUpdateMessage) => {
+      if (options.queueSendError) throw new Error("queue send failed");
+      queueMessages.push(message);
+    },
+  } as unknown as Queue<NewsArchiveUpdateMessage>;
   return {
     env: {
       ASSETS: {} as Fetcher,
       KF3_NOTIF_CACHE: cache,
       KF3_NOTIF_DATA: dataBucket,
       KF3_NOTIF_BACKUP: backup,
+      KF3_ARCHIVE_UPDATE_QUEUE: archiveUpdateQueue,
     },
     dataGets,
     cacheValues,
     cacheMetadata,
     cachePuts,
     cacheDeletes,
+    queueMessages,
   };
 };
 
@@ -181,6 +211,7 @@ const createContext = () =>
 
 type WorkerFetch = NonNullable<ReturnType<typeof createWorkerHandler>["fetch"]>;
 type WorkerScheduled = NonNullable<ReturnType<typeof createWorkerHandler>["scheduled"]>;
+type WorkerQueue = NonNullable<ReturnType<typeof createWorkerHandler>["queue"]>;
 
 const callFetch = async (
   handler: ReturnType<typeof createWorkerHandler>,
@@ -203,6 +234,33 @@ const callScheduled = async (
     env as unknown as Parameters<WorkerScheduled>[1],
     createContext() as unknown as Parameters<WorkerScheduled>[2],
   );
+
+const callQueue = async (
+  handler: ReturnType<typeof createWorkerHandler>,
+  env: WorkerBindings,
+  body: unknown,
+) => {
+  const ack = vi.fn();
+  const retry = vi.fn();
+  await handler.queue?.(
+    {
+      queue: "kf3-notif-archive-update",
+      messages: [
+        {
+          id: "message-1",
+          timestamp: new Date("2026-08-09T12:34:56.789Z"),
+          body,
+          attempts: 1,
+          ack,
+          retry,
+        },
+      ],
+    } as unknown as Parameters<WorkerQueue>[0],
+    env as Parameters<WorkerQueue>[1],
+    createContext() as unknown as Parameters<WorkerQueue>[2],
+  );
+  return { ack, retry };
+};
 
 describe("Worker API handler", () => {
   it("有効cacheはトップレベル配列を返し、外部I/Oを行わない", async () => {
@@ -459,10 +517,114 @@ describe("Worker API handler", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(setup.cachePuts[0].expirationTtl).toBe(300);
     expect(setup.cachePuts[0].metadata).toEqual(payload.metadata);
+    expect(setup.queueMessages).toEqual([
+      {
+        version: NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
+        reason: "refresh-detected-change",
+        detectedAt: "2026-08-09T12:34:56.789Z",
+        addedCount: MIN_OFFICIAL_ENTRY_COUNT - 1,
+        updatedCount: 1,
+      },
+    ]);
     expect(logs).toContainEqual(
       expect.objectContaining({
         event: "news_refresh_succeeded",
         archiveCount: MIN_OFFICIAL_ENTRY_COUNT,
+        addedCount: MIN_OFFICIAL_ENTRY_COUNT - 1,
+        updatedCount: 1,
+        archiveChanged: true,
+        archiveUpdateQueueStatus: "queued",
+      }),
+    );
+  });
+
+  it("refreshで既存お知らせの変更だけを検出した場合はQueueへ通知する", async () => {
+    const archive = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    const official = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    official.news[0] = { ...official.news[0], category: "updated" };
+    const setup = createBindings(JSON.stringify(archive));
+    const response = await callFetch(
+      createWorkerHandler({ fetcher: async () => createResponse(official) }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(setup.queueMessages).toEqual([
+      expect.objectContaining({ addedCount: 0, updatedCount: 1 }),
+    ]);
+  });
+
+  it("refreshのmerge結果に変更がない場合はQueueへ通知しない", async () => {
+    const document = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    const setup = createBindings(JSON.stringify(document));
+    const logs: Record<string, unknown>[] = [];
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => createResponse(document),
+        logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(setup.queueMessages).toHaveLength(0);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "news_refresh_succeeded",
+        archiveChanged: false,
+        archiveUpdateQueueStatus: "not-needed",
+      }),
+    );
+  });
+
+  it("refreshの公式取得が304の場合はQueueへ通知しない", async () => {
+    const document = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    const setup = createBindings(JSON.stringify(document), undefined, {
+      stateText: JSON.stringify({
+        version: 1,
+        officialEtag: '"official-etag"',
+        currentEtag: "current-etag",
+      }),
+    });
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () =>
+          new Response(null, { status: 304, headers: { etag: '"official-etag"' } }),
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(setup.queueMessages).toHaveLength(0);
+  });
+
+  it("Queue送信失敗後もrefresh成功とKV更新を維持する", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      queueSendError: true,
+    });
+    const logs: Record<string, unknown>[] = [];
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+        logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(setup.cachePuts).toHaveLength(1);
+    expect(setup.queueMessages).toHaveLength(0);
+    expect(logs).toContainEqual(
+      expect.objectContaining({ event: "news_archive_update_enqueue_failed" }),
+    );
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "news_refresh_succeeded",
+        archiveUpdateQueueStatus: "failed",
       }),
     );
   });
@@ -546,6 +708,27 @@ describe("Worker API handler", () => {
     );
     expect(response.status).toBe(503);
     expect(setup.cachePuts).toHaveLength(0);
+    expect(setup.queueMessages).toHaveLength(0);
+  });
+
+  it("KV保存中にcurrentが更新された場合はstaleなKVを削除して503にする", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      currentChangesOnCachePut: true,
+    });
+    setup.cacheValues.set("kf3-news", "old-cache");
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(503);
+    expect(setup.cachePuts).toHaveLength(1);
+    expect(setup.cacheDeletes).toContain("kf3-news");
+    expect(setup.cacheValues.get("kf3-news")).toBeUndefined();
+    expect(setup.queueMessages).toHaveLength(0);
   });
 
   it("refreshのlease失効時はKVを更新せず202にする", async () => {
@@ -585,6 +768,7 @@ describe("Worker API handler", () => {
     );
     expect(response.status).toBe(202);
     expect(setup.cachePuts).toHaveLength(0);
+    expect(setup.queueMessages).toHaveLength(0);
   });
 
   it("refresh失敗時は既存KVを維持して503にする", async () => {
@@ -603,6 +787,7 @@ describe("Worker API handler", () => {
     expect(response.status).toBe(503);
     expect(setup.cacheValues.get("kf3-news")).toBe("old-cache");
     expect(setup.cachePuts).toHaveLength(0);
+    expect(setup.queueMessages).toHaveLength(0);
     expect(logs).toContainEqual(expect.objectContaining({ event: "news_refresh_failed" }));
   });
 
@@ -664,6 +849,7 @@ describe("scheduled handler", () => {
     expect(received?.dataBucket).toBe(setup.env.KF3_NOTIF_DATA);
     expect(received?.backupBucket).toBe(setup.env.KF3_NOTIF_BACKUP);
     expect(received?.cache).toBe(setup.env.KF3_NOTIF_CACHE);
+    expect(received?.trigger).toBe("scheduled");
     let settled = false;
     void pending.then(() => {
       settled = true;
@@ -858,5 +1044,114 @@ describe("scheduled handler", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("queue handler", () => {
+  const message: NewsArchiveUpdateMessage = {
+    version: NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
+    reason: "refresh-detected-change",
+    detectedAt: "2026-08-09T12:34:56.789Z",
+    addedCount: 2,
+    updatedCount: 1,
+  };
+
+  it("archive updaterをqueue triggerで実行してackする", async () => {
+    const setup = createBindings(null);
+    const nowMs = Date.parse("2026-08-09T12:35:00.000Z");
+    let received: NewsArchiveUpdateDependencies | undefined;
+    let heartbeatCalls = 0;
+    const logs: Record<string, unknown>[] = [];
+    const handler = createWorkerHandler({
+      clock: () => nowMs,
+      heartbeatFetcher: async () => {
+        heartbeatCalls += 1;
+        return new Response(null, { status: 200 });
+      },
+      updater: async (dependencies) => {
+        received = dependencies;
+      },
+      logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+
+    const result = await callQueue(handler, setup.env, message);
+
+    expect(received).toMatchObject({
+      dataBucket: setup.env.KF3_NOTIF_DATA,
+      backupBucket: setup.env.KF3_NOTIF_BACKUP,
+      cache: setup.env.KF3_NOTIF_CACHE,
+      nowMs,
+      trigger: "queue",
+    });
+    expect(result.ack).toHaveBeenCalledOnce();
+    expect(result.retry).not.toHaveBeenCalled();
+    expect(heartbeatCalls).toBe(0);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "news_archive_queue_succeeded",
+        reason: "refresh-detected-change",
+      }),
+    );
+  });
+
+  it("archive updater失敗時はackせず60秒後にretryする", async () => {
+    const setup = createBindings(null);
+    const logs: Record<string, unknown>[] = [];
+    const handler = createWorkerHandler({
+      updater: async () => Promise.reject(new Error("queue update failed")),
+      logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+
+    const result = await callQueue(handler, setup.env, message);
+
+    expect(result.ack).not.toHaveBeenCalled();
+    expect(result.retry).toHaveBeenCalledWith({ delaySeconds: 60 });
+    expect(logs).toContainEqual(expect.objectContaining({ event: "news_archive_queue_failed" }));
+  });
+
+  it("不正な時刻または差分件数のmessageはarchive updaterを実行せずackする", async () => {
+    const setup = createBindings(null);
+    let updateCalls = 0;
+    const handler = createWorkerHandler({
+      updater: async () => {
+        updateCalls += 1;
+      },
+      logger: { log: () => undefined, error: () => undefined },
+    });
+
+    const invalidTimestamp = await callQueue(handler, setup.env, {
+      ...message,
+      detectedAt: "not-a-date",
+    });
+    const noChanges = await callQueue(handler, setup.env, {
+      ...message,
+      addedCount: 0,
+      updatedCount: 0,
+    });
+
+    expect(updateCalls).toBe(0);
+    expect(invalidTimestamp.ack).toHaveBeenCalledOnce();
+    expect(noChanges.ack).toHaveBeenCalledOnce();
+  });
+
+  it("未知versionのmessageはarchive updaterを実行せずackする", async () => {
+    const setup = createBindings(null);
+    let updateCalls = 0;
+    const logs: Record<string, unknown>[] = [];
+    const handler = createWorkerHandler({
+      updater: async () => {
+        updateCalls += 1;
+      },
+      logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+
+    const result = await callQueue(handler, setup.env, { ...message, version: 999 });
+
+    expect(updateCalls).toBe(0);
+    expect(result.ack).toHaveBeenCalledOnce();
+    expect(result.retry).not.toHaveBeenCalled();
+    expect(logs).toContainEqual(
+      expect.objectContaining({ event: "news_archive_queue_invalid_message" }),
+    );
   });
 });

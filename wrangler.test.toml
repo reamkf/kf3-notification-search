@@ -14,3 +14,14 @@ bucket_name = "test-kf3-notif-data"
 [[r2_buckets]]
 binding = "KF3_NOTIF_BACKUP"
 bucket_name = "test-kf3-notif-backup"
+
+[[queues.producers]]
+binding = "KF3_ARCHIVE_UPDATE_QUEUE"
+queue = "kf3-notif-archive-update"
+
+[[queues.consumers]]
+queue = "kf3-notif-archive-update"
+max_batch_size = 1
+max_batch_timeout = 1
+max_retries = 3
+max_concurrency = 1

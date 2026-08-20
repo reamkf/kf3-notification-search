@@ -645,6 +645,7 @@ describe("アーカイブ更新トランザクション", () => {
     ]);
     expect(setup.logger.logs[0]).toMatchObject({
       event: "news_archive_update",
+      trigger: "manual",
       updateStatus: "updated",
     });
     expect(setup.logger.errors).toHaveLength(0);

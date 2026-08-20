@@ -1,16 +1,16 @@
-# お知らせアーカイブ定期実行更新仕様
+# お知らせアーカイブ更新仕様
 
 ## この文書の責務
 
-本書は、Cronから呼び出されるscheduled handler、具体的には`updateNewsArchive`の仕様を定義する。定期実行は、公式データを検証して累積archiveの正しさを確定し、必要なbackupを保存する唯一の通常更新経路である。
+本書は、`updateNewsArchive`を実行するQueue consumerとscheduled handlerの共通仕様を定義する。Queue consumerはrefreshが検出したmerge差分を契機に別invocationで実行し、scheduled handlerはQueueが届かない場合にも更新を実行できる03:15 JSTのfallbackである。どちらも公式データを検証して累積archiveの正しさを確定し、必要なbackupと公式ETag stateを保存する。
 
-`GET /`はSSR shellだけを返し、`GET /api/kf3-news`はKVまたはR2 snapshotを返す。GETのR2投影結果はKVへ書き戻さない。`POST /api/kf3-news/refresh`は表示用KVを更新するが、archive、backup、公式ETag stateを変更しない。表示用データのrefreshと永続archiveのscheduled更新は別HTTPリクエスト、別実行として扱い、`waitUntil`でscheduledまたはrefreshの処理を継続しない。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [お知らせ機能共通仕様](./news-spec.md)、表示APIは [お知らせページリクエスト仕様](./news-page-request-spec.md) を参照する。
+`GET /`はSSR shellだけを返し、`GET /api/kf3-news`はKVまたはR2 snapshotを返す。GETのR2投影結果はKVへ書き戻さない。`POST /api/kf3-news/refresh`は表示用KVを更新し、merge差分がある場合だけ`kf3-notif-archive-update` Queueへbest-effortで通知するが、archive、backup、公式ETag stateを変更しない。refresh、Queue consumer、scheduled handlerは別invocationとして扱い、`waitUntil`で処理を継続しない。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [お知らせ機能共通仕様](./news-spec.md)、表示APIは [お知らせページリクエスト仕様](./news-page-request-spec.md) を参照する。
 
 ## 実行時刻と更新対象
 
-リポジトリ上のCron設定は`15 18 * * *`で、毎日18:15 UTC、JSTでは翌日03:15に実行する。backupの日付には実際の処理開始時刻ではなく`ScheduledController.scheduledTime`を使用する。本番Cronの登録状況と受け入れ確認は [お知らせアーカイブ導入状態](./news-archive-rollout.md) を参照する。
+リポジトリ上のCron設定は`15 18 * * *`で、毎日18:15 UTC、JSTでは翌日03:15に実行する。scheduled handlerは`controller.scheduledTime`を`updateNewsArchive`の`nowMs`へ渡し、backupの日付と実行時刻の基準にする。Queue consumerはconsumer invocation開始時の`Date.now()`を`nowMs`へ渡す。Queue consumerの実行時刻は、refreshが送信したmessageの`detectedAt`では決めない。本番Cronの登録状況と受け入れ確認は [お知らせアーカイブ導入状態](./news-archive-rollout.md) を参照する。
 
-定期実行が更新または削除できる対象は次のとおりである。
+Queue consumerまたはscheduled handlerが更新または削除できる対象は次のとおりである。
 
 - `KF3_NOTIF_DATA/archive/current.json`
 - `KF3_NOTIF_DATA/archive/official-fetch-state.json`
@@ -18,13 +18,29 @@
 - `KF3_NOTIF_BACKUP/monthly/...`
 - current更新成功後のWorkers KV `kf3-news`の削除
 
-公式データの取得または検証が失敗した場合は、archive、backup、公式ETag state、KVを変更せず処理全体を失敗させる。refresh制御metadataはscheduledの更新対象ではない。
+refreshはこれらを書き込まず、表示用KVとrefresh制御metadataを更新する。merge差分がある場合はQueueへ更新messageを送るが、Queue送信はbest-effortであり、送信失敗でもrefreshの200応答と表示用KVの保存を維持する。公式データの取得または検証が失敗した場合、Queue consumerまたはscheduled handlerはarchive、backup、公式ETag state、KVを変更せず失敗する。
+
+## refreshからQueueへの委譲
+
+refreshは公式データとcurrentまたはlegacyをmergeし、表示用配列をKVへ保存した後、merge差分がある場合だけQueueへ次の更新messageをpublishする。
+
+- Queue名は`kf3-notif-archive-update`とする。
+- messageには`version`、`reason`、`detectedAt`、`addedCount`、`updatedCount`を含める。
+- Queue送信はbest-effortで行う。送信失敗は`news_archive_update_enqueue_failed`へ記録するが、refreshの表示用KV保存を取り消さず、HTTP 200を返す。
+- Queue consumerはmessageを検証し、別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行する。
+- Queue consumerが成功したmessageはackし、更新処理が失敗したmessageはackせず60秒後にretryする。
+- scheduled handlerはQueue送信またはconsumer実行に依存せず、毎日03:15 JSTに`trigger=scheduled`で同じ更新処理を実行する。
 
 ## 処理フロー
 
 ```mermaid
 flowchart TD
-    Start[scheduled開始] --> State[公式ETag stateを読む]
+    Refresh[refresh] -->|merge差分あり| Publish[Queueへbest-effort publish]
+    Publish --> Consumer[Queue consumer別invocation]
+    Consumer --> Update[updateNewsArchive trigger=queue]
+    Schedule[03:15 JST scheduled fallback] --> Update
+    Update --> Start[更新処理開始]
+    Start --> State[公式ETag stateを読む]
     Start --> Head[currentをHEADする]
     State --> Eligible{stateとcurrent ETagが対応}
     Head --> Eligible
@@ -49,7 +65,9 @@ flowchart TD
     MonthlyCreate --> Log304
 ```
 
-## 更新処理
+## 更新処理（scheduledとqueueの共通処理）
+
+`trigger=scheduled`と`trigger=queue`は同じ`updateNewsArchive`を実行する。
 
 1. 公式ETag stateと`archive/current.json`のR2 ETagを並行して確認する。公式ETagとR2 ETagを比較するのではなく、stateに保存したcurrent ETagと現在のcurrent ETagが一致する場合だけ、stateの公式ETagを`If-None-Match`へ使用する。
 2. 条件付き取得を使えない場合は、`archive/current.json`を読み、存在しない場合だけlegacyデータを読む。archive読み込みと公式取得は並行して行う。
@@ -110,11 +128,11 @@ currentがまだなく、legacyデータから移行する初回実行では、�
 
 運用上、`daily/`は90日後に削除するLifecycle Ruleを設定し、`daily/`と`monthly/`には30日間のBucket Lockを設定する。`monthly/`には期限削除を設定せず長期保持する。
 
-## 公式データ検証の定期実行への適用
+## 公式データ検証のアーカイブ更新への適用
 
 公式データの取得と統合には、[お知らせ機能共通仕様](./news-spec.md) の公式データ利用時の安全性検証を適用する。200経路では、検証済みの既存IDで初期化したMapへ公式項目を追加または置換する。このアルゴリズムにより、統合後の件数が更新前より減らず、更新前のすべてのIDが残ることを保証し、統合後の全件再走査は行わない。
 
-定期実行で公式取得または検証に失敗した場合は、current、backup、公式ETag state、KVを変更せず処理全体を失敗させる。閾値を変更する場合は、実際の公式データが仕様変更されたことを確認し、定数とテストを同時に更新する。
+Queue consumerまたはscheduled handlerで公式取得または検証に失敗した場合は、current、backup、公式ETag state、KVを変更せず処理全体を失敗させる。閾値を変更する場合は、実際の公式データが仕様変更されたことを確認し、定数とテストを同時に更新する。
 
 ## 同時実行と失敗時の扱い
 
@@ -123,12 +141,23 @@ currentがまだなく、legacyデータから移行する初回実行では、�
 - 条件付き更新が競合した場合は失敗とし、無条件上書きや自動再試行は行わない。
 - 日次backupの保存に失敗した場合は、currentとKVを変更しない。
 - current更新が競合した場合は、KV削除と月次backupへ進まない。先に作成済みの日次backupは残す。
-- KV削除に失敗した場合、current更新は巻き戻さず、月次backupの作成へも進まない。scheduled処理は失敗として終了し、既存cacheは有効期限によって解消される。月次backupが欠けている場合は、次回の正常実行で作成を再試行する。
+- KV削除に失敗した場合、current更新は巻き戻さず、月次backupの作成へも進まない。実行中のarchive更新は失敗として終了し、既存cacheは有効期限によって解消される。月次backupが欠けている場合は、次回の正常実行で作成を再試行する。
 - 月次backupが`head()`で存在した場合は、保存済みとして扱い、PUTと本文取得を行わない。
 - 月次backupの条件付きPUTが`null`を返した場合、または別実行との競合でBucket Lockエラー`10069`になった場合は、保存済みとして扱う。
 - 月次backupの確認または保存で、それ以外の例外が発生した場合は失敗とし、current更新は巻き戻さない。次回の正常実行で月次backup作成を再試行する。
 
 公式取得または検証が失敗した場合は、current、backup、公式ETag state、KVを変更しない。state保存が失敗または競合した場合だけは、確定済みcurrentを巻き戻さず、次回の完全処理へ委ねる。
+
+## Queue consumerの実行契約
+
+Queue consumerは次の設定と動作で運用する。
+
+- `kf3-notif-archive-update`のbatch sizeは1、concurrencyは1とする。1 invocationで複数messageを並列処理しない。
+- consumer開始時の`Date.now()`を`updateNewsArchive`の`nowMs`へ渡し、`trigger=queue`で実行する。
+- 更新成功時はmessageをackする。message形式が不正な場合も更新を行わずackし、`news_archive_queue_invalid_message`へ記録する。
+- `updateNewsArchive`が失敗した場合はackせず、60秒後にretryする。Wrangler設定の最大retry回数は3とする。
+- Queue consumerはheartbeatを送信しない。`HEALTHCHECKS_PING_URL`はscheduled handlerの開始、成功、失敗通知に使用する。
+- 同じmessageが重複配送されても、既存のETag条件付き取得、R2 CAS、304経路で同じ更新結果を安全に再確認できる。無条件上書きは行わず、競合時はQueueのretryへ委ねる。
 
 ## 監視とログ
 
@@ -140,32 +169,38 @@ currentがまだなく、legacyデータから移行する初回実行では、�
 | 更新成功後 | `<ping URL>`       |
 | 更新失敗後 | `<ping URL>/fail`  |
 
-heartbeatはHTTP POSTで送信する。ping URLの末尾の`/`は取り除いてからsuffixを付け、2xx以外のレスポンスも送信失敗として扱う。heartbeatは10秒でタイムアウトする。heartbeat自体の失敗はarchive更新を中断せず、秘密値を含まない`news_archive_heartbeat_failed`ログを残す。archive更新が失敗した場合はfail送信を試みた後、元のエラーを再送出してscheduled実行も失敗させる。
+heartbeatはHTTP POSTで送信する。ping URLの末尾の`/`は取り除いてからsuffixを付け、2xx以外のレスポンスも送信失敗として扱う。heartbeatは10秒でタイムアウトする。heartbeat自体の失敗はarchive更新を中断せず、秘密値を含まない`news_archive_heartbeat_failed`ログを残す。scheduledのarchive更新が失敗した場合はfail送信を試みた後、元のエラーを再送出してscheduled invocationも失敗させる。Queue consumerはheartbeatを送らず、Queueの成功またはretryを構造化ログへ記録する。
 
 主な構造化ログイベントは次のとおり。
 
-| イベント                        | 意味                                    |
-| ------------------------------- | --------------------------------------- |
-| `news_archive_update`           | scheduledによる日次更新が完了した       |
-| `news_archive_update_failed`    | scheduled更新がいずれかの段階で失敗した |
-| `news_archive_heartbeat_failed` | heartbeat送信に失敗した                 |
-| `news_api_error`                | GETがレスポンスを構築できなかった       |
-| `news_refresh_failed`           | refreshが依存処理または検証に失敗した   |
-| `news_refresh_succeeded`        | refreshが表示用KVを更新した             |
+| イベント                             | 意味                                           |
+| ------------------------------------ | ---------------------------------------------- |
+| `news_archive_update`                | scheduledまたはqueueの更新が完了した           |
+| `news_archive_update_failed`         | scheduledまたはqueueの更新がいずれかで失敗した |
+| `news_archive_update_queued`         | refreshがQueueへ更新messageを送信した          |
+| `news_archive_update_enqueue_failed` | refreshのQueue送信に失敗した                   |
+| `news_archive_queue_succeeded`       | Queue messageの更新処理とackが完了した         |
+| `news_archive_queue_failed`          | Queue messageの更新処理に失敗しretryした       |
+| `news_archive_queue_invalid_message` | 不正なQueue messageを更新せずackした           |
+| `news_archive_heartbeat_failed`      | scheduledのheartbeat送信に失敗した             |
+| `news_api_error`                     | GETがレスポンスを構築できなかった              |
+| `news_refresh_failed`                | refreshの依存処理または検証に失敗した          |
+| `news_refresh_cache_cleanup_failed`  | current競合後の表示用KV削除に失敗した          |
+| `news_refresh_succeeded`             | refreshが表示用KVを更新した                    |
 
-GETのKV missはarchive snapshotを投影するだけであり、公式取得失敗によるfallbackログを記録しない。refreshの公式取得失敗、leaseまたはcooldownによる拒否は`news_refresh_failed`として記録し、scheduledのarchive更新失敗と区別する。refresh成功は`news_refresh_succeeded`として記録する。
+GETのKV missはarchive snapshotを投影するだけであり、公式取得失敗によるfallbackログを記録しない。refreshの公式取得失敗、leaseまたはcooldownによる拒否は`news_refresh_failed`として記録し、scheduledまたはqueueのarchive更新失敗と区別する。Queue送信失敗は`news_archive_update_enqueue_failed`として記録するが、refresh成功を失敗へ変換しない。refresh成功は`news_refresh_succeeded`として記録する。
 
 更新成功ログには更新有無、実行時刻、各件数、公式レスポンスのバイト数、backup key、`officialFetchStatus`、`conditionalRequestUsed`、`currentEtagMatchedState`、`officialBodyProcessed`、`monthlyBackupStatus`、`etagStateStatus`、処理時間を含める。公式ETagとR2 ETagの値自体はログへ出さない。処理時間は外部I/O待ちを含む経過時間であり、WorkersのCPU時間判定には使用しない。
 
-refresh成功ログには表示用KVの更新、公式件数、merge後件数、lease取得から解放までの状態、処理時間を含める。制御metadataの内容、ETag値、公式本文、secretは記録しない。
+refresh成功ログにはarchive件数、merge後件数、追加件数、変更件数、archive差分の有無、Queue送信状態、lease完了状態を含める。制御metadataの内容、ETag値、公式本文、secretは記録しない。
 
 失敗ログには処理段階とエラー詳細を含めるが、公式レスポンス本文やheartbeat URL、ETag値、refresh制御metadataの秘密値は含めない。汎用エラーの詳細には`originalError`としてnameとmessageだけを含める。制御文字と改行を空白へ正規化し、URL、Authorization、Bearer、一般的なtoken・secret・password形式、JWTと既知のtoken prefixをredactした後、nameを100文字、messageを500文字までに制限する。stack、cause、独自プロパティは含めず、非`Error`値は任意に文字列化せず固定値で記録する。
 
 ## 公式データの閾値と障害調査
 
-閾値の正式な値と検証内容は、[お知らせ機能共通仕様の公式データ利用時の安全性検証](./news-spec.md#公式データ利用時の安全性検証) を参照する。この節では、scheduledまたはrefreshで閾値超過や公式取得失敗が発生したときの調査方法を定義する。
+閾値の正式な値と検証内容は、[お知らせ機能共通仕様の公式データ利用時の安全性検証](./news-spec.md#公式データ利用時の安全性検証) を参照する。この節では、scheduled、queue、またはrefreshで閾値超過や公式取得失敗が発生したときの調査方法を定義する。
 
-scheduled更新またはrefreshに失敗した場合は、Workers Logsでそれぞれ`news_archive_update_failed`または`news_refresh_failed`を確認し、次の項目を順に見る。
+scheduledまたはqueueの更新、またはrefreshに失敗した場合は、Workers Logsでそれぞれ`news_archive_update_failed`または`news_refresh_failed`を確認し、次の項目を順に見る。Queue送信失敗は`news_archive_update_enqueue_failed`、Queue retryは`news_archive_queue_failed`を確認する。
 
 - `stage`
 - `error`
@@ -185,11 +220,11 @@ scheduled更新またはrefreshに失敗した場合は、Workers Logsでそれ�
 | JSON解析または構造検証失敗             | `stage`、`error`、`details`                                |
 | refreshのlease競合またはcooldown       | `event`、`retryAfterSeconds`、拒否理由                     |
 
-Healthchecks.ioはCron失敗やCron欠落の通知に使用し、Workers Logsはscheduledとrefreshの原因調査に使用する。公式本文、`HEALTHCHECKS_PING_URL`、ETag値、制御metadataの秘密情報はログに記録しない。
+Healthchecks.ioはCron失敗やCron欠落の通知に使用し、Workers Logsはscheduled、queue、refreshの原因調査に使用する。Queue consumerにはheartbeatを設定しない。公式本文、`HEALTHCHECKS_PING_URL`、ETag値、制御metadataの秘密情報はログに記録しない。
 
 ## 304とETag stateの保存順序
 
-公式ETag stateはscheduledで次の処理がすべて完了した後に保存する。
+公式ETag stateは、scheduledまたはqueueの`updateNewsArchive`で次の処理がすべて完了した後に保存する。
 
 1. 公式レスポンスの取得と検証
 2. 既存archiveとの統合
@@ -199,7 +234,7 @@ Healthchecks.ioはCron失敗やCron欠落の通知に使用し、Workers Logsは
 
 統合結果に変更がない場合も、公式レスポンスのETagと読み込み済みcurrentのETagをstateへ保存する。公式のキー順や未知フィールド表現だけが変わり、統合結果が同一だった場合も、次回から新しいETagで条件付き取得できるようにする。
 
-state PUTには、読み込み時のstate object ETagを使用する。stateが未作成の場合は存在しないことを条件にする。競合または保存失敗はarchiveの正しさへ影響しないため、archiveを巻き戻さず、成功ログの`etagStateStatus`へ反映して次回の完全処理へ委ねる。refreshは条件付き取得の判定にstateを読み取れるが、refresh成功後に公式ETag stateを更新してはならない。
+state PUTには、読み込み時のstate object ETagを使用する。stateが未作成の場合は存在しないことを条件にする。競合または保存失敗はarchiveの正しさへ影響しないため、archiveを巻き戻さず、成功ログの`etagStateStatus`へ反映して次回の完全処理へ委ねる。refreshは条件付き取得の判定にstateを読み取れるが、refresh成功後に公式ETag stateを更新してはならない。Queue consumerとscheduled fallbackは、同じETag/CAS/304の境界を共有するため、重複messageや近接実行でも無条件上書きを行わない。
 
 stateをcurrent更新より先に保存してはならない。先に保存すると、currentへ反映されなかった公式ETagに対して翌日の取得が304となり、未反映の変更を省略する可能性がある。
 

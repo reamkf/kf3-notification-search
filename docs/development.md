@@ -25,7 +25,7 @@ bun run seed:production
 bunx wrangler login
 ```
 
-## KVとR2を準備
+## Cloudflareリソースを準備
 
 ### KV namespace
 
@@ -58,6 +58,16 @@ bunx wrangler r2 bucket lock list kf3-notif-backup
 
 Lifecycleは`daily/`だけを90日後に削除する。`monthly/`にはexpire ruleを設定せず長期保持する。Bucket Lockは削除だけでなく上書きも防ぎ、適用後のobjectにも作用する。30日lockより短いexpire期間は設定しない。
 
+### archive更新Queue
+
+Queueを初回deploy前に一度だけ作成する。既存Queueを使う場合は作成を省略する。QueueはWrangler deployによって自動作成される前提にしない。
+
+```bash
+bunx wrangler queues create kf3-notif-archive-update
+```
+
+producerとconsumerは同じWorkerに設定し、Queue名は`kf3-notif-archive-update`とする。
+
 ### legacyデータの初回移行
 
 既存データを初回移行する場合は、リポジトリ外のファイルを指定してdata bucketへアップロードする。既存の`entries_merged_20241107.json`は互換性のため残し、削除しない。
@@ -66,9 +76,9 @@ Lifecycleは`daily/`だけを90日後に削除する。`monthly/`にはexpire ru
 bunx wrangler r2 object put kf3-notif-data/entries_merged_20241107.json --file="D:/path/to/entries_merged_20241107.json" --content-type=application/json --remote
 ```
 
-通常の累積archiveは`KF3_NOTIF_DATA/archive/current.json`である。これがない初回だけ`entries_merged_20241107.json`を読み込み、scheduledの初回更新で`archive/current.json`を作成する。backupは`KF3_NOTIF_BACKUP/daily/YYYY/MM/DD/`と`KF3_NOTIF_BACKUP/monthly/YYYY-MM.json`へ保存する。
+通常の累積archiveは`KF3_NOTIF_DATA/archive/current.json`である。これがない初回だけ`entries_merged_20241107.json`を読み込み、Queue consumerまたは03:15 JSTのscheduled fallbackの初回更新で`archive/current.json`を作成する。backupは`KF3_NOTIF_BACKUP/daily/YYYY/MM/DD/`と`KF3_NOTIF_BACKUP/monthly/YYYY-MM.json`へ保存する。
 
-refresh制御metadataは表示用KVやarchiveとは別にR2へ保存し、R2 CAS leaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。refreshはcurrent、daily、monthly、公式ETag stateを変更しない。
+refresh制御metadataは表示用KVやarchiveとは別にR2へ保存し、R2 CAS leaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。refreshはcurrent、daily、monthly、公式ETag stateを変更せず、merge差分がある場合だけ`kf3-notif-archive-update` Queueへbest-effortで通知する。Queue送信に失敗してもrefreshは200を返す。
 
 ## ローカルで実行
 
@@ -78,7 +88,7 @@ refresh制御metadataは表示用KVやarchiveとは別にR2へ保存し、R2 CAS
 bun run dev
 ```
 
-Worker、ローカルR2、scheduled handlerを確認する場合は次を起動する。
+Worker、ローカルR2、scheduled handler、Queue consumerを確認する場合は次を起動する。
 
 ```bash
 bun run preview
@@ -90,7 +100,7 @@ bun run preview
 
 ## scheduled handlerをローカルで確認
 
-`bun run preview`を起動した状態で、03:15 JSTに相当するUTC時刻を指定する。
+`bun run preview`を起動した状態で、03:15 JSTのscheduled fallbackに相当するUTC時刻を指定する。scheduled handlerは`controller.scheduledTime`をarchive更新の時刻として使用する。
 
 ```bash
 curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*+*&time=1785608100000"
@@ -103,13 +113,28 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - responseの`outcome`が`ok`
 - local R2に`archive/current.json`、`daily/2026/08/02/...json`、`monthly/2026-08.json`が作成される
 - 内容変更がない2回目はdailyとcurrentが増えず、monthlyは既存扱いになる
-- local testがproduction bucketを変更していない
+- Queue consumerとscheduled fallbackが同じ`updateNewsArchive`を実行し、Queue consumerはheartbeatを送らない
+- Queue consumerのbatch sizeとconcurrencyが1で、失敗時のretry delayが60秒になる
+- local testがproduction bucketと本番Queueを変更していない
 - 304経路で公式本文とcurrent本文の不要な処理を行わない
 - `GET /`がお知らせ取得なしでshellを返す
 - GETのKV hitが外部I/Oを行わず、KV missがR2 snapshotだけを投影する
 - refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
-- refreshが表示用KVだけを更新し、current、daily、monthly、公式ETag stateを変更しない
-- `waitUntil`を使わず、各HTTPリクエストの完了を待っている
+- refreshが表示用KVだけを更新し、current、daily、monthly、公式ETag stateを変更せず、merge差分をQueueへbest-effortで通知する
+- Queue送信失敗でもrefreshが200を返し、`news_archive_update_enqueue_failed`を記録する
+- `waitUntil`を使わず、各HTTPリクエスト、scheduled、Queue invocationの完了を待っている
+
+## Queue consumerをローカルで確認
+
+Queue consumerは`wrangler.toml`の`kf3-notif-archive-update`を使用し、batch size 1、concurrency 1で動作する。consumer invocation開始時の`Date.now()`を`updateNewsArchive`へ渡し、`trigger=queue`で実行する。consumerはheartbeatを送らず、更新失敗時はmessageをackせず60秒後にretryする。
+
+Queue producerからの送信、別invocationのconsumer実行、Queue送信失敗後もrefreshが200を返す契約は、次で確認する。
+
+```bash
+bun run test:worker
+```
+
+`wrangler.test.toml`は本番と同じQueue名をローカルシミュレーター内で使用する。Queue consumerの確認でHealthchecks.ioへ接続したり、本番Queueへ送信したりしない。
 
 ## テストとデプロイ
 
@@ -128,7 +153,7 @@ bun run build
 
 ### Healthchecks.io
 
-Healthchecks.ioのHobbyist planで`kf3notif-daily-archive` checkを作成し、Cron scheduleを`15 18 * * *`、timezoneをUTC、grace timeを30分に設定する。メンテナーのメール通知を有効にした後、check固有のping URLを対話入力でWorker secretへ保存する。URL自体をshell履歴、log、Gitへ残さない。
+Healthchecks.ioのHobbyist planで`kf3notif-daily-archive` checkを作成し、Cron scheduleを`15 18 * * *`、timezoneをUTC、grace timeを30分に設定する。これは03:15 JSTのscheduled fallbackを監視対象とし、Queue consumerにはheartbeatを設定しない。メンテナーのメール通知を有効にした後、check固有のping URLを対話入力でWorker secretへ保存する。URL自体をshell履歴、log、Gitへ残さない。
 
 ```bash
 bunx wrangler secret put HEALTHCHECKS_PING_URL
@@ -158,7 +183,7 @@ curl -i "https://<worker-host>/api/kf3-news"
 curl -i -X POST "https://<worker-host>/api/kf3-news/refresh"
 ```
 
-`GET /`がshellだけを返し、GETがKV snapshotまたはR2 snapshotを返し、refreshが実行中202、成功200、cooldown429、依存障害503の契約に従うことを確認する。refresh成功後もcurrent、daily、monthly、公式ETag stateが変更されていないことを確認する。お知らせの仕様は [お知らせ機能共通仕様](./news-spec.md)、ページ取得は [お知らせページリクエスト仕様](./news-page-request-spec.md)、定期実行は [お知らせアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md) を参照する。
+`GET /`がshellだけを返し、GETがKV snapshotまたはR2 snapshotを返し、refreshが実行中202、成功200、cooldown429、依存障害503の契約に従うことを確認する。refresh成功後もcurrent、daily、monthly、公式ETag stateが変更されていないこと、merge差分があればQueueへ通知されること、Queue送信失敗でも200を返すことを確認する。お知らせの仕様は [お知らせ機能共通仕様](./news-spec.md)、ページ取得は [お知らせページリクエスト仕様](./news-page-request-spec.md)、archive更新は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md) を参照する。
 
 ### CloudflareダッシュボードからGit連携で自動デプロイ
 
