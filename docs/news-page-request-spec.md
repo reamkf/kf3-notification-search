@@ -88,13 +88,13 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 
 ### HTTP契約
 
-| HTTP | 条件                                                                                                   | 動作                                      |
-| ---: | ------------------------------------------------------------------------------------------------------ | ----------------------------------------- |
-|  202 | refreshが実行中で、成功結果がまだ利用できない                                                          | 公式取得を開始せず、`Retry-After`を付ける |
-|  200 | lease取得済みでrefreshを実行し、公式取得、検証、merge、KV保存に成功した。Queue送信失敗は成功を妨げない | `{news, metadata}`を本文で返す            |
-|  429 | 最後の成功から5分未満                                                                                  | 公式取得を開始せず、`Retry-After`を付ける |
-|  503 | R2 lease、制御metadata、公式取得、検証、merge、KV保存などの依存処理に失敗した                          | 表示用KVとarchiveを変更せずエラーを返す   |
-|  405 | POST以外でrefresh endpointを呼び出した                                                                 | `Allow: POST`を返す                       |
+| HTTP | 条件                                                                                                   | 動作                                                  |
+| ---: | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
+|  202 | refreshが実行中、または実行中にleaseが失効し、成功結果を確定できない                                   | 必要に応じて保存済みKVを削除し、`Retry-After`を付ける |
+|  200 | lease取得済みでrefreshを実行し、公式取得、検証、merge、KV保存に成功した。Queue送信失敗は成功を妨げない | `{news, metadata}`を本文で返す                        |
+|  429 | 最後の成功から5分未満                                                                                  | 公式取得を開始せず、`Retry-After`を付ける             |
+|  503 | R2 lease、制御metadata、公式取得、検証、merge、KV保存などの依存処理に失敗した                          | 表示用KVとarchiveを変更せずエラーを返す               |
+|  405 | POST以外でrefresh endpointを呼び出した                                                                 | `Allow: POST`を返す                                   |
 
 200レスポンスの本文は、次の`{news, metadata}`オブジェクトとする。`news`は表示用のお知らせ配列、`metadata`はcache metadataの`version`、`source`、`fetchedAt`を含む。GETだけが成功時にトップレベル配列を返す。
 
@@ -117,7 +117,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 }
 ```
 
-202レスポンス本文は`{"error":"お知らせ更新が実行中です","leaseUntil":"..."}`、429レスポンス本文は`{"error":"お知らせ更新はクールダウン中です","nextAvailableAt":"..."}`、503レスポンス本文は`{"error":"お知らせ更新に失敗しました"}`とする。
+202レスポンス本文は、別refreshが実行中の場合は`{"error":"お知らせ更新が実行中です","leaseUntil":"..."}`、自身のleaseが失効した場合は`{"error":"お知らせ更新のleaseが失効しました"}`とする。429レスポンス本文は`{"error":"お知らせ更新はクールダウン中です","nextAvailableAt":"..."}`、503レスポンス本文は`{"error":"お知らせ更新に失敗しました"}`とする。
 
 202、429では、再試行可能になるまでの秒数を`Retry-After`で返す。202は別refreshが実行中であり、leaseが期限切れになるまでの待機を示す。429はcooldown残り時間を指定する。503では、固定の短い再試行待ちを指定できる。内部エラー、R2 key、ETag、公式レスポンス本文、secretはレスポンスへ含めない。
 
@@ -128,8 +128,8 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 3. 公式データの新規または変更項目を検証し、IDをキーにsnapshotとmergeする。同じIDには公式データを採用し、snapshotにだけ存在するIDは残す。
 4. 統合結果をクライアント用配列へ投影する。
 5. 表示用KV `kf3-news`へTTL 300秒で保存し、metadataの`source`を`merged`、`fetchedAt`をrefresh成功時刻として記録する。
-6. KV保存後にcurrent ETagを再確認する。archive更新と競合していた場合は保存したKVを削除し、Queueへ通知せず503を返す。GETは更新済みcurrentから再取得できる。
-7. refresh leaseを成功として完了する。
+6. KV保存後にcurrent ETagとrefresh leaseを再確認する。archive更新と競合していた場合は保存したKVを削除し、Queueへ通知せず503を返す。leaseが期限切れまたは別tokenへ移行していた場合も保存したKVを削除し、Queueへ通知せず202を返す。
+7. refresh leaseを成功として完了する。完了時にtoken不一致となった場合も保存したKVを削除し、202を返す。
 8. merge差分がある場合は`kf3-notif-archive-update` Queueへmessageをpublishする。送信失敗はログへ記録するが、KV保存を取り消さずHTTP 200を返す。
 9. 保存した配列とmetadataを`{news, metadata}`形式の200本文で返す。
 
@@ -141,7 +141,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 - dailyまたはmonthlyの作成、更新、削除
 - 公式ETag stateの保存、更新、削除
 - refresh制御metadata以外のR2書き込み
-- KV `kf3-news`の削除
+- 通常の成功経路でのKV `kf3-news`削除。current競合またはlease失効後の書き込みcleanupでは削除する
 - GETリクエストからの公式取得
 - `waitUntil`によるrefresh処理の継続
 

@@ -27,6 +27,7 @@ refreshは公式データとcurrentまたはlegacyをmergeし、表示用配列�
 - Queue名は`kf3-notif-archive-update`とする。
 - messageには`version`、`reason`、`detectedAt`、`addedCount`、`updatedCount`を含める。
 - Queue送信はbest-effortで行う。送信失敗は`news_archive_update_enqueue_failed`へ記録するが、refreshの表示用KV保存を取り消さず、HTTP 200を返す。
+- KV保存後にrefresh leaseが失効または別tokenへ移行していた場合は、保存したKVを削除して202を返し、Queueへ通知しない。
 - Queue consumerはmessageを検証し、別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行する。
 - Queue consumerが成功したmessageはackし、更新処理が失敗したmessageはackせず60秒後にretryする。
 - scheduled handlerはQueue送信またはconsumer実行に依存せず、毎日03:15 JSTに`trigger=scheduled`で同じ更新処理を実行する。

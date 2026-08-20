@@ -771,6 +771,70 @@ describe("Worker API handler", () => {
     expect(setup.queueMessages).toHaveLength(0);
   });
 
+  it("KV保存中にleaseが期限切れになった場合はKVを削除して202にする", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    setup.cacheValues.set("kf3-news", "old-cache");
+    const startedAt = Date.parse("2026-08-09T12:00:00.000Z");
+    const clockValues = [startedAt, startedAt + 59_000, startedAt + 59_000, startedAt + 61_000];
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+        clock: () => clockValues.shift() ?? startedAt + 61_000,
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(202);
+    expect(setup.cachePuts).toHaveLength(1);
+    expect(setup.cacheDeletes).toContain("kf3-news");
+    expect(setup.cacheValues.get("kf3-news")).toBeUndefined();
+    expect(setup.queueMessages).toHaveLength(0);
+  });
+
+  it("KV保存後にlease tokenが変わった場合はKVを削除して202にする", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    setup.cacheValues.set("kf3-news", "old-cache");
+    const originalData = setup.env.KF3_NOTIF_DATA;
+    let controlReads = 0;
+    setup.env.KF3_NOTIF_DATA = {
+      get: async (key: string, options?: unknown) => {
+        if (key === "control/news-refresh.json") {
+          controlReads += 1;
+          if (controlReads === 4) {
+            return createR2Object(
+              JSON.stringify({
+                version: 1,
+                status: "running",
+                token: "other-token",
+                leaseUntil: "2099-01-01T00:00:00.000Z",
+                cooldownUntil: null,
+                lastOutcome: null,
+              }),
+              "other-control-etag",
+            );
+          }
+        }
+        return originalData.get(key, options as never);
+      },
+      head: originalData.head.bind(originalData),
+      put: originalData.put.bind(originalData),
+    } as unknown as R2Bucket;
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(202);
+    expect(setup.cachePuts).toHaveLength(1);
+    expect(setup.cacheDeletes).toContain("kf3-news");
+    expect(setup.cacheValues.get("kf3-news")).toBeUndefined();
+    expect(setup.queueMessages).toHaveLength(0);
+  });
+
   it("refresh失敗時は既存KVを維持して503にする", async () => {
     const setup = createBindings(JSON.stringify(createDocument(1)));
     setup.cacheValues.set("kf3-news", "old-cache");

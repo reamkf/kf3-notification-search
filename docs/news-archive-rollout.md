@@ -63,6 +63,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 - [ ] GETのKV missがR2 currentまたはlegacyだけを投影して直接返し、KVへの書き込み、公式取得、mergeを行わない。
 - [ ] refresh実行中が202と`Retry-After`を返し、成功時は200と`{news, metadata}`を返して表示用KVへ保存する。
 - [ ] refreshのcooldownが429と`Retry-After`を返す。
+- [ ] KV保存中にrefresh leaseが失効または別tokenへ移行した場合は、保存したKVを削除し、Queueへ通知せず202を返す。
 - [ ] refreshのR2、公式、検証、merge、KV保存の依存障害が503を返す。
 - [ ] refreshがcurrent、daily、monthly、公式ETag stateを変更しない。
 - [ ] merge差分がないrefreshはQueue messageを生成しない。

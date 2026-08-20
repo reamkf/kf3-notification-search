@@ -217,6 +217,12 @@ const getRetryHeaders = (retryAfterSeconds: number) =>
     "retry-after": String(retryAfterSeconds),
   });
 
+const createRefreshLeaseExpiredResponse = () =>
+  new Response(JSON.stringify({ error: "お知らせ更新のleaseが失効しました" }), {
+    status: 202,
+    headers: getRetryHeaders(1),
+  });
+
 const createRefreshBusyResponse = (
   result: Exclude<NewsRefreshAcquireResult, { status: "acquired" }>,
 ) => {
@@ -317,10 +323,7 @@ const createNewsApp = (dependencies: ServerDependencies) => {
           dependencies.clock?.() ?? Date.now(),
         ))
       ) {
-        return new Response(JSON.stringify({ error: "お知らせ更新のleaseが失効しました" }), {
-          status: 202,
-          headers: getRetryHeaders(1),
-        });
+        return createRefreshLeaseExpiredResponse();
       }
       const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
       const metadata = createNewsCacheMetadata("merged", fetchedAt);
@@ -329,12 +332,7 @@ const createNewsApp = (dependencies: ServerDependencies) => {
         expirationTtl: normalCacheTtl,
         metadata,
       });
-      try {
-        const currentAfterCachePut = await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY);
-        if ((result.currentEtag ?? null) !== (currentAfterCachePut?.etag ?? null)) {
-          throw new NewsArchiveError("etag-conflict", "refreshのKV保存中にcurrentが競合しました");
-        }
-      } catch (error) {
+      const deleteWrittenCache = async () => {
         try {
           await context.env.KF3_NOTIF_CACHE.delete(cacheKey);
         } catch (cleanupError) {
@@ -343,7 +341,25 @@ const createNewsApp = (dependencies: ServerDependencies) => {
             originalError: serializeArchiveErrorForLog(cleanupError),
           });
         }
+      };
+      try {
+        const currentAfterCachePut = await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY);
+        if ((result.currentEtag ?? null) !== (currentAfterCachePut?.etag ?? null)) {
+          throw new NewsArchiveError("etag-conflict", "refreshのKV保存中にcurrentが競合しました");
+        }
+      } catch (error) {
+        await deleteWrittenCache();
         throw error;
+      }
+      if (
+        !(await hasActiveNewsRefreshLease(
+          context.env.KF3_NOTIF_DATA,
+          token,
+          dependencies.clock?.() ?? Date.now(),
+        ))
+      ) {
+        await deleteWrittenCache();
+        return createRefreshLeaseExpiredResponse();
       }
       let leaseCompletion: string;
       try {
@@ -359,6 +375,10 @@ const createNewsApp = (dependencies: ServerDependencies) => {
           event: "news_refresh_control_completion_failed",
           originalError: serializeArchiveErrorForLog(error),
         });
+      }
+      if (leaseCompletion === "token-mismatch") {
+        await deleteWrittenCache();
+        return createRefreshLeaseExpiredResponse();
       }
       const archiveChanged = result.addedCount > 0 || result.updatedCount > 0;
       let archiveUpdateQueueStatus: "not-needed" | "queued" | "failed" = "not-needed";
