@@ -6,7 +6,7 @@
 
 - `GET /`はお知らせ取得を行わないSSR shellを返す。
 - `GET /api/kf3-news`はKV snapshotを即時返却し、KV miss時はR2のcurrentまたはlegacy snapshotを投影する。
-- `POST /api/kf3-news/refresh`は公式データを取得、検証、mergeし、成功結果を表示用KVへ保存して`{news, metadata}`形式で200を返す。merge差分がある場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、送信失敗でも200を返す。実行中は202、cooldownは429、依存障害は503を返す。
+- `POST /api/kf3-news/refresh`は公式データを取得、検証、mergeし、成功結果を表示用KVへ保存して`{news, metadata}`形式で200を返す。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、送信失敗でも200を返す。実行中は202、cooldownは429、依存障害は503を返す。
 - refreshはR2 CAS leaseと5分cooldownで制限し、Cloudflare Rate LimitingとWAFで公開routeを保護する。
 - refresh invocation自身は表示用KVとrefresh制御metadataだけを変更し、current、daily、monthly、公式ETag stateを書き込まない。
 - Queue consumerは別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行し、scheduledの`updateNewsArchive`は03:15 JSTのfallbackとして`trigger=scheduled`で実行する。両方がcurrent、daily、monthly、公式ETag stateを更新する。
@@ -25,7 +25,7 @@
 | Queue                    | `kf3-notif-archive-update`を作成済みで、producerとconsumerが本番Workerに設定され、batch size 1、concurrency 1である                             |
 | HTTP `/`                 | SSR shellだけを返し、レスポンス中にお知らせ配列を含まず、shell処理中にお知らせ取得を開始しない                                                  |
 | HTTP GET                 | KV hitがR2と公式サーバーへアクセスせず、KV missがR2 currentまたはlegacyを投影して直接返し、KVへ書き戻さない                                     |
-| HTTP refresh             | 実行中は202、成功時は200と`{news, metadata}`を返し、KVへ同じ表示用データを保存する。merge差分はQueueへ通知する                                  |
+| HTTP refresh             | 実行中は202、成功時は200と`{news, metadata}`を返し、KVへ同じ表示用データを保存する。merge差分またはcurrent未作成をQueueへ通知する               |
 | refresh制御              | 別refreshの実行中は202、5分cooldown中は429、依存障害は503を返し、無条件上書きを行わない                                                         |
 | refresh書き込み境界      | refresh invocation自身はcurrent、daily、monthly、公式ETag stateを書き込まない。Queue送信失敗でも200を返す                                       |
 | Queue consumer           | 別invocationで`trigger=queue`を実行し、batch size 1、concurrency 1、60秒後retry、heartbeatなし、表示KV維持を確認する                            |
@@ -63,11 +63,14 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 - [ ] GETのKV missがR2 currentまたはlegacyだけを投影して直接返し、KVへの書き込み、公式取得、mergeを行わない。
 - [ ] refresh実行中が202と`Retry-After`を返し、成功時は200と`{news, metadata}`を返して表示用KVへ保存する。
 - [ ] refreshのcooldownが429と`Retry-After`を返す。
-- [ ] KV保存中にrefresh leaseが失効または別tokenへ移行した場合は、保存したKVを削除し、Queueへ通知せず202を返す。
+- [ ] KV finalization前に同じtokenのrefresh leaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す。
+- [ ] KV保存中にrefresh leaseが失効または別tokenへ移行した場合は、他refreshのKVを削除せず、Queueへ通知せず202を返す。
 - [ ] refreshのR2、公式、検証、merge、KV保存の依存障害が503を返す。
 - [ ] refreshがcurrent、daily、monthly、公式ETag stateを変更しない。
-- [ ] merge差分がないrefreshはQueue messageを生成しない。
-- [ ] merge差分があるrefreshはQueue messageを1件生成し、Queue送信失敗でも200とKV更新を維持する。
+- [ ] currentが存在し、merge差分がないrefreshはQueue messageを生成しない。
+- [ ] merge差分があるrefreshは`refresh-detected-change` messageを1件生成する。
+- [ ] current未作成のrefreshはmerge差分が0でも`refresh-current-missing`と`requiresInitialization=true`のmessageを1件生成する。
+- [ ] Queue送信失敗でもrefreshは200とKV更新を維持する。
 - [ ] Queue consumerが別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行し、成功時にackする。
 - [ ] Queue consumer成功後にcurrentへ変更が反映され、公式ETag stateが更新され、refresh由来の表示KVが維持される。
 - [ ] Queue consumerがbatch size 1、concurrency 1、heartbeatなし、失敗時60秒後retryで動作する。

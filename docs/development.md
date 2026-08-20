@@ -78,7 +78,7 @@ bunx wrangler r2 object put kf3-notif-data/entries_merged_20241107.json --file="
 
 通常の累積archiveは`KF3_NOTIF_DATA/archive/current.json`である。これがない初回だけ`entries_merged_20241107.json`を読み込み、Queue consumerまたは03:15 JSTのscheduled fallbackの初回更新で`archive/current.json`を作成する。backupは`KF3_NOTIF_BACKUP/daily/YYYY/MM/DD/`と`KF3_NOTIF_BACKUP/monthly/YYYY-MM.json`へ保存する。
 
-refresh制御metadataは表示用KVやarchiveとは別にR2へ保存し、R2 CAS leaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。refreshはcurrent、daily、monthly、公式ETag stateを変更せず、merge差分がある場合だけ`kf3-notif-archive-update` Queueへbest-effortで通知する。Queue送信に失敗してもrefreshは200を返す。
+refresh制御metadataは表示用KVやarchiveとは別にR2へ保存し、R2 CAS leaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。KV finalization前には同じtokenのleaseをCASで5分間へ延長する。refreshはcurrent、daily、monthly、公式ETag stateを変更せず、merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知する。Queue送信に失敗してもrefreshは200を返す。
 
 ## ローカルで実行
 
@@ -120,7 +120,8 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - `GET /`がお知らせ取得なしでshellを返す
 - GETのKV hitが外部I/Oを行わず、KV missがR2 snapshotだけを投影する
 - refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
-- refresh invocation自身は表示用KVとrefresh制御metadataだけを更新し、archiveを書き込まず、merge差分をQueueへbest-effortで通知する
+- KV finalization前に同じtokenのrefresh leaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す
+- refresh invocation自身は表示用KVとrefresh制御metadataだけを更新し、archiveを書き込まず、merge差分またはcurrent初期化をQueueへbest-effortで通知する
 - Queue consumer完了後にcurrent、daily、monthly、公式ETag stateが更新され、refresh由来の表示KVが維持される
 - Queue送信失敗でもrefreshが200を返し、`news_archive_update_enqueue_failed`を記録する
 - `waitUntil`を使わず、各HTTPリクエスト、scheduled、Queue invocationの完了を待っている
@@ -189,7 +190,7 @@ curl -i -X POST "https://<worker-host>/api/kf3-news/refresh"
 `GET /`がshellだけを返し、GETがKV snapshotまたはR2 snapshotを返し、refreshが実行中202、成功200、cooldown429、依存障害503の契約に従うことを確認する。archive更新経路は次の順で確認する。
 
 1. refreshの構造化ログと契約テストで、refresh invocation自身がcurrent、daily、monthly、公式ETag stateを書き込まないことを確認する。
-2. merge差分がある場合に`news_archive_update_queued`が記録され、Queue送信失敗でもrefreshが200を返すことを確認する。
+2. merge差分がある場合またはcurrentが未作成の場合に`news_archive_update_queued`が記録され、Queue送信失敗でもrefreshが200を返すことを確認する。
 3. `news_archive_queue_succeeded`の後にcurrent、daily、monthly、公式ETag stateが更新され、refresh由来の表示KVが維持されることを確認する。
 
 refresh response直後のR2状態だけでrefresh自身の書き込み有無を判定しない。確認前にQueue consumerがarchiveを更新する可能性がある。お知らせの仕様は [お知らせ機能共通仕様](./news-spec.md)、ページ取得は [お知らせページリクエスト仕様](./news-page-request-spec.md)、archive更新は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md) を参照する。

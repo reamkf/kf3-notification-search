@@ -6,7 +6,7 @@
 
 ## 目的
 
-公式配信元のETagと`If-None-Match`をQueue consumerとscheduled fallbackの`updateNewsArchive`で利用し、公式データが前回の正常処理から変わっていない場合に本文処理を省略する。表示用データのrefreshは、表示用KVを最新化する独立した処理として公式データを取得、検証、mergeする。refreshの実行結果は公式ETag stateや`archive/current.json`の正しさの根拠にならず、差分がある場合はQueue publishだけを行う。
+公式配信元のETagと`If-None-Match`をQueue consumerとscheduled fallbackの`updateNewsArchive`で利用し、公式データが前回の正常処理から変わっていない場合に本文処理を省略する。表示用データのrefreshは、表示用KVを最新化する独立した処理として公式データを取得、検証、mergeする。refreshの実行結果は公式ETag stateや`archive/current.json`の正しさの根拠にならず、merge差分がある場合またはcurrentが未作成の場合はQueue publishだけを行う。
 
 Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 
@@ -17,7 +17,7 @@ Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 - 統合結果のソートとJSONシリアライズ
 - 日次backup、current更新、KV削除
 
-表示用GETのKV missでは公式取得を行わず、R2 snapshotを投影して直接返す。GETはR2の投影結果を表示用KVへ書き戻さない。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KVとrefresh制御metadataだけを更新し、ETag state、current、daily、monthlyを更新しない。merge差分がある場合のQueue publishは表示用refreshの委譲であり、ETag stateや永続archiveの書き込みではない。
+表示用GETのKV missでは公式取得を行わず、R2 snapshotを投影して直接返す。GETはR2の投影結果を表示用KVへ書き戻さない。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KVとrefresh制御metadataだけを更新し、ETag state、current、daily、monthlyを更新しない。merge差分がある場合またはcurrentが未作成の場合のQueue publishは表示用refreshの委譲であり、ETag stateや永続archiveの書き込みではない。
 
 ## 設計方針
 

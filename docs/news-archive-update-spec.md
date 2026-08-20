@@ -2,9 +2,9 @@
 
 ## この文書の責務
 
-本書は、`updateNewsArchive`を実行するQueue consumerとscheduled handlerの共通仕様を定義する。Queue consumerはrefreshが検出したmerge差分を契機に別invocationで実行し、scheduled handlerはQueueが届かない場合にも更新を実行できる03:15 JSTのfallbackである。どちらも公式データを検証して累積archiveの正しさを確定し、必要なbackupと公式ETag stateを保存する。
+本書は、`updateNewsArchive`を実行するQueue consumerとscheduled handlerの共通仕様を定義する。Queue consumerはrefreshが検出したmerge差分またはcurrent未作成を契機に別invocationで実行し、scheduled handlerはQueueが届かない場合にも更新を実行できる03:15 JSTのfallbackである。どちらも公式データを検証して累積archiveの正しさを確定し、必要なbackupと公式ETag stateを保存する。
 
-`GET /`はSSR shellだけを返し、`GET /api/kf3-news`はKVまたはR2 snapshotを返す。GETのR2投影結果はKVへ書き戻さない。`POST /api/kf3-news/refresh`は表示用KVを更新し、merge差分がある場合だけ`kf3-notif-archive-update` Queueへbest-effortで通知するが、archive、backup、公式ETag stateを変更しない。refresh、Queue consumer、scheduled handlerは別invocationとして扱い、`waitUntil`で処理を継続しない。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [お知らせ機能共通仕様](./news-spec.md)、表示APIは [お知らせページリクエスト仕様](./news-page-request-spec.md) を参照する。
+`GET /`はSSR shellだけを返し、`GET /api/kf3-news`はKVまたはR2 snapshotを返す。GETのR2投影結果はKVへ書き戻さない。`POST /api/kf3-news/refresh`は表示用KVを更新し、merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知するが、archive、backup、公式ETag stateを変更しない。refresh、Queue consumer、scheduled handlerは別invocationとして扱い、`waitUntil`で処理を継続しない。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [お知らせ機能共通仕様](./news-spec.md)、表示APIは [お知らせページリクエスト仕様](./news-page-request-spec.md) を参照する。
 
 ## 実行時刻と更新対象
 
@@ -18,17 +18,19 @@ Queue consumerまたはscheduled handlerが更新または削除できる対象�
 - `KF3_NOTIF_BACKUP/monthly/...`
 - scheduledまたはmanual更新でcurrent更新成功後のWorkers KV `kf3-news`の削除。Queue consumerは表示KVを維持する
 
-refreshはこれらを書き込まず、表示用KVとrefresh制御metadataを更新する。merge差分がある場合はQueueへ更新messageを送るが、Queue送信はbest-effortであり、送信失敗でもrefreshの200応答と表示用KVの保存を維持する。公式データの取得または検証が失敗した場合、Queue consumerまたはscheduled handlerはarchive、backup、公式ETag state、KVを変更せず失敗する。
+refreshはこれらを書き込まず、表示用KVとrefresh制御metadataを更新する。merge差分がある場合またはcurrentが未作成の場合はQueueへ更新messageを送るが、Queue送信はbest-effortであり、送信失敗でもrefreshの200応答と表示用KVの保存を維持する。公式データの取得または検証が失敗した場合、Queue consumerまたはscheduled handlerはarchive、backup、公式ETag state、KVを変更せず失敗する。
 
 ## refreshからQueueへの委譲
 
-refreshは公式データとcurrentまたはlegacyをmergeし、表示用配列をKVへ保存した後、merge差分がある場合だけQueueへ次の更新messageをpublishする。
+refreshは公式データとcurrentまたはlegacyをmergeし、表示用配列をKVへ保存した後、merge差分がある場合またはcurrentが未作成の場合にQueueへ更新messageをpublishする。
 
 - Queue名は`kf3-notif-archive-update`とする。
-- messageには`version`、`reason`、`detectedAt`、`addedCount`、`updatedCount`を含める。
+- message versionは`2`とし、`reason`、`detectedAt`、`addedCount`、`updatedCount`、`requiresInitialization`を含める。
+- merge差分では`reason=refresh-detected-change`、current未作成では`reason=refresh-current-missing`と`requiresInitialization=true`を使用する。current未作成messageは追加・変更件数が0でも有効とする。
 - Queue送信はbest-effortで行う。送信失敗は`news_archive_update_enqueue_failed`へ記録するが、refreshの表示用KV保存を取り消さず、HTTP 200を返す。
-- KV保存後にrefresh leaseが失効または別tokenへ移行していた場合は、保存したKVを削除して202を返し、Queueへ通知しない。
-- Queue consumerはmessageを検証し、別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行する。
+- KV finalization前に同じtokenのrefresh leaseをCASで5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
+- KV保存後にrefresh leaseが失効または別tokenへ移行していた場合は、他refreshのKVを削除せず202を返し、Queueへ通知しない。
+- Queue consumerはmessageを検証し、別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行する。`requiresInitialization=true`の場合も公式データを再取得し、currentがなければ既存の初回作成経路を使用する。
 - Queue consumerが成功したmessageはackし、更新処理が失敗したmessageはackせず60秒後にretryする。
 - scheduled handlerはQueue送信またはconsumer実行に依存せず、毎日03:15 JSTに`trigger=scheduled`で同じ更新処理を実行する。
 
@@ -36,7 +38,7 @@ refreshは公式データとcurrentまたはlegacyをmergeし、表示用配列�
 
 ```mermaid
 flowchart TD
-    Refresh[refresh] -->|merge差分あり| Publish[Queueへbest-effort publish]
+    Refresh[refresh] -->|merge差分あり、またはcurrent未作成| Publish[Queueへbest-effort publish]
     Publish --> Consumer[Queue consumer別invocation]
     Consumer --> Update[updateNewsArchive trigger=queue]
     Schedule[03:15 JST scheduled fallback] --> Update
@@ -196,7 +198,7 @@ GETのKV missはarchive snapshotを投影するだけであり、公式取得失
 
 更新成功ログには更新有無、実行時刻、各件数、公式レスポンスのバイト数、backup key、`officialFetchStatus`、`conditionalRequestUsed`、`currentEtagMatchedState`、`officialBodyProcessed`、`monthlyBackupStatus`、`etagStateStatus`、処理時間を含める。公式ETagとR2 ETagの値自体はログへ出さない。処理時間は外部I/O待ちを含む経過時間であり、WorkersのCPU時間判定には使用しない。
 
-refresh成功ログにはarchive件数、merge後件数、追加件数、変更件数、archive差分の有無、Queue送信状態、lease完了状態を含める。制御metadataの内容、ETag値、公式本文、secretは記録しない。
+refresh成功ログにはarchive件数、merge後件数、追加件数、変更件数、current初期化の要否、archive更新の要否、Queue送信状態、lease完了状態を含める。制御metadataの内容、ETag値、公式本文、secretは記録しない。
 
 失敗ログには処理段階とエラー詳細を含めるが、公式レスポンス本文やheartbeat URL、ETag値、refresh制御metadataの秘密値は含めない。汎用エラーの詳細には`originalError`としてnameとmessageだけを含める。制御文字と改行を空白へ正規化し、URL、Authorization、Bearer、一般的なtoken・secret・password形式、JWTと既知のtoken prefixをredactした後、nameを100文字、messageを500文字までに制限する。stack、cause、独自プロパティは含めず、非`Error`値は任意に文字列化せず固定値で記録する。
 

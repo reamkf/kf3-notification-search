@@ -524,6 +524,7 @@ describe("Worker API handler", () => {
         detectedAt: "2026-08-09T12:34:56.789Z",
         addedCount: MIN_OFFICIAL_ENTRY_COUNT - 1,
         updatedCount: 1,
+        requiresInitialization: false,
       },
     ]);
     expect(logs).toContainEqual(
@@ -532,7 +533,9 @@ describe("Worker API handler", () => {
         archiveCount: MIN_OFFICIAL_ENTRY_COUNT,
         addedCount: MIN_OFFICIAL_ENTRY_COUNT - 1,
         updatedCount: 1,
+        requiresInitialization: false,
         archiveChanged: true,
+        archiveUpdateNeeded: true,
         archiveUpdateQueueStatus: "queued",
       }),
     );
@@ -574,7 +577,40 @@ describe("Worker API handler", () => {
       expect.objectContaining({
         event: "news_refresh_succeeded",
         archiveChanged: false,
+        archiveUpdateNeeded: false,
         archiveUpdateQueueStatus: "not-needed",
+      }),
+    );
+  });
+
+  it("current未作成ならmerge差分がなくても初期化Queue messageを送る", async () => {
+    const legacy = createDocument(MIN_OFFICIAL_ENTRY_COUNT, true);
+    const setup = createBindings(null, JSON.stringify(legacy));
+    const logs: Record<string, unknown>[] = [];
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => createResponse(legacy),
+        logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(setup.queueMessages).toEqual([
+      expect.objectContaining({
+        reason: "refresh-current-missing",
+        addedCount: 0,
+        updatedCount: 0,
+        requiresInitialization: true,
+      }),
+    ]);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "news_refresh_succeeded",
+        requiresInitialization: true,
+        archiveChanged: false,
+        archiveUpdateNeeded: true,
       }),
     );
   });
@@ -661,7 +697,7 @@ describe("Worker API handler", () => {
       put: async (key: string, value: string) => {
         if (key !== "control/news-refresh.json") return null;
         puts += 1;
-        if (puts > 1) return null;
+        if (puts > 2) return null;
         controlText = value;
         controlEtag = "control-1";
         return { etag: controlEtag } as R2Object;
@@ -681,6 +717,35 @@ describe("Worker API handler", () => {
     expect(setup.cacheValues.get("kf3-news")).not.toBe("old-cache");
     expect(logs).toContainEqual(expect.objectContaining({ event: "news_refresh_succeeded" }));
     expect(logs).not.toContainEqual(expect.objectContaining({ event: "news_refresh_failed" }));
+  });
+
+  it("refresh leaseの延長CAS競合時はKVを更新せず202にする", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    const originalData = setup.env.KF3_NOTIF_DATA;
+    let controlPuts = 0;
+    setup.env.KF3_NOTIF_DATA = {
+      get: originalData.get.bind(originalData),
+      head: originalData.head.bind(originalData),
+      put: async (key: string, value: string, options?: unknown) => {
+        if (key === "control/news-refresh.json") {
+          controlPuts += 1;
+          if (controlPuts > 1) return null;
+        }
+        return originalData.put(key, value, options as never);
+      },
+    } as unknown as R2Bucket;
+
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(202);
+    expect(setup.cachePuts).toHaveLength(0);
+    expect(setup.queueMessages).toHaveLength(0);
   });
 
   it("refresh中にcurrentが競合するとKVを更新せず503にする", async () => {
@@ -771,7 +836,7 @@ describe("Worker API handler", () => {
     expect(setup.queueMessages).toHaveLength(0);
   });
 
-  it("KV保存中にleaseが期限切れになった場合はKVを削除して202にする", async () => {
+  it("KV保存前にleaseを延長してfinalization中の再取得を防ぐ", async () => {
     const setup = createBindings(JSON.stringify(createDocument(1)));
     setup.cacheValues.set("kf3-news", "old-cache");
     const startedAt = Date.parse("2026-08-09T12:00:00.000Z");
@@ -785,14 +850,14 @@ describe("Worker API handler", () => {
       setup.env,
     );
 
-    expect(response.status).toBe(202);
+    expect(response.status).toBe(200);
     expect(setup.cachePuts).toHaveLength(1);
-    expect(setup.cacheDeletes).toContain("kf3-news");
-    expect(setup.cacheValues.get("kf3-news")).toBeUndefined();
-    expect(setup.queueMessages).toHaveLength(0);
+    expect(setup.cacheDeletes).not.toContain("kf3-news");
+    expect(setup.cacheValues.get("kf3-news")).not.toBe("old-cache");
+    expect(setup.queueMessages).toHaveLength(1);
   });
 
-  it("KV保存後にlease tokenが変わった場合はKVを削除して202にする", async () => {
+  it("KV保存後にlease tokenが変わっても次refreshのKVを削除しない", async () => {
     const setup = createBindings(JSON.stringify(createDocument(1)));
     setup.cacheValues.set("kf3-news", "old-cache");
     const originalData = setup.env.KF3_NOTIF_DATA;
@@ -802,6 +867,7 @@ describe("Worker API handler", () => {
         if (key === "control/news-refresh.json") {
           controlReads += 1;
           if (controlReads === 4) {
+            setup.cacheValues.set("kf3-news", "newer-refresh-cache");
             return createR2Object(
               JSON.stringify({
                 version: 1,
@@ -830,8 +896,8 @@ describe("Worker API handler", () => {
 
     expect(response.status).toBe(202);
     expect(setup.cachePuts).toHaveLength(1);
-    expect(setup.cacheDeletes).toContain("kf3-news");
-    expect(setup.cacheValues.get("kf3-news")).toBeUndefined();
+    expect(setup.cacheDeletes).not.toContain("kf3-news");
+    expect(setup.cacheValues.get("kf3-news")).toBe("newer-refresh-cache");
     expect(setup.queueMessages).toHaveLength(0);
   });
 
@@ -1119,6 +1185,7 @@ describe("queue handler", () => {
     detectedAt: "2026-08-09T12:34:56.789Z",
     addedCount: 2,
     updatedCount: 1,
+    requiresInitialization: false,
   };
 
   it("archive updaterをqueue triggerで実行してackする", async () => {
@@ -1160,6 +1227,28 @@ describe("queue handler", () => {
     );
   });
 
+  it("current初期化messageは差分件数0でもarchive updaterを実行してackする", async () => {
+    const setup = createBindings(null);
+    let updateCalls = 0;
+    const handler = createWorkerHandler({
+      updater: async () => {
+        updateCalls += 1;
+      },
+    });
+
+    const result = await callQueue(handler, setup.env, {
+      ...message,
+      reason: "refresh-current-missing",
+      addedCount: 0,
+      updatedCount: 0,
+      requiresInitialization: true,
+    });
+
+    expect(updateCalls).toBe(1);
+    expect(result.ack).toHaveBeenCalledOnce();
+    expect(result.retry).not.toHaveBeenCalled();
+  });
+
   it("archive updater失敗時はackせず60秒後にretryする", async () => {
     const setup = createBindings(null);
     const logs: Record<string, unknown>[] = [];
@@ -1194,10 +1283,15 @@ describe("queue handler", () => {
       addedCount: 0,
       updatedCount: 0,
     });
+    const mismatchedInitialization = await callQueue(handler, setup.env, {
+      ...message,
+      requiresInitialization: true,
+    });
 
     expect(updateCalls).toBe(0);
     expect(invalidTimestamp.ack).toHaveBeenCalledOnce();
     expect(noChanges.ack).toHaveBeenCalledOnce();
+    expect(mismatchedInitialization.ack).toHaveBeenCalledOnce();
   });
 
   it("未知versionのmessageはarchive updaterを実行せずackする", async () => {

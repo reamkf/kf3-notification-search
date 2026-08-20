@@ -28,9 +28,11 @@ import {
   type ValidatedNewsMergeResult,
 } from "./news-data";
 import {
+  NEWS_REFRESH_FINALIZATION_LEASE_MS,
   acquireNewsRefreshLease,
   completeNewsRefreshLease,
   hasActiveNewsRefreshLease,
+  renewNewsRefreshLease,
   type NewsRefreshAcquireResult,
 } from "./news-refresh-control";
 import {
@@ -139,6 +141,7 @@ const readArchiveSnapshot = async (env: WorkerBindings) => {
 type RefreshNewsResult = {
   news: ReturnType<typeof projectValidatedClientNews>;
   currentEtag: string | null;
+  currentExists: boolean;
   addedCount: number;
   updatedCount: number;
 };
@@ -166,6 +169,7 @@ const getRefreshNewsUnconditionally = async (
   return {
     news: projectValidatedClientNews(merged.document),
     currentEtag: archiveResult.value.etag,
+    currentExists: archiveResult.value.currentExists,
     addedCount: merged.stats.addedCount,
     updatedCount: merged.stats.updatedCount,
   };
@@ -190,6 +194,7 @@ const getRefreshNews = async (
       return {
         news: projectValidatedClientNews(current.document),
         currentEtag: current.etag,
+        currentExists: true,
         addedCount: 0,
         updatedCount: 0,
       };
@@ -205,6 +210,7 @@ const getRefreshNews = async (
   return {
     news: projectValidatedClientNews(merged.document),
     currentEtag: archive.etag,
+    currentExists: archive.currentExists,
     addedCount: merged.stats.addedCount,
     updatedCount: merged.stats.updatedCount,
   };
@@ -316,15 +322,14 @@ const createNewsApp = (dependencies: ServerDependencies) => {
         }
       }
       archiveCount = result.news.length;
-      if (
-        !(await hasActiveNewsRefreshLease(
-          context.env.KF3_NOTIF_DATA,
-          token,
-          dependencies.clock?.() ?? Date.now(),
-        ))
-      ) {
-        return createRefreshLeaseExpiredResponse();
-      }
+      const leaseRenewal = await renewNewsRefreshLease(
+        context.env.KF3_NOTIF_DATA,
+        token,
+        dependencies.clock?.() ?? Date.now(),
+        NEWS_REFRESH_FINALIZATION_LEASE_MS,
+      );
+      if (leaseRenewal !== "updated") return createRefreshLeaseExpiredResponse();
+
       const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
       const metadata = createNewsCacheMetadata("merged", fetchedAt);
       const responseJson = JSON.stringify(result.news);
@@ -358,7 +363,6 @@ const createNewsApp = (dependencies: ServerDependencies) => {
           dependencies.clock?.() ?? Date.now(),
         ))
       ) {
-        await deleteWrittenCache();
         return createRefreshLeaseExpiredResponse();
       }
       let leaseCompletion: string;
@@ -377,18 +381,20 @@ const createNewsApp = (dependencies: ServerDependencies) => {
         });
       }
       if (leaseCompletion === "token-mismatch") {
-        await deleteWrittenCache();
         return createRefreshLeaseExpiredResponse();
       }
+      const requiresInitialization = !result.currentExists;
       const archiveChanged = result.addedCount > 0 || result.updatedCount > 0;
+      const archiveUpdateNeeded = requiresInitialization || archiveChanged;
       let archiveUpdateQueueStatus: "not-needed" | "queued" | "failed" = "not-needed";
-      if (archiveChanged) {
+      if (archiveUpdateNeeded) {
         const message: NewsArchiveUpdateMessage = {
           version: NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
-          reason: "refresh-detected-change",
+          reason: requiresInitialization ? "refresh-current-missing" : "refresh-detected-change",
           detectedAt: fetchedAt,
           addedCount: result.addedCount,
           updatedCount: result.updatedCount,
+          requiresInitialization,
         };
         try {
           await context.env.KF3_ARCHIVE_UPDATE_QUEUE.send(message);
@@ -410,7 +416,9 @@ const createNewsApp = (dependencies: ServerDependencies) => {
         mergedCount: result.news.length,
         addedCount: result.addedCount,
         updatedCount: result.updatedCount,
+        requiresInitialization,
         archiveChanged,
+        archiveUpdateNeeded,
         archiveUpdateQueueStatus,
         leaseCompletion,
       });
@@ -513,6 +521,7 @@ export const createWorkerHandler = (
             detectedAt: message.body.detectedAt,
             addedCount: message.body.addedCount,
             updatedCount: message.body.updatedCount,
+            requiresInitialization: message.body.requiresInitialization,
           });
           message.ack();
         } catch (error) {
