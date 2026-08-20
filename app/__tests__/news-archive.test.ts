@@ -678,6 +678,24 @@ describe("アーカイブ更新トランザクション", () => {
     expectCreateIfAbsent(backupPuts[1].options?.onlyIf);
   });
 
+  it("表示KV invalidationを無効にしてもarchiveとbackupを更新する", async () => {
+    const setup = createDependencies(asStoredObject(createDocument(1), "current-read-etag"));
+
+    const result = await updateNewsArchive({
+      ...setup.dependencies,
+      trigger: "queue",
+      invalidateDisplayCache: false,
+    });
+
+    expect(result.updated).toBe(true);
+    expect(setup.timeline).toEqual([
+      `data:get:${CURRENT_ARCHIVE_KEY}`,
+      `backup:put:${result.dailyBackupKey}`,
+      `data:put:${CURRENT_ARCHIVE_KEY}`,
+      `backup:put:${result.monthlyBackupKey}`,
+    ]);
+  });
+
   it("stateとcurrentのETagが一致すると公式304を採用し、本文処理を省略する", async () => {
     const monthlyKey = buildBackupKeys(transactionNowMs).monthlyKey;
     const requestHeaders: string[] = [];

@@ -147,7 +147,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 
 ## archive更新との分離
 
-永続archiveを確定する処理は、refreshと別invocationで動くQueue consumerまたは03:15 JSTのscheduled fallbackが、同じ`updateNewsArchive`を実行して担当する。Queue consumerは`trigger=queue`、scheduled handlerは`trigger=scheduled`を渡す。Queue consumerはheartbeatを送らず、batch size 1、concurrency 1、失敗時は60秒後にretryする。refreshで作った表示用KVは、Queue consumerまたはscheduled fallbackがcurrentを更新したときに削除される。
+永続archiveを確定する処理は、refreshと別invocationで動くQueue consumerまたは03:15 JSTのscheduled fallbackが、同じ`updateNewsArchive`を実行して担当する。Queue consumerは`trigger=queue`、scheduled handlerは`trigger=scheduled`を渡す。Queue consumerはheartbeatを送らず、batch size 1、concurrency 1、失敗時は60秒後にretryする。Queue consumerはrefreshで作った表示用KVを維持し、scheduled fallbackはcurrentを更新したときに表示用KVを削除する。
 
 archive更新の詳細は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md)、ETag stateと304経路の共通設計は [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
 

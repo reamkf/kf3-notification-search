@@ -457,6 +457,7 @@ const runArchiveUpdate = (
     nowMs,
     logger: dependencies.logger ?? defaultLogger,
     trigger,
+    invalidateDisplayCache: trigger !== "queue",
   });
 
 export const createWorkerHandler = (

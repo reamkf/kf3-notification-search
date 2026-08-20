@@ -120,21 +120,24 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - `GET /`がお知らせ取得なしでshellを返す
 - GETのKV hitが外部I/Oを行わず、KV missがR2 snapshotだけを投影する
 - refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
-- refreshが表示用KVだけを更新し、current、daily、monthly、公式ETag stateを変更せず、merge差分をQueueへbest-effortで通知する
+- refresh invocation自身は表示用KVとrefresh制御metadataだけを更新し、archiveを書き込まず、merge差分をQueueへbest-effortで通知する
+- Queue consumer完了後にcurrent、daily、monthly、公式ETag stateが更新され、refresh由来の表示KVが維持される
 - Queue送信失敗でもrefreshが200を返し、`news_archive_update_enqueue_failed`を記録する
 - `waitUntil`を使わず、各HTTPリクエスト、scheduled、Queue invocationの完了を待っている
 
 ## Queue consumerをローカルで確認
 
-Queue consumerは`wrangler.toml`の`kf3-notif-archive-update`を使用し、batch size 1、concurrency 1で動作する。consumer invocation開始時の`Date.now()`を`updateNewsArchive`へ渡し、`trigger=queue`で実行する。consumerはheartbeatを送らず、更新失敗時はmessageをackせず60秒後にretryする。
+Queue consumerは`wrangler.toml`の`kf3-notif-archive-update`を使用し、batch size 1、concurrency 1で動作する。consumer invocation開始時の`Date.now()`を`updateNewsArchive`へ渡し、`trigger=queue`、`invalidateDisplayCache=false`で実行する。consumerはrefresh由来の表示KVを維持し、heartbeatを送らず、更新失敗時はmessageをackせず60秒後にretryする。
 
-Queue producerからの送信、別invocationのconsumer実行、Queue送信失敗後もrefreshが200を返す契約は、次で確認する。
+producerのenqueue契約とconsumer handlerの実行契約は、それぞれ独立したテストとして次で確認する。
 
 ```bash
-bun run test:worker
+bun run test
 ```
 
-`wrangler.test.toml`は本番と同じQueue名をローカルシミュレーター内で使用する。Queue consumerの確認でHealthchecks.ioへ接続したり、本番Queueへ送信したりしない。
+unit testは`Queue.send()`をmockしてrefreshのenqueue契約を確認し、Worker binding testは合成したmessage batchで`handler.queue()`を直接呼び、実R2とKVに対するconsumer契約を確認する。CloudflareまたはMiniflareによる実Queue配送はこのテストの対象外である。
+
+`wrangler.test.toml`は本番と同じQueue名をローカルシミュレーター内で使用する。テストでHealthchecks.ioへ接続したり、本番Queueへ送信したりしない。
 
 ## テストとデプロイ
 
@@ -183,7 +186,13 @@ curl -i "https://<worker-host>/api/kf3-news"
 curl -i -X POST "https://<worker-host>/api/kf3-news/refresh"
 ```
 
-`GET /`がshellだけを返し、GETがKV snapshotまたはR2 snapshotを返し、refreshが実行中202、成功200、cooldown429、依存障害503の契約に従うことを確認する。refresh成功後もcurrent、daily、monthly、公式ETag stateが変更されていないこと、merge差分があればQueueへ通知されること、Queue送信失敗でも200を返すことを確認する。お知らせの仕様は [お知らせ機能共通仕様](./news-spec.md)、ページ取得は [お知らせページリクエスト仕様](./news-page-request-spec.md)、archive更新は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md) を参照する。
+`GET /`がshellだけを返し、GETがKV snapshotまたはR2 snapshotを返し、refreshが実行中202、成功200、cooldown429、依存障害503の契約に従うことを確認する。archive更新経路は次の順で確認する。
+
+1. refreshの構造化ログと契約テストで、refresh invocation自身がcurrent、daily、monthly、公式ETag stateを書き込まないことを確認する。
+2. merge差分がある場合に`news_archive_update_queued`が記録され、Queue送信失敗でもrefreshが200を返すことを確認する。
+3. `news_archive_queue_succeeded`の後にcurrent、daily、monthly、公式ETag stateが更新され、refresh由来の表示KVが維持されることを確認する。
+
+refresh response直後のR2状態だけでrefresh自身の書き込み有無を判定しない。確認前にQueue consumerがarchiveを更新する可能性がある。お知らせの仕様は [お知らせ機能共通仕様](./news-spec.md)、ページ取得は [お知らせページリクエスト仕様](./news-page-request-spec.md)、archive更新は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md) を参照する。
 
 ### CloudflareダッシュボードからGit連携で自動デプロイ
 

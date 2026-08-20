@@ -8,9 +8,9 @@
 - `GET /api/kf3-news`はKV snapshotを即時返却し、KV miss時はR2のcurrentまたはlegacy snapshotを投影する。
 - `POST /api/kf3-news/refresh`は公式データを取得、検証、mergeし、成功結果を表示用KVへ保存して`{news, metadata}`形式で200を返す。merge差分がある場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、送信失敗でも200を返す。実行中は202、cooldownは429、依存障害は503を返す。
 - refreshはR2 CAS leaseと5分cooldownで制限し、Cloudflare Rate LimitingとWAFで公開routeを保護する。
-- refreshは表示用KVとrefresh制御metadataだけを変更し、current、daily、monthly、公式ETag stateを変更しない。
+- refresh invocation自身は表示用KVとrefresh制御metadataだけを変更し、current、daily、monthly、公式ETag stateを書き込まない。
 - Queue consumerは別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行し、scheduledの`updateNewsArchive`は03:15 JSTのfallbackとして`trigger=scheduled`で実行する。両方がcurrent、daily、monthly、公式ETag stateを更新する。
-- Queue consumerはheartbeatを送らず、batch size 1、concurrency 1、更新失敗時は60秒後にretryする。重複messageは既存のETag、CAS、304経路で許容する。
+- Queue consumerはheartbeatを送らず、refresh由来の表示KVを維持する。batch size 1、concurrency 1、更新失敗時は60秒後にretryし、重複messageは既存のETag、CAS、304経路で許容する。
 - restoreはlocalhost専用Workerとしてsnapshotからcurrentを条件付きで復元する。
 
 共通契約は [お知らせ機能共通仕様](./news-spec.md)、APIは [お知らせページリクエスト仕様](./news-page-request-spec.md)、archive更新は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md)、ETagは [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
@@ -27,8 +27,8 @@
 | HTTP GET                 | KV hitがR2と公式サーバーへアクセスせず、KV missがR2 currentまたはlegacyを投影して直接返し、KVへ書き戻さない                                     |
 | HTTP refresh             | 実行中は202、成功時は200と`{news, metadata}`を返し、KVへ同じ表示用データを保存する。merge差分はQueueへ通知する                                  |
 | refresh制御              | 別refreshの実行中は202、5分cooldown中は429、依存障害は503を返し、無条件上書きを行わない                                                         |
-| refresh書き込み境界      | refresh後もcurrent、daily、monthly、公式ETag stateが変わらない。Queue送信失敗でも200を返す                                                      |
-| Queue consumer           | 別invocationで`trigger=queue`を実行し、batch size 1、concurrency 1、60秒後retry、heartbeatなしを確認する                                        |
+| refresh書き込み境界      | refresh invocation自身はcurrent、daily、monthly、公式ETag stateを書き込まない。Queue送信失敗でも200を返す                                       |
+| Queue consumer           | 別invocationで`trigger=queue`を実行し、batch size 1、concurrency 1、60秒後retry、heartbeatなし、表示KV維持を確認する                            |
 | Cron Trigger             | `15 18 * * *`を1本だけ登録し、Queueのfallbackとして毎日03:15 JSTに実行される                                                                    |
 | archive update           | Queue consumerとscheduled fallbackが同じETag/CAS/304、CAS更新、daily/monthly backup、公式ETag state保存を行う                                   |
 | ETag                     | Queue consumerとscheduled fallbackの200と304、stateとcurrent ETag不一致時の完全処理を確認する                                                   |
@@ -69,7 +69,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 - [ ] merge差分がないrefreshはQueue messageを生成しない。
 - [ ] merge差分があるrefreshはQueue messageを1件生成し、Queue送信失敗でも200とKV更新を維持する。
 - [ ] Queue consumerが別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行し、成功時にackする。
-- [ ] Queue consumer成功後にcurrentへ変更が反映され、公式ETag stateが更新され、KVが削除される。
+- [ ] Queue consumer成功後にcurrentへ変更が反映され、公式ETag stateが更新され、refresh由来の表示KVが維持される。
 - [ ] Queue consumerがbatch size 1、concurrency 1、heartbeatなし、失敗時60秒後retryで動作する。
 - [ ] Queue consumerとscheduled fallbackが競合してもcurrentを無条件PUTしない。
 - [ ] scheduled fallbackはQueueの成否に関係なく毎日03:15 JSTに実行される。

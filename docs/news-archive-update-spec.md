@@ -16,7 +16,7 @@ Queue consumerまたはscheduled handlerが更新または削除できる対象�
 - `KF3_NOTIF_DATA/archive/official-fetch-state.json`
 - `KF3_NOTIF_BACKUP/daily/...`
 - `KF3_NOTIF_BACKUP/monthly/...`
-- current更新成功後のWorkers KV `kf3-news`の削除
+- scheduledまたはmanual更新でcurrent更新成功後のWorkers KV `kf3-news`の削除。Queue consumerは表示KVを維持する
 
 refreshはこれらを書き込まず、表示用KVとrefresh制御metadataを更新する。merge差分がある場合はQueueへ更新messageを送るが、Queue送信はbest-effortであり、送信失敗でもrefreshの200応答と表示用KVの保存を維持する。公式データの取得または検証が失敗した場合、Queue consumerまたはscheduled handlerはarchive、backup、公式ETag state、KVを変更せず失敗する。
 
@@ -58,8 +58,10 @@ flowchart TD
     Validate --> Changed{currentがない、または内容変更あり}
     Changed -->|はい| Daily[更新前データをdailyへ保存]
     Daily --> Current[ETag条件付きでcurrentを更新]
-    Current --> Cache[KVキャッシュを削除]
-    Cache --> Monthly[当月monthlyを作成または確認]
+    Current --> Invalidate{表示KVを削除するか}
+    Invalidate -->|scheduledまたはmanual| Cache[KVキャッシュを削除]
+    Invalidate -->|queue| Monthly[当月monthlyを作成または確認]
+    Cache --> Monthly
     Changed -->|いいえ| Monthly
     Monthly --> StateSave[公式ETag stateを保存]
     StateSave --> Log[結果を構造化ログへ記録]
@@ -79,13 +81,13 @@ flowchart TD
 7. 内容変更がある場合だけ、統合結果を`newsDate`の降順、同時刻の場合は`id`の降順で決定的にソートし、JSONを1回だけシリアライズする。オブジェクトのキーは再帰的に並べ替えず、SHA-256 digestも計算しない。
 8. 内容変更がある場合、更新前のarchiveの元のバイト列を`If-None-Match: *`の条件付きPUTで日次backupへ新規作成する。
 9. 読み込み時のETagを条件に`archive/current.json`を更新する。初回作成時は、currentが存在しないことを条件にする。
-10. current更新に成功した後でKVの`kf3-news`を削除する。
+10. `invalidateDisplayCache`が有効なscheduledまたはmanual更新では、current更新成功後にKVの`kf3-news`を削除する。Queue consumerはrefresh由来の表示KVを維持する。
 11. 当月の月次backupを条件付きで新規作成する。すでに存在する場合は内容を再取得しない。条件不一致の場合は既存として扱い、本文を取得しない。
 12. 200経路ではmonthly完了後に、公式strong ETagと確定済みcurrentのR2 raw ETagをstateへCAS保存する。state保存の失敗・競合でarchiveを巻き戻さず、結果の`etagStateStatus`へ反映して処理結果を構造化ログへ記録する。
 
 currentがまだなく、legacyデータから移行する初回実行では、統合結果がlegacyと同じでも更新ありとして扱う。これにより、更新前legacyの日次backupと`archive/current.json`を作成する。
 
-内容変更がない場合はソート、JSONシリアライズ、日次backup、current更新、KV削除を省略する。ただし、当月の月次backupが欠けていれば、読み込み済みcurrentのバイト列から作成を試みる。
+内容変更がない場合はソート、JSONシリアライズ、日次backup、current更新を省略し、表示KVも変更しない。ただし、当月の月次backupが欠けていれば、読み込み済みcurrentのバイト列から作成を試みる。
 
 ## 304経路
 
@@ -141,8 +143,8 @@ Queue consumerまたはscheduled handlerで公式取得または検証に失敗�
 - currentが未作成の場合は、`If-None-Match: *`でobjectが存在しないことを条件に作成する。
 - 条件付き更新が競合した場合は失敗とし、無条件上書きや自動再試行は行わない。
 - 日次backupの保存に失敗した場合は、currentとKVを変更しない。
-- current更新が競合した場合は、KV削除と月次backupへ進まない。先に作成済みの日次backupは残す。
-- KV削除に失敗した場合、current更新は巻き戻さず、月次backupの作成へも進まない。実行中のarchive更新は失敗として終了し、既存cacheは有効期限によって解消される。月次backupが欠けている場合は、次回の正常実行で作成を再試行する。
+- current更新が競合した場合は、表示KVの処理と月次backupへ進まない。先に作成済みの日次backupは残す。
+- 表示KV invalidationが有効なscheduledまたはmanual更新でKV削除に失敗した場合、current更新は巻き戻さず、月次backupの作成へも進まない。実行中のarchive更新は失敗として終了し、既存cacheは有効期限によって解消される。月次backupが欠けている場合は、次回の正常実行で作成を再試行する。
 - 月次backupが`head()`で存在した場合は、保存済みとして扱い、PUTと本文取得を行わない。
 - 月次backupの条件付きPUTが`null`を返した場合、または別実行との競合でBucket Lockエラー`10069`になった場合は、保存済みとして扱う。
 - 月次backupの確認または保存で、それ以外の例外が発生した場合は失敗とし、current更新は巻き戻さない。次回の正常実行で月次backup作成を再試行する。
@@ -158,6 +160,7 @@ Queue consumerは次の設定と動作で運用する。
 - 更新成功時はmessageをackする。message形式が不正な場合も更新を行わずackし、`news_archive_queue_invalid_message`へ記録する。
 - `updateNewsArchive`が失敗した場合はackせず、60秒後にretryする。Wrangler設定の最大retry回数は3とする。
 - Queue consumerはheartbeatを送信しない。`HEALTHCHECKS_PING_URL`はscheduled handlerの開始、成功、失敗通知に使用する。
+- Queue consumerは`invalidateDisplayCache=false`で実行し、refreshが保存した表示KVをTTL満了まで維持する。Queue consumerがさらに新しい公式データをcurrentへ反映した場合、表示KVは最大5分だけ一世代古い可能性がある。
 - 同じmessageが重複配送されても、既存のETag条件付き取得、R2 CAS、304経路で同じ更新結果を安全に再確認できる。無条件上書きは行わず、競合時はQueueのretryへ委ねる。
 
 ## 監視とログ
@@ -230,7 +233,7 @@ Healthchecks.ioはCron失敗やCron欠落の通知に使用し、Workers Logsは
 1. 公式レスポンスの取得と検証
 2. 既存archiveとの統合
 3. 内容変更がある場合の日次backupとcurrent更新
-4. 内容変更がある場合のKV削除
+4. 表示KV invalidationが有効な場合のKV削除
 5. 当月monthlyの作成または存在確認
 
 統合結果に変更がない場合も、公式レスポンスのETagと読み込み済みcurrentのETagをstateへ保存する。公式のキー順や未知フィールド表現だけが変わり、統合結果が同一だった場合も、次回から新しいETagで条件付き取得できるようにする。

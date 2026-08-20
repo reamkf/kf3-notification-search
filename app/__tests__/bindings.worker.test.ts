@@ -132,9 +132,9 @@ describe("Cloudflare bindings", () => {
     expect(await monthly?.text()).toBe(currentJson);
   });
 
-  it("Queue consumerが実R2のcurrentを更新して実KVを削除する", async () => {
+  it("Queue consumerが実R2のcurrentを更新してrefresh由来の実KVを維持する", async () => {
     await bindings.KF3_NOTIF_DATA.put(CURRENT_ARCHIVE_KEY, JSON.stringify(createDocument(1)));
-    await bindings.KF3_NOTIF_CACHE.put("kf3-news", "stale");
+    await bindings.KF3_NOTIF_CACHE.put("kf3-news", "fresh-refresh-cache");
     const officialDocument = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
     const logs: Record<string, unknown>[] = [];
     const handler = createWorkerHandler({
@@ -149,7 +149,7 @@ describe("Cloudflare bindings", () => {
     expect(result.retry).not.toHaveBeenCalled();
     const current = await bindings.KF3_NOTIF_DATA.get(CURRENT_ARCHIVE_KEY);
     expect(JSON.parse((await current?.text()) ?? "").news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
-    expect(await bindings.KF3_NOTIF_CACHE.get("kf3-news")).toBeNull();
+    expect(await bindings.KF3_NOTIF_CACHE.get("kf3-news")).toBe("fresh-refresh-cache");
     expect(logs).toContainEqual(
       expect.objectContaining({ event: "news_archive_update", trigger: "queue" }),
     );

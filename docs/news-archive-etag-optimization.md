@@ -110,12 +110,12 @@ currentが存在せずlegacyデータを使用する初回移行では、必ず�
 
 ### 200経路
 
-200の場合は公式取得、検証、archiveとの統合、必要な日次backup、current更新、KV削除、月次backupを行う。公式ETag stateは次のすべてが完了した後で更新する。
+200の場合は公式取得、検証、archiveとの統合、必要な日次backup、current更新、月次backupを行う。scheduled fallbackではcurrent更新後にKVも削除し、Queue consumerではrefresh由来のKVを維持する。公式ETag stateは次のすべてが完了した後で更新する。
 
 1. 公式レスポンスの取得と検証
 2. 既存archiveとの統合
 3. 変更がある場合の日次backupとcurrent更新
-4. 変更がある場合のKV削除
+4. 表示KV invalidationが有効な場合のKV削除
 5. 当月monthlyの作成または存在確認
 
 統合結果に変更がない場合も、公式レスポンスのETagと読み込み済みcurrentのETagをstateへ保存する。公式のキー順や未知フィールド表現だけが変わり、統合結果が同一だった場合も、次回から新しいETagで条件付き取得できるようにする。
@@ -172,9 +172,9 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - 304でも当月monthlyが欠けていればcurrentの元バイト列から作成する。
 - 304のmonthly作成中にcurrentのETagが変わった場合は、古い本文を保存しない。
 - state欠落、不正、currentのETag不一致では条件なしGETを行う。
-- 200で変更がある場合は、state PUTが日次、current、KV、monthlyより後になる。
+- 200で変更がある場合は、state PUTが日次、current、必要なKV invalidation、monthlyより後になる。
 - 200で変更がない場合も、新しい公式ETagと現在のcurrentのETagを保存する。
-- current PUT、KV削除、monthly PUTの失敗時はstateを更新しない。
+- current PUT、表示KV invalidationが有効な場合のKV削除、monthly PUTの失敗時はstateを更新しない。
 - state PUTの失敗または競合で、確定済みcurrentを巻き戻さない。
 - 304を公式取得エラーとして扱わない。
 - GETのKV hitではR2、公式サーバー、stateへアクセスしない。
@@ -190,7 +190,7 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 
 - Queue consumerとscheduled fallbackの304経路で公式本文とcurrent本文の読み込み、JSON解析、検証、統合、シリアライズを行わない。
 - Queue consumerまたはscheduled fallbackの304経路でも月次backupの欠落を補完できる。
-- Queue consumerとscheduled fallbackの200経路で安全性検証、日次backup、ETag条件付きcurrent更新、KV削除、月次backup、state保存の順序を維持する。
+- Queue consumerとscheduled fallbackの200経路で安全性検証、日次backup、ETag条件付きcurrent更新、月次backup、state保存の順序を維持する。scheduled fallbackではcurrent更新後にKVも削除し、Queue consumerではrefresh由来のKVを維持する。
 - stateとcurrentの不一致時に、公式変更を取り逃がさず完全処理へ戻る。
 - refreshが表示用KVだけを更新し、永続archiveと公式ETag stateへ影響を与えない。
 - 別refreshの実行中とlease失効は202、cooldownは429、依存処理の失敗は503へ変換する。

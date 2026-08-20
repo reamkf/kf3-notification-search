@@ -591,6 +591,7 @@ export type NewsArchiveUpdateDependencies = {
   clock?: () => number;
   logger?: ArchiveLogger;
   trigger?: NewsArchiveUpdateTrigger;
+  invalidateDisplayCache?: boolean;
 };
 
 export type MonthlyBackupStatus = "created" | "existing" | "not-checked";
@@ -884,10 +885,12 @@ export const updateNewsArchive = async (
       dailyBackupKey = backupKeys.dailyKey;
       await putDailyBackup(dependencies.backupBucket, dailyBackupKey, archive.text);
       updatedEtag = await putCurrentArchive(dependencies.dataBucket, archive, mergedJson);
-      try {
-        await dependencies.cache.delete("kf3-news");
-      } catch (error) {
-        throw asArchiveError(error, "cache-delete", "お知らせキャッシュの削除に失敗しました");
+      if (dependencies.invalidateDisplayCache !== false) {
+        try {
+          await dependencies.cache.delete("kf3-news");
+        } catch (error) {
+          throw asArchiveError(error, "cache-delete", "お知らせキャッシュの削除に失敗しました");
+        }
       }
     }
 

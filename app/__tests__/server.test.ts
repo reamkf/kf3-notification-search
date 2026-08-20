@@ -914,6 +914,7 @@ describe("scheduled handler", () => {
     expect(received?.backupBucket).toBe(setup.env.KF3_NOTIF_BACKUP);
     expect(received?.cache).toBe(setup.env.KF3_NOTIF_CACHE);
     expect(received?.trigger).toBe("scheduled");
+    expect(received?.invalidateDisplayCache).toBe(true);
     let settled = false;
     void pending.then(() => {
       settled = true;
@@ -1146,6 +1147,7 @@ describe("queue handler", () => {
       cache: setup.env.KF3_NOTIF_CACHE,
       nowMs,
       trigger: "queue",
+      invalidateDisplayCache: false,
     });
     expect(result.ack).toHaveBeenCalledOnce();
     expect(result.retry).not.toHaveBeenCalled();

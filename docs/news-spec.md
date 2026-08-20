@@ -9,7 +9,7 @@
 | ページ表示         | `GET /`                              | お知らせ表示用のSSR shellを返す                                             | なし                                                       |
 | 表示データ取得     | `GET /api/kf3-news`                  | KVの表示用snapshotを返し、KV miss時はR2 snapshotを投影する                  | なし                                                       |
 | 表示データrefresh  | `POST /api/kf3-news/refresh`         | 公式データを取得、検証、mergeし、成功結果をKVへ保存してQueueへ通知する      | 表示用KV、refresh制御metadata、archive更新Queueへのpublish |
-| Queue consumer     | `kf3-notif-archive-update`           | messageを検証し、`updateNewsArchive(trigger=queue)`を別invocationで実行する | current、daily、monthly、公式ETag state、必要時のKV削除    |
+| Queue consumer     | `kf3-notif-archive-update`           | messageを検証し、`updateNewsArchive(trigger=queue)`を別invocationで実行する | current、daily、monthly、公式ETag state                    |
 | scheduled fallback | Cronから呼ばれるscheduled handler    | 03:15 JSTに`updateNewsArchive(trigger=scheduled)`を実行するfallback         | current、daily、monthly、公式ETag state、必要時のKV削除    |
 | 復元操作           | localhost専用Workerの`POST /restore` | snapshotからcurrentを条件付きで復元する                                     | apply時の`archive/current.json`とKV削除                    |
 
@@ -30,7 +30,7 @@
 
 `POST /api/kf3-news/refresh`は表示用データを最新化する公開操作である。R2のCAS leaseと5分cooldownで同時実行と連続実行を制限し、leaseを取得した要求だけが公式データの取得、検証、mergeを行う。成功した結果を表示用KVへ保存し、`{news, metadata}`形式でレスポンス本文へ返す。
 
-refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分がある場合は`kf3-notif-archive-update` Queueへbest-effortで通知するが、`archive/current.json`、daily、monthly、公式ETag stateはrefreshから変更しない。Queue consumerが別invocationで`updateNewsArchive(trigger=queue)`を実行し、03:15 JSTのscheduled handlerが`trigger=scheduled`でfallback更新を行う。Queue送信に失敗してもrefreshは200を返す。currentをsnapshotへ戻す操作はrestoreの責務である。
+refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分がある場合は`kf3-notif-archive-update` Queueへbest-effortで通知するが、`archive/current.json`、daily、monthly、公式ETag stateはrefreshから変更しない。Queue consumerが別invocationで`updateNewsArchive(trigger=queue)`を実行し、refresh由来の表示KVを維持する。03:15 JSTのscheduled handlerは`trigger=scheduled`でfallback更新を行い、current更新時に表示KVを削除する。Queue送信に失敗してもrefreshは200を返す。currentをsnapshotへ戻す操作はrestoreの責務である。
 
 ### 共有データの読み書き責務
 
@@ -40,7 +40,7 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分
 | `archive/official-fetch-state.json`   | 触れない                               | 変更しない                   | 条件付き取得の結果を保存          | 条件付き取得の結果を保存          | 変更しない              |
 | `daily/...`                           | 触れない                               | 触れない                     | current更新直前の元バイト列を保存 | current更新直前の元バイト列を保存 | 読み込みのみ            |
 | `monthly/...`                         | 触れない                               | 触れない                     | 月最初の正常状態を保存            | 月最初の正常状態を保存            | 読み込みのみ            |
-| `KF3_NOTIF_CACHE/kf3-news`            | snapshotを読み、miss時はR2から直接応答 | 成功結果を保存               | current更新成功後に削除           | current更新成功後に削除           | current更新成功後に削除 |
+| `KF3_NOTIF_CACHE/kf3-news`            | snapshotを読み、miss時はR2から直接応答 | 成功結果を保存               | refresh由来のsnapshotを維持       | current更新成功後に削除           | current更新成功後に削除 |
 | refresh制御metadata                   | 触れない                               | CAS leaseとcooldownを更新    | 触れない                          | 触れない                          | 触れない                |
 | `kf3-notif-archive-update` Queue      | 触れない                               | merge差分がある場合にpublish | messageをconsume                  | 触れない                          | 触れない                |
 | legacy `entries_merged_20241107.json` | currentがない場合の読み込み元          | currentがない場合のmerge入力 | currentがない初回移行の入力       | currentがない初回移行の入力       | 入力対象外              |
