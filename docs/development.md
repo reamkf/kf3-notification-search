@@ -117,9 +117,11 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - Queue consumerのbatch sizeとconcurrencyが1で、失敗時のretry delayが60秒になる
 - local testがproduction bucketと本番Queueを変更していない
 - 304経路で公式本文とcurrent本文の不要な処理を行わない
-- `GET /`がお知らせ取得なしでshellを返す
-- GETのKV hitが外部I/Oを行わず、KV missがR2 snapshotだけを投影する
+- `GET /`がStatic Assetsからお知らせ取得なしのSSG済みshellを返す
+- GETのKV hitが外部I/Oを行わず、KV missがR2 snapshotを投影して同じJSONをKVへwrite-throughする
+- GETのKV write-through失敗でもHTTP 200と`news_api_cache_write_failed`ログを維持する
 - refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
+- refreshの公式304かつKV v2/current ETag一致時にR2 current本文を読まずKV JSONを再利用する
 - KV finalization前に同じtokenのrefresh leaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す
 - refresh invocation自身は表示用KVとrefresh制御metadataだけを更新し、archiveを書き込まず、merge差分またはcurrent初期化をQueueへbest-effortで通知する
 - Queue consumer完了後にcurrent、daily、monthly、公式ETag stateが更新され、refresh由来の表示KVが維持される

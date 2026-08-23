@@ -179,22 +179,23 @@ heartbeatはHTTP POSTで送信する。ping URLの末尾の`/`は取り除いて
 
 主な構造化ログイベントは次のとおり。
 
-| イベント                             | 意味                                           |
-| ------------------------------------ | ---------------------------------------------- |
-| `news_archive_update`                | scheduledまたはqueueの更新が完了した           |
-| `news_archive_update_failed`         | scheduledまたはqueueの更新がいずれかで失敗した |
-| `news_archive_update_queued`         | refreshがQueueへ更新messageを送信した          |
-| `news_archive_update_enqueue_failed` | refreshのQueue送信に失敗した                   |
-| `news_archive_queue_succeeded`       | Queue messageの更新処理とackが完了した         |
-| `news_archive_queue_failed`          | Queue messageの更新処理に失敗しretryした       |
-| `news_archive_queue_invalid_message` | 不正なQueue messageを更新せずackした           |
-| `news_archive_heartbeat_failed`      | scheduledのheartbeat送信に失敗した             |
-| `news_api_error`                     | GETがレスポンスを構築できなかった              |
-| `news_refresh_failed`                | refreshの依存処理または検証に失敗した          |
-| `news_refresh_cache_cleanup_failed`  | current競合後の表示用KV削除に失敗した          |
-| `news_refresh_succeeded`             | refreshが表示用KVを更新した                    |
+| イベント                             | 意味                                             |
+| ------------------------------------ | ------------------------------------------------ |
+| `news_archive_update`                | scheduledまたはqueueの更新が完了した             |
+| `news_archive_update_failed`         | scheduledまたはqueueの更新がいずれかで失敗した   |
+| `news_archive_update_queued`         | refreshがQueueへ更新messageを送信した            |
+| `news_archive_update_enqueue_failed` | refreshのQueue送信に失敗した                     |
+| `news_archive_queue_succeeded`       | Queue messageの更新処理とackが完了した           |
+| `news_archive_queue_failed`          | Queue messageの更新処理に失敗しretryした         |
+| `news_archive_queue_invalid_message` | 不正なQueue messageを更新せずackした             |
+| `news_archive_heartbeat_failed`      | scheduledのheartbeat送信に失敗した               |
+| `news_api_error`                     | GETがレスポンスを構築できなかった                |
+| `news_api_cache_write_failed`        | GETのwrite-throughに失敗したがHTTP 200を維持した |
+| `news_refresh_failed`                | refreshの依存処理または検証に失敗した            |
+| `news_refresh_cache_cleanup_failed`  | current競合後の表示用KV削除に失敗した            |
+| `news_refresh_succeeded`             | refreshが表示用KVを更新した                      |
 
-GETのKV missはarchive snapshotを投影するだけであり、公式取得失敗によるfallbackログを記録しない。refreshの公式取得失敗、leaseまたはcooldownによる拒否は`news_refresh_failed`として記録し、scheduledまたはqueueのarchive更新失敗と区別する。Queue送信失敗は`news_archive_update_enqueue_failed`として記録するが、refresh成功を失敗へ変換しない。refresh成功は`news_refresh_succeeded`として記録する。
+GETのKV missはarchive snapshotを投影してwrite-throughするが、公式取得失敗によるfallbackログを記録しない。write-throughだけに失敗した場合は`news_api_cache_write_failed`を記録してHTTP 200を維持する。refreshの公式取得失敗、leaseまたはcooldownによる拒否は`news_refresh_failed`として記録し、scheduledまたはqueueのarchive更新失敗と区別する。Queue送信失敗は`news_archive_update_enqueue_failed`として記録するが、refresh成功を失敗へ変換しない。refresh成功は`news_refresh_succeeded`として記録する。
 
 更新成功ログには更新有無、実行時刻、各件数、公式レスポンスのバイト数、backup key、`officialFetchStatus`、`conditionalRequestUsed`、`currentEtagMatchedState`、`officialBodyProcessed`、`monthlyBackupStatus`、`etagStateStatus`、処理時間を含める。公式ETagとR2 ETagの値自体はログへ出さない。処理時間は外部I/O待ちを含む経過時間であり、WorkersのCPU時間判定には使用しない。
 

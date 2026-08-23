@@ -16,7 +16,7 @@
 
 ### 成功レスポンス
 
-`GET /api/kf3-news`の成功レスポンスはトップレベルのJSON配列とする。KV miss時はR2 snapshotの投影結果を同じ配列形式で直接返す。
+`GET /api/kf3-news`の成功レスポンスはトップレベルのJSON配列とする。KV miss時はR2 snapshotの投影結果を同じ配列形式でKVへwrite-throughし、同じJSON文字列を直接返す。
 
 ```json
 [
@@ -55,9 +55,13 @@ KVに値がない場合は、公式データを取得せず、R2のsnapshotを�
 1. `archive/current.json`を読み、保存用スキーマを検証する。
 2. currentが存在しない場合だけlegacy `entries_merged_20241107.json`を読む。
 3. currentが存在するもののJSONまたは内容が不正な場合はlegacyへフォールバックせず、異常として扱う。
-4. 検証済みsnapshotをクライアント用配列へ投影し、表示用KVへ書き戻さず直接返す。
+4. 検証済みsnapshotをクライアント用配列へ投影し、JSON.stringifyを1回だけ実行する。
+5. 同じJSON文字列を表示用KV `kf3-news`へTTL 300秒、metadata付きでbest-effort保存する。
+6. KV保存の成否にかかわらず、同じJSON文字列をHTTP 200本文へ返す。
 
-R2 snapshotを読み込めない場合、または保存用スキーマの検証に失敗した場合はHTTP 500を返す。公式サーバーへのfallback取得やmergeは行わない。表示用KVへの書き込みはrefresh成功時だけ行う。
+metadataは`version: 2`、`source: "archive-snapshot"`、`fetchedAt`、`baseArchiveEtag`、`newsCount`を含む。legacy snapshotでは`baseArchiveEtag`を`null`とする。
+
+R2 snapshotを読み込めない場合、または保存用スキーマの検証に失敗した場合はHTTP 500を返す。公式サーバーへのfallback取得やmergeは行わない。KV write-throughが失敗してもHTTP 200を維持し、`news_api_cache_write_failed`だけを記録する。
 
 ```json
 {
@@ -65,13 +69,13 @@ R2 snapshotを読み込めない場合、または保存用スキーマの検証
 }
 ```
 
-GETのR2 snapshotまたはKV処理の失敗は`news_api_error`として記録する。GETは`news_api_fallback`を記録しない。refreshの失敗は`news_refresh_failed`として記録する。
+GETのR2 snapshot、KV読み込み、またはレスポンス生成の失敗は`news_api_error`として記録する。GETのwrite-through失敗はHTTP成功を維持し、`news_api_cache_write_failed`として記録する。GETは`news_api_fallback`を記録しない。refreshの失敗は`news_refresh_failed`として記録する。
 
 ## `POST /api/kf3-news/refresh`
 
 refreshは、表示用データを最新化する公開APIである。公式データの取得、公式レスポンスの検証、currentまたはlegacyとのmerge、クライアント用配列への投影、KV保存を同じrefreshリクエストで完了する。merge差分がある場合またはcurrentが未作成の場合は、永続archive更新を別invocationへ委譲するQueue messageをbest-effortで送信する。
 
-refresh成功時は、保存した表示用配列と表示用metadataを`{ "news": [...], "metadata": { ... } }`形式で本文へ返す。refreshは`archive/current.json`、legacy、daily、monthly、公式ETag stateを更新しない。保存済みstateとcurrent ETagが対応する場合は条件付き公式取得を利用できるが、refreshから条件付き取得状態を保存せず、Queue consumerまたはscheduled fallbackのETag最適化状態へ影響を与えない。merge差分またはcurrent未作成を通知するQueue送信に失敗しても、refreshのKV保存とHTTP 200を維持する。
+refresh成功時は、保存した表示用配列と表示用metadataを`{ "news": [...], "metadata": { ... } }`形式で本文へ返す。refreshは`archive/current.json`、legacy、daily、monthly、公式ETag stateを更新しない。保存済みstateとcurrent ETagが対応する場合は条件付き公式取得を利用できる。公式が304を返し、表示用KV metadataがv2かつ`baseArchiveEtag`とcurrent ETagが一致する場合は、KVのJSON文字列をR2 currentの本文処理なしで再利用する。一致しない場合はcurrentをETag条件付きで読み込む従来経路へfallbackする。refreshから条件付き取得状態を保存せず、Queue consumerまたはscheduled fallbackのETag最適化状態へ影響を与えない。merge差分またはcurrent未作成を通知するQueue送信に失敗しても、refreshのKV保存とHTTP 200を維持する。
 
 ### refresh制御
 
@@ -97,7 +101,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 |  503 | R2 lease、制御metadata、公式取得、検証、merge、KV保存などの依存処理に失敗した                          | 表示用KVとarchiveを変更せずエラーを返す        |
 |  405 | POST以外でrefresh endpointを呼び出した                                                                 | `Allow: POST`を返す                            |
 
-200レスポンスの本文は、次の`{news, metadata}`オブジェクトとする。`news`は表示用のお知らせ配列、`metadata`はcache metadataの`version`、`source`、`fetchedAt`を含む。GETだけが成功時にトップレベル配列を返す。
+200レスポンスの本文は、次の`{news, metadata}`オブジェクトとする。`news`は表示用のお知らせ配列、`metadata`はcache metadataの`version`、`source`、`fetchedAt`、`baseArchiveEtag`、`newsCount`を含む。GETだけが成功時にトップレベル配列を返す。
 
 ```json
 {
@@ -111,9 +115,11 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
     }
   ],
   "metadata": {
-    "version": 1,
+    "version": 2,
     "source": "merged",
-    "fetchedAt": "2026-08-12T12:34:56.789Z"
+    "fetchedAt": "2026-08-12T12:34:56.789Z",
+    "baseArchiveEtag": "current-etag",
+    "newsCount": 1
   }
 }
 ```
@@ -127,13 +133,13 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 1. `archive/current.json`を読み、存在しない場合だけlegacyを読む。
 2. 公式レスポンスを取得し、HTTPステータス、本文サイズ、JSON構造、必須フィールド、ID一意性、安全性閾値を検証する。
 3. 公式データの新規または変更項目を検証し、IDをキーにsnapshotとmergeする。同じIDには公式データを採用し、snapshotにだけ存在するIDは残す。
-4. 統合結果をクライアント用配列へ投影する。
+4. 統合結果をクライアント用配列へ投影し、JSON.stringifyを1回だけ実行して`clientJson`を作る。304 fast pathでは既存KVのJSON文字列を`clientJson`としてそのまま使う。
 5. 同じtokenのrefresh leaseをCASで5分間へ延長し、KV finalization中に別refreshがleaseを取得できないようにする。延長できない場合はKVへ書き込まず202を返す。
-6. 表示用KV `kf3-news`へTTL 300秒で保存し、metadataの`source`を`merged`、`fetchedAt`をrefresh成功時刻として記録する。
+6. 表示用KV `kf3-news`へ`clientJson`をTTL 300秒で保存し、metadataの`version`を2、`source`を`merged`、`fetchedAt`をrefresh成功時刻、`baseArchiveEtag`をcurrent ETag、`newsCount`を配列件数として記録する。
 7. KV保存後にcurrent ETagとrefresh leaseを再確認する。archive更新と競合していた場合は保存したKVを削除し、Queueへ通知せず503を返す。leaseが失効または別tokenへ移行していた場合は、次refreshのKVを削除しないよう共有キーを変更せず202を返す。
 8. refresh leaseを成功として完了する。完了時にtoken不一致となった場合も共有KVを削除せず202を返す。
 9. merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへmessageをpublishする。送信失敗はログへ記録するが、KV保存を取り消さずHTTP 200を返す。
-10. 保存した配列とmetadataを`{news, metadata}`形式の200本文で返す。
+10. `clientJson`を再シリアライズせずmetadataだけをJSON化し、保存したJSONを`{news, metadata}`形式の200本文へ埋め込む。
 
 公式取得、検証、merge、KV保存のいずれかに失敗した場合、refreshはKVを置き換えず503を返す。Queue送信だけが失敗した場合は、表示用KVを保持したまま`news_archive_update_enqueue_failed`へ記録し、refreshは200を返す。refreshはarchive-fallbackを成功結果として返さない。古い表示を返す必要がある場合は、別途GETで既存KV snapshotを取得する。
 

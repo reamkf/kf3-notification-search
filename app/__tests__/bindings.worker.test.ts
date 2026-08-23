@@ -91,7 +91,12 @@ describe("Cloudflare bindings", () => {
       },
     ];
     await bindings.KF3_NOTIF_CACHE.put("kf3-news", JSON.stringify(cached), {
-      metadata: createNewsCacheMetadata("archive-fallback", "2026-08-09T12:34:56.789Z"),
+      metadata: createNewsCacheMetadata(
+        "archive-fallback",
+        "2026-08-09T12:34:56.789Z",
+        null,
+        cached.length,
+      ),
     });
     const fetcher = vi.fn(async () => Promise.reject(new Error("unexpected fetch")));
     const handler = createWorkerHandler({ fetcher });

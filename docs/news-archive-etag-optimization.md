@@ -6,7 +6,7 @@
 
 ## 目的
 
-公式配信元のETagと`If-None-Match`をQueue consumerとscheduled fallbackの`updateNewsArchive`で利用し、公式データが前回の正常処理から変わっていない場合に本文処理を省略する。表示用データのrefreshは、表示用KVを最新化する独立した処理として公式データを取得、検証、mergeする。refreshの実行結果は公式ETag stateや`archive/current.json`の正しさの根拠にならず、merge差分がある場合またはcurrentが未作成の場合はQueue publishだけを行う。
+公式配信元のETagと`If-None-Match`をQueue consumerとscheduled fallbackの`updateNewsArchive`で利用し、公式データが前回の正常処理から変わっていない場合に本文処理を省略する。表示用データのrefreshは、表示用KVを最新化する独立した処理として公式データを取得、検証、mergeする。公式が304を返し、表示用KV v2の`baseArchiveEtag`がcurrent ETagと一致する場合は、KVのclient JSONを再利用してR2 current本文の読み込みと再投影を省略する。refreshの実行結果は公式ETag stateや`archive/current.json`の正しさの根拠にならず、merge差分がある場合またはcurrentが未作成の場合はQueue publishだけを行う。
 
 Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 
@@ -18,6 +18,14 @@ Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 - 日次backup、current更新、KV削除
 
 表示用GETのKV missでは公式取得を行わず、R2 snapshotを投影する。投影したJSONを表示用KVへTTL付きでbest-effort保存し、同じ本文を直接返す。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KVとrefresh制御metadataだけを更新し、ETag state、current、daily、monthlyを更新しない。merge差分がある場合またはcurrentが未作成の場合のQueue publishは表示用refreshの委譲であり、ETag stateや永続archiveの書き込みではない。
+
+### refreshの304 fast path
+
+1. refreshは保存済みstateとcurrent HEADのETagが対応する場合だけ公式へ`If-None-Match`を送る。
+2. 公式が304を返したら、表示用KV `kf3-news`をmetadata付きで読む。
+3. metadataがv2で、`baseArchiveEtag`が現在のcurrent ETagと一致し、valueが存在する場合はvalueをclient JSONとして再利用する。
+4. 一致しない場合、v1、metadata欠落、value欠落の場合は`readCurrentArchiveDocumentIfEtag`へfallbackし、従来どおりR2本文を検証して投影する。
+5. 再利用したJSONも通常のrefresh finalizationでTTL 300秒、`fetchedAt`、`newsCount`を更新保存する。HTTP本文は同じJSONを`{news, metadata}`へ埋め込む。
 
 ## 設計方針
 
@@ -178,8 +186,8 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - state PUTの失敗または競合で、確定済みcurrentを巻き戻さない。
 - 304を公式取得エラーとして扱わない。
 - GETのKV hitではR2、公式サーバー、stateへアクセスしない。
-- GETのKV missでは公式サーバーへアクセスせず、R2 snapshotを投影する。
-- refreshは公式取得、検証、merge、KV保存を行い、成功本文は`{news, metadata}`とするが、current、daily、monthly、公式ETag stateを変更しない。
+- GETのKV missでは公式サーバーへアクセスせず、R2 snapshotを投影して同じJSONを表示用KVへbest-effort保存する。
+- refreshは公式取得、検証、merge、KV保存を行い、成功本文は`{news, metadata}`とするが、current、daily、monthly、公式ETag stateを変更しない。304かつKV v2/current ETag一致時は、KV JSONを再利用してR2 current本文を読まない。
 - 別refreshの実行中は公式取得前に202、5分cooldown中は429を返す。
 - refresh成功時は200と`{news, metadata}`を返す。
 - refreshの依存処理失敗時は503を返し、表示用KVを置き換えない。
@@ -195,6 +203,8 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - refreshが表示用KVだけを更新し、永続archiveと公式ETag stateへ影響を与えない。
 - 別refreshの実行中とlease失効は202、cooldownは429、依存処理の失敗は503へ変換する。
 - `GET /`のStatic Assets応答が公式サーバー、R2、KVへのお知らせ取得を開始せず、Workerを起動しない。
+- GETのKV write-through失敗でもHTTP 200を維持し、`news_api_cache_write_failed`を記録できる。
+- 304かつKV v2/current ETag一致時にR2 current本文の読み込み、JSON解析、検証、再projection、再シリアライズを行わない。
 - GET、refresh、Queue consumer、scheduled fallbackのCPU時間を別invocationとして確認できる。
 - 復元apply後の次回Queue consumerまたはscheduled fallbackが完全処理になる。
 - Queue consumer、scheduled fallback、refreshを別々にWorkers Invocation Logsで計測できる。

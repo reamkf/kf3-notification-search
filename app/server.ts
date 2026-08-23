@@ -37,6 +37,7 @@ import {
 import {
   createNewsCacheMetadata,
   createNewsResponseHeaders,
+  isReusableNewsCacheMetadata,
   type NewsCacheMetadata,
 } from "./news-response-metadata";
 
@@ -95,10 +96,8 @@ const createJsonResponse = (json: string, metadata?: NewsCacheMetadata) => {
   return new Response(json, { headers });
 };
 
-const createRefreshResponse = (
-  news: ReturnType<typeof projectValidatedClientNews>,
-  metadata: NewsCacheMetadata,
-) => createJsonResponse(JSON.stringify({ news, metadata }), metadata);
+const createRefreshResponse = (clientJson: string, metadata: NewsCacheMetadata) =>
+  createJsonResponse(`{"news":${clientJson},"metadata":${JSON.stringify(metadata)}}`, metadata);
 
 type HeartbeatStage = "heartbeat-start" | "heartbeat-success" | "heartbeat-fail";
 
@@ -137,8 +136,14 @@ const readArchiveSnapshot = async (env: WorkerBindings) => {
   };
 };
 
+const serializeClientNews = (news: ReturnType<typeof projectValidatedClientNews>) => ({
+  clientJson: JSON.stringify(news),
+  newsCount: news.length,
+});
+
 type RefreshNewsResult = {
-  news: ReturnType<typeof projectValidatedClientNews>;
+  clientJson: string;
+  newsCount: number;
   currentEtag: string | null;
   currentExists: boolean;
   addedCount: number;
@@ -166,7 +171,7 @@ const getRefreshNewsUnconditionally = async (
     },
   );
   return {
-    news: projectValidatedClientNews(merged.document),
+    ...serializeClientNews(projectValidatedClientNews(merged.document)),
     currentEtag: archiveResult.value.etag,
     currentExists: archiveResult.value.currentExists,
     addedCount: merged.stats.addedCount,
@@ -185,13 +190,29 @@ const getRefreshNews = async (
     ifNoneMatch: eligibility.ifNoneMatch,
   });
   if (official.status === "not-modified") {
+    const cached = await env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey);
+    if (
+      cached.value !== null &&
+      isReusableNewsCacheMetadata(cached.metadata) &&
+      cached.metadata.baseArchiveEtag === eligibility.currentEtag
+    ) {
+      return {
+        clientJson: cached.value,
+        newsCount: cached.metadata.newsCount,
+        currentEtag: eligibility.currentEtag,
+        currentExists: true,
+        addedCount: 0,
+        updatedCount: 0,
+      };
+    }
+
     const current = await readCurrentArchiveDocumentIfEtag(
       env.KF3_NOTIF_DATA,
-      eligibility.state?.currentEtag ?? "",
+      eligibility.currentEtag ?? "",
     );
     if (current) {
       return {
-        news: projectValidatedClientNews(current.document),
+        ...serializeClientNews(projectValidatedClientNews(current.document)),
         currentEtag: current.etag,
         currentExists: true,
         addedCount: 0,
@@ -207,7 +228,7 @@ const getRefreshNews = async (
     validateOfficialEntries: true,
   });
   return {
-    news: projectValidatedClientNews(merged.document),
+    ...serializeClientNews(projectValidatedClientNews(merged.document)),
     currentEtag: archive.etag,
     currentExists: archive.currentExists,
     addedCount: merged.stats.addedCount,
@@ -271,8 +292,26 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       const snapshot = await readArchiveSnapshot(context.env);
       archiveCount = snapshot.clientNews.length;
       const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
-      const metadata = createNewsCacheMetadata("archive-snapshot", fetchedAt);
-      return createJsonResponse(JSON.stringify(snapshot.clientNews), metadata);
+      const responseJson = JSON.stringify(snapshot.clientNews);
+      const metadata = createNewsCacheMetadata(
+        "archive-snapshot",
+        fetchedAt,
+        snapshot.archive.etag,
+        archiveCount,
+      );
+      try {
+        await context.env.KF3_NOTIF_CACHE.put(cacheKey, responseJson, {
+          expirationTtl: normalCacheTtl,
+          metadata,
+        });
+      } catch (error) {
+        logger.error({
+          event: "news_api_cache_write_failed",
+          originalError: serializeArchiveErrorForLog(error),
+          archiveCount,
+        });
+      }
+      return createJsonResponse(responseJson, metadata);
     } catch (error) {
       logger.error(createApiErrorLog(error, archiveCount));
       return context.json({ error: "お知らせデータの取得に失敗しました" }, 500);
@@ -320,7 +359,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           throw new NewsArchiveError("etag-conflict", "refresh中にcurrentが競合しました");
         }
       }
-      archiveCount = result.news.length;
+      archiveCount = result.newsCount;
       const leaseRenewal = await renewNewsRefreshLease(
         context.env.KF3_NOTIF_DATA,
         token,
@@ -330,8 +369,13 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       if (leaseRenewal !== "updated") return createRefreshLeaseExpiredResponse();
 
       const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
-      const metadata = createNewsCacheMetadata("merged", fetchedAt);
-      const responseJson = JSON.stringify(result.news);
+      const metadata = createNewsCacheMetadata(
+        "merged",
+        fetchedAt,
+        result.currentEtag,
+        result.newsCount,
+      );
+      const responseJson = result.clientJson;
       await context.env.KF3_NOTIF_CACHE.put(cacheKey, responseJson, {
         expirationTtl: normalCacheTtl,
         metadata,
@@ -412,7 +456,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       logger.log({
         event: "news_refresh_succeeded",
         archiveCount,
-        mergedCount: result.news.length,
+        mergedCount: result.newsCount,
         addedCount: result.addedCount,
         updatedCount: result.updatedCount,
         requiresInitialization,
@@ -421,7 +465,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         archiveUpdateQueueStatus,
         leaseCompletion,
       });
-      return createRefreshResponse(result.news, metadata);
+      return createRefreshResponse(result.clientJson, metadata);
     } catch (error) {
       logger.error(createRefreshErrorLog(error, archiveCount));
       if (token !== null) {

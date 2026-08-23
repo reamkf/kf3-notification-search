@@ -20,7 +20,7 @@
 
 ## お知らせ一覧取得フロー
 
-`GET /`はStatic AssetsからSSG済みshellを返します。Workerを起動せず、shell表示後の`GET /api/kf3-news`はKV snapshotを即時返し、KV miss時はR2 currentまたはlegacy snapshotを投影します。公式取得、検証、mergeを行う`POST /api/kf3-news/refresh`は別リクエストで、実行中は202、成功時は`{news, metadata}`を表示用KVへ保存して200、cooldownは429、依存障害は503を返します。refreshはR2 CAS leaseと5分cooldownで制限し、merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知します。Queue送信に失敗してもrefreshは200を返します。Queue consumerは別invocationで`updateNewsArchive(trigger=queue)`を実行し、03:15 JSTのscheduled handlerは`trigger=scheduled`でQueueのfallbackとして継続します。restoreはsnapshotからcurrentを復元します。
+`GET /`はStatic AssetsからSSG済みshellを返します。Workerを起動せず、shell表示後の`GET /api/kf3-news`はKV snapshotを即時返し、KV miss時はR2 currentまたはlegacy snapshotを投影して同じJSONをKVへwrite-throughします。公式取得、検証、mergeを行う`POST /api/kf3-news/refresh`は別リクエストで、実行中は202、成功時は`{news, metadata}`を表示用KVへ保存して200、cooldownは429、依存障害は503を返します。公式が304を返し、KV v2のcurrent ETagが一致する場合は、refreshがKV JSONを再利用してR2 current本文の処理を省略します。refreshはR2 CAS leaseと5分cooldownで制限し、merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知します。Queue送信に失敗してもrefreshは200を返します。Queue consumerは別invocationで`updateNewsArchive(trigger=queue)`を実行し、03:15 JSTのscheduled handlerは`trigger=scheduled`でQueueのfallbackとして継続します。restoreはsnapshotからcurrentを復元します。
 
 - [機能共通仕様](./docs/news-spec.md)
 - [ページリクエスト仕様](./docs/news-page-request-spec.md)
