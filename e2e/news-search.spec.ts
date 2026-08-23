@@ -73,7 +73,7 @@ const mockNewsApi = async (
 const openNewsSearch = async (page: Page, options = {}) => {
   await mockNewsApi(page, options);
   await page.goto("/");
-  await expect(page.getByText("おしらせの件数: 3件")).toBeVisible();
+  await expect(page.getByTestId("news-metadata").getByText("3件")).toBeVisible();
 };
 
 test("お知らせ一覧を新しい順に表示し、公式サイトへのリンクを生成する", async ({ page }) => {
@@ -187,14 +187,14 @@ test("キーワード、並び順、期間でお知らせを絞り込む", async
   await page.getByRole("button", { name: "検索オプション" }).click();
   await page.getByLabel("キーワード検索:").fill("測定 OR 掃除");
   await page.getByRole("button", { name: "検索", exact: true }).click();
-  await expect(page.getByText("おしらせの件数: 2件")).toBeVisible();
+  await expect(page.getByText("検索結果: 2件")).toBeVisible();
 
   await page.getByLabel("ソート順:").selectOption("asc");
   await expect(page.locator("li").first()).toContainText("測定イベント");
 
   await page.getByLabel("開始日").fill("2026-08-02");
   await page.getByLabel("終了日").fill("2026-08-02");
-  await expect(page.getByText("おしらせの件数: 1件")).toBeVisible();
+  await expect(page.getByText("検索結果: 1件")).toBeVisible();
   await expect(page.locator("li")).toContainText("掃除イベント");
 });
 
@@ -207,7 +207,7 @@ test("検索オプションの表示状態を再読み込み後も保持する",
   await expect(optionsButton).toHaveAttribute("aria-expanded", "true");
   await expect(page.locator("#news-search-options")).toHaveCount(1);
   await page.reload();
-  await expect(page.getByText("おしらせの件数: 3件")).toBeVisible();
+  await expect(page.getByTestId("news-metadata").getByText("3件")).toBeVisible();
   await expect(page.getByRole("button", { name: "検索オプション" })).toHaveAttribute(
     "aria-expanded",
     "true",
@@ -277,7 +277,7 @@ test("20件を超えるお知らせをスクロールに応じて追加表示す
   );
 
   await page.goto("/");
-  await expect(page.getByText("おしらせの件数: 25件")).toBeVisible();
+  await expect(page.getByTestId("news-metadata").getByText("25件")).toBeVisible();
   const items = page.locator("ul > li");
   await expect(items).toHaveCount(20);
 
@@ -292,7 +292,7 @@ test("検索結果が0件でもエラーや追加読み込みを表示しない"
   await page.getByLabel("キーワード検索:").fill("該当しないキーワード");
   await page.getByRole("button", { name: "検索", exact: true }).click();
 
-  await expect(page.getByText("おしらせの件数: 0件")).toBeVisible();
+  await expect(page.getByText("検索結果: 0件")).toBeVisible();
   await expect(page.locator("ul > li")).toHaveCount(0);
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByText("お知らせを読み込んでいます...")).toHaveCount(0);

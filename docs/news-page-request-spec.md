@@ -4,7 +4,7 @@
 
 本書は、ページ表示と表示用お知らせAPIの仕様を定義する。`GET /`はSSR shellだけを返し、お知らせ取得は行わない。ブラウザはshell表示後に`GET /api/kf3-news`を呼び出し、必要に応じて`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
 
-表示用APIは永続archiveを更新しない。`archive/current.json`、daily、monthly、公式ETag stateはscheduledだけが更新する。refreshは表示用KVとrefresh制御metadataだけを変更する。保存形式と共通契約は [お知らせ機能共通仕様](./news-spec.md)、永続archive更新は [お知らせアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md) を参照する。
+表示用APIは永続archiveを更新しない。`archive/current.json`、daily、monthly、公式ETag stateはQueue consumerまたは03:15 JSTのscheduled fallbackが更新する。refreshは表示用KVとrefresh制御metadataだけを変更し、merge差分がある場合またはcurrentが未作成の場合はQueueへbest-effortで通知する。保存形式と共通契約は [お知らせ機能共通仕様](./news-spec.md)、永続archive更新は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md) を参照する。
 
 ## `GET /`
 
@@ -69,9 +69,9 @@ GETのR2 snapshotまたはKV処理の失敗は`news_api_error`として記録す
 
 ## `POST /api/kf3-news/refresh`
 
-refreshは、表示用データを最新化する公開APIである。公式データの取得、公式レスポンスの検証、currentまたはlegacyとのmerge、クライアント用配列への投影、KV保存を同じrefreshリクエストで完了する。
+refreshは、表示用データを最新化する公開APIである。公式データの取得、公式レスポンスの検証、currentまたはlegacyとのmerge、クライアント用配列への投影、KV保存を同じrefreshリクエストで完了する。merge差分がある場合またはcurrentが未作成の場合は、永続archive更新を別invocationへ委譲するQueue messageをbest-effortで送信する。
 
-refresh成功時は、保存した表示用配列と表示用metadataを`{ "news": [...], "metadata": { ... } }`形式で本文へ返す。refreshは`archive/current.json`、legacy、daily、monthly、公式ETag stateを更新しない。保存済みstateとcurrent ETagが対応する場合は条件付き公式取得を利用できるが、refreshから条件付き取得状態を保存せず、scheduledのETag最適化状態へ影響を与えない。
+refresh成功時は、保存した表示用配列と表示用metadataを`{ "news": [...], "metadata": { ... } }`形式で本文へ返す。refreshは`archive/current.json`、legacy、daily、monthly、公式ETag stateを更新しない。保存済みstateとcurrent ETagが対応する場合は条件付き公式取得を利用できるが、refreshから条件付き取得状態を保存せず、Queue consumerまたはscheduled fallbackのETag最適化状態へ影響を与えない。merge差分またはcurrent未作成を通知するQueue送信に失敗しても、refreshのKV保存とHTTP 200を維持する。
 
 ### refresh制御
 
@@ -80,21 +80,22 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 1. 制御metadataをR2から読み、CAS条件付きPUTでleaseを取得する。
 2. lease取得競合時は別refreshが実行中として扱い、公式取得を開始しない。
 3. lease取得後、最後の成功refreshから5分未満の場合はcooldownとして拒否し、公式取得を開始しない。
-4. 公式取得、検証、merge、KV保存が完了したらleaseを解放し、成功時刻を制御metadataへCAS保存する。
-5. 公式取得またはKV保存に失敗した場合もleaseを解放する。失敗したrefreshはcooldownを開始しない。
-6. leaseとcooldownの判定、取得、解放はCASで行い、無条件上書きに切り替えない。
+4. 公式取得、検証、mergeの完了後、KV finalization前に同じtokenのleaseをCASで5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
+5. KV保存とcurrent ETag確認が完了したらleaseを解放し、成功時刻を制御metadataへCAS保存する。
+6. 公式取得またはKV保存に失敗した場合もleaseを解放する。失敗したrefreshはcooldownを開始しない。
+7. leaseとcooldownの判定、取得、延長、解放はCASで行い、無条件上書きに切り替えない。
 
 制御metadataの内容は表示用KVやarchiveの内容と混同せず、公式ETag stateとして利用しない。refreshの同時実行、cooldown、制御metadataのCAS失敗はHTTP契約へ変換する。
 
 ### HTTP契約
 
-| HTTP | 条件                                                                          | 動作                                      |
-| ---: | ----------------------------------------------------------------------------- | ----------------------------------------- |
-|  202 | refreshが実行中で、成功結果がまだ利用できない                                 | 公式取得を開始せず、`Retry-After`を付ける |
-|  200 | lease取得済みでrefreshを実行し、公式取得、検証、merge、KV保存に成功した       | `{news, metadata}`を本文で返す            |
-|  429 | 最後の成功から5分未満                                                         | 公式取得を開始せず、`Retry-After`を付ける |
-|  503 | R2 lease、制御metadata、公式取得、検証、merge、KV保存などの依存処理に失敗した | 表示用KVとarchiveを変更せずエラーを返す   |
-|  405 | POST以外でrefresh endpointを呼び出した                                        | `Allow: POST`を返す                       |
+| HTTP | 条件                                                                                                   | 動作                                           |
+| ---: | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
+|  202 | refreshが実行中、または実行中にleaseが失効し、成功結果を確定できない                                   | 他refreshのKVを削除せず、`Retry-After`を付ける |
+|  200 | lease取得済みでrefreshを実行し、公式取得、検証、merge、KV保存に成功した。Queue送信失敗は成功を妨げない | `{news, metadata}`を本文で返す                 |
+|  429 | 最後の成功から5分未満                                                                                  | 公式取得を開始せず、`Retry-After`を付ける      |
+|  503 | R2 lease、制御metadata、公式取得、検証、merge、KV保存などの依存処理に失敗した                          | 表示用KVとarchiveを変更せずエラーを返す        |
+|  405 | POST以外でrefresh endpointを呼び出した                                                                 | `Allow: POST`を返す                            |
 
 200レスポンスの本文は、次の`{news, metadata}`オブジェクトとする。`news`は表示用のお知らせ配列、`metadata`はcache metadataの`version`、`source`、`fetchedAt`を含む。GETだけが成功時にトップレベル配列を返す。
 
@@ -117,7 +118,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 }
 ```
 
-202レスポンス本文は`{"error":"お知らせ更新が実行中です","leaseUntil":"..."}`、429レスポンス本文は`{"error":"お知らせ更新はクールダウン中です","nextAvailableAt":"..."}`、503レスポンス本文は`{"error":"お知らせ更新に失敗しました"}`とする。
+202レスポンス本文は、別refreshが実行中の場合は`{"error":"お知らせ更新が実行中です","leaseUntil":"..."}`、自身のleaseが失効した場合は`{"error":"お知らせ更新のleaseが失効しました"}`とする。429レスポンス本文は`{"error":"お知らせ更新はクールダウン中です","nextAvailableAt":"..."}`、503レスポンス本文は`{"error":"お知らせ更新に失敗しました"}`とする。
 
 202、429では、再試行可能になるまでの秒数を`Retry-After`で返す。202は別refreshが実行中であり、leaseが期限切れになるまでの待機を示す。429はcooldown残り時間を指定する。503では、固定の短い再試行待ちを指定できる。内部エラー、R2 key、ETag、公式レスポンス本文、secretはレスポンスへ含めない。
 
@@ -127,26 +128,30 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 2. 公式レスポンスを取得し、HTTPステータス、本文サイズ、JSON構造、必須フィールド、ID一意性、安全性閾値を検証する。
 3. 公式データの新規または変更項目を検証し、IDをキーにsnapshotとmergeする。同じIDには公式データを採用し、snapshotにだけ存在するIDは残す。
 4. 統合結果をクライアント用配列へ投影する。
-5. 表示用KV `kf3-news`へTTL 300秒で保存し、metadataの`source`を`merged`、`fetchedAt`をrefresh成功時刻として記録する。
-6. 保存した配列とmetadataを`{news, metadata}`形式の200本文で返す。
+5. 同じtokenのrefresh leaseをCASで5分間へ延長し、KV finalization中に別refreshがleaseを取得できないようにする。延長できない場合はKVへ書き込まず202を返す。
+6. 表示用KV `kf3-news`へTTL 300秒で保存し、metadataの`source`を`merged`、`fetchedAt`をrefresh成功時刻として記録する。
+7. KV保存後にcurrent ETagとrefresh leaseを再確認する。archive更新と競合していた場合は保存したKVを削除し、Queueへ通知せず503を返す。leaseが失効または別tokenへ移行していた場合は、次refreshのKVを削除しないよう共有キーを変更せず202を返す。
+8. refresh leaseを成功として完了する。完了時にtoken不一致となった場合も共有KVを削除せず202を返す。
+9. merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへmessageをpublishする。送信失敗はログへ記録するが、KV保存を取り消さずHTTP 200を返す。
+10. 保存した配列とmetadataを`{news, metadata}`形式の200本文で返す。
 
-公式取得、検証、merge、KV保存のいずれかに失敗した場合、refreshはKVを置き換えず503を返す。refreshはarchive-fallbackを成功結果として返さない。古い表示を返す必要がある場合は、別途GETで既存KV snapshotを取得する。
+公式取得、検証、merge、KV保存のいずれかに失敗した場合、refreshはKVを置き換えず503を返す。Queue送信だけが失敗した場合は、表示用KVを保持したまま`news_archive_update_enqueue_failed`へ記録し、refreshは200を返す。refreshはarchive-fallbackを成功結果として返さない。古い表示を返す必要がある場合は、別途GETで既存KV snapshotを取得する。
 
 ### refreshが行わないこと
 
-- `archive/current.json`の更新
+- `archive/current.json`の更新。merge差分またはcurrent未作成のQueue publishだけを行い、archive更新はQueue consumerへ委譲する
 - dailyまたはmonthlyの作成、更新、削除
 - 公式ETag stateの保存、更新、削除
 - refresh制御metadata以外のR2書き込み
-- KV `kf3-news`の削除
+- 通常の成功経路でのKV `kf3-news`削除。current競合後の書き込みcleanupでは削除するが、leaseまたはtoken不一致では他refreshのKVを保護するため削除しない
 - GETリクエストからの公式取得
 - `waitUntil`によるrefresh処理の継続
 
-## scheduledとの分離
+## archive更新との分離
 
-永続archiveを確定する処理は、Cronから呼ばれる`updateNewsArchive`だけである。scheduledは公式ETag stateを使う条件付き取得、currentの検証済み更新、daily/monthly backup、必要時のKV削除を担当する。refreshで作った表示用KVは、scheduledがcurrentを更新したときに削除される。
+永続archiveを確定する処理は、refreshと別invocationで動くQueue consumerまたは03:15 JSTのscheduled fallbackが、同じ`updateNewsArchive`を実行して担当する。Queue consumerは`trigger=queue`、scheduled handlerは`trigger=scheduled`を渡す。Queue consumerはheartbeatを送らず、batch size 1、concurrency 1、失敗時は60秒後にretryする。Queue consumerはrefreshで作った表示用KVを維持し、scheduled fallbackはcurrentを更新したときに表示用KVを削除する。
 
-scheduledの詳細は [お知らせアーカイブ定期実行更新仕様](./news-archive-scheduled-spec.md)、ETag stateと304経路の共通設計は [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
+archive更新の詳細は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md)、ETag stateと304経路の共通設計は [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
 
 ## 互換route
 

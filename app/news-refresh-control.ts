@@ -4,6 +4,7 @@ export const NEWS_REFRESH_CONTROL_KEY = "control/news-refresh.json";
 export const NEWS_REFRESH_CONTROL_VERSION = 1;
 export const NEWS_REFRESH_LEASE_MS = 60_000;
 export const NEWS_REFRESH_COOLDOWN_MS = 5 * 60_000;
+export const NEWS_REFRESH_FINALIZATION_LEASE_MS = NEWS_REFRESH_COOLDOWN_MS;
 
 export type NewsRefreshControlStatus = "idle" | "running" | "cooldown";
 export type NewsRefreshOutcome = "success" | "failure";
@@ -40,6 +41,7 @@ export type NewsRefreshAcquireResult =
     };
 
 export type NewsRefreshCompletionResult = "updated" | "token-mismatch" | "conflict";
+export type NewsRefreshRenewalResult = "updated" | "inactive" | "conflict";
 
 const contentType = "application/json; charset=utf-8";
 const maxCasAttempts = 5;
@@ -154,6 +156,34 @@ export const hasActiveNewsRefreshLease = async (
     leaseUntil !== null &&
     leaseUntil > nowMs
   );
+};
+
+export const renewNewsRefreshLease = async (
+  bucket: R2Bucket,
+  token: string,
+  nowMs = Date.now(),
+  leaseMs = NEWS_REFRESH_LEASE_MS,
+): Promise<NewsRefreshRenewalResult> => {
+  for (let attempt = 0; attempt < maxCasAttempts; attempt += 1) {
+    const current = await readControl(bucket);
+    const leaseUntil = parseTime(current.control?.leaseUntil);
+    if (
+      current.control?.status !== "running" ||
+      current.control.token !== token ||
+      leaseUntil === null ||
+      leaseUntil <= nowMs
+    ) {
+      return "inactive";
+    }
+
+    const nextControl: NewsRefreshControl = {
+      ...current.control,
+      leaseUntil: toIso(nowMs + leaseMs),
+    };
+    if (await putControl(bucket, nextControl, current.object)) return "updated";
+  }
+
+  return "conflict";
 };
 
 export const acquireNewsRefreshLease = async (
