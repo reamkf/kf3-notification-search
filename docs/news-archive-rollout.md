@@ -60,6 +60,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 
 - [ ] `GET /`がStatic Assetsからお知らせ取得なしのSSG済みshellを返し、Workerを起動しない。
 - [ ] GETのKV hitがKVだけで完了する。
+- [ ] current更新時にGET専用snapshot KVを削除し、Queueではmerged KVを維持する。
 - [ ] merged KVとGET専用snapshot KVの両方がmissした場合、R2 currentまたはlegacyを投影し、同じJSONをTTL 300秒でsnapshot KVへwrite-throughする。write失敗でも200を維持し、公式取得とmergeを行わない。
 - [ ] refresh実行中が202と`Retry-After`を返し、成功時は200と`{news, metadata}`を返して表示用KVへ保存する。
 - [ ] refreshのcooldownが429と`Retry-After`を返す。

@@ -16,7 +16,7 @@ Queue consumerまたはscheduled handlerが更新または削除できる対象�
 - `KF3_NOTIF_DATA/archive/official-fetch-state.json`
 - `KF3_NOTIF_BACKUP/daily/...`
 - `KF3_NOTIF_BACKUP/monthly/...`
-- scheduledまたはmanual更新でcurrent更新成功後のWorkers KV `kf3-news`の削除。Queue consumerは表示KVを維持する
+- current更新成功後のGET専用snapshot KV `kf3-news-archive-snapshot`の削除。scheduledまたはmanual更新ではWorkers KV `kf3-news`も削除し、Queue consumerは表示KVを維持する
 
 refreshはこれらを書き込まず、表示用KVとrefresh制御metadataを更新する。merge差分がある場合またはcurrentが未作成の場合はQueueへ更新messageを送るが、Queue送信はbest-effortであり、送信失敗でもrefreshの200応答と表示用KVの保存を維持する。公式データの取得または検証が失敗した場合、Queue consumerまたはscheduled handlerはarchive、backup、公式ETag state、KVを変更せず失敗する。
 
@@ -146,7 +146,7 @@ Queue consumerまたはscheduled handlerで公式取得または検証に失敗�
 - 条件付き更新が競合した場合は失敗とし、無条件上書きや自動再試行は行わない。
 - 日次backupの保存に失敗した場合は、currentとKVを変更しない。
 - current更新が競合した場合は、表示KVの処理と月次backupへ進まない。先に作成済みの日次backupは残す。
-- 表示KV invalidationが有効なscheduledまたはmanual更新でKV削除に失敗した場合、current更新は巻き戻さず、月次backupの作成へも進まない。実行中のarchive更新は失敗として終了し、既存cacheは有効期限によって解消される。月次backupが欠けている場合は、次回の正常実行で作成を再試行する。
+- current更新後のGET専用snapshot KV削除、またはscheduled/manualでのmerged KV削除に失敗した場合、current更新は巻き戻さず、月次backupの作成へも進まない。実行中のarchive更新は失敗として終了する。月次backupが欠けている場合は、次回の正常実行で作成を再試行する。
 - 月次backupが`head()`で存在した場合は、保存済みとして扱い、PUTと本文取得を行わない。
 - 月次backupの条件付きPUTが`null`を返した場合、または別実行との競合でBucket Lockエラー`10069`になった場合は、保存済みとして扱う。
 - 月次backupの確認または保存で、それ以外の例外が発生した場合は失敗とし、current更新は巻き戻さない。次回の正常実行で月次backup作成を再試行する。

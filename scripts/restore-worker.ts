@@ -1,8 +1,9 @@
 import type { KVNamespace, R2Bucket } from "@cloudflare/workers-types/experimental";
 import { CURRENT_ARCHIVE_KEY } from "../app/news-archive";
+import { NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, NEWS_CACHE_KEY } from "../app/news-cache-keys";
 import { canonicalizeNewsDocument, parseJapaneseNewsDate } from "../app/news-data";
 
-const cacheKey = "kf3-news";
+const cacheKey = NEWS_CACHE_KEY;
 const snapshotKeyPattern =
   /^(?:daily\/\d{4}\/\d{2}\/\d{2}\/[A-Za-z0-9._-]+|monthly\/\d{4}-\d{2})\.json$/;
 
@@ -219,6 +220,7 @@ const restore = async (input: RestoreInput, env: RestoreBindings) => {
   }
 
   try {
+    await env.KF3_NOTIF_CACHE.delete(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY);
     await env.KF3_NOTIF_CACHE.delete(cacheKey);
   } catch {
     throw new RestoreError(
@@ -236,7 +238,7 @@ const restore = async (input: RestoreInput, env: RestoreBindings) => {
     snapshot: publicSnapshotSummary(snapshot),
     previousCurrentEtag: latestCurrentEtag,
     updatedCurrentEtag: updated.etag,
-    writes: { r2Puts: 1, kvDeletes: 1 },
+    writes: { r2Puts: 1, kvDeletes: 2 },
   };
 };
 

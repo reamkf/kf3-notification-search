@@ -78,7 +78,7 @@ applyでは次の順序で処理される。
 1. snapshotの保存用schema、全日付、ID一意性、正規化JSON、SHA-256 digestを再検証する。
 2. 入力されたsnapshot digestとcurrent ETagが現在値と一致することを確認する。
 3. `onlyIf.etagMatches`付きで`archive/current.json`を更新する。
-4. current更新に成功した後だけKVの`kf3-news`を削除する。
+4. current更新に成功した後だけGET専用snapshot KVと`kf3-news`を削除する。
 
 条件不一致、digest不一致、current更新競合、`put()`の`null`では無条件上書きへ切り替えない。最新状態でdry-runからやり直す。
 
@@ -87,7 +87,7 @@ applyでは次の順序で処理される。
 ## 復元後の確認
 
 1. responseの更新後current ETagを記録する。
-2. KV `kf3-news`の削除結果を記録する。
+2. GET専用snapshot KVと`kf3-news`の削除結果を記録する。
 3. `GET /api/kf3-news`がトップレベル配列を返すことを確認する。
 4. APIの件数、最古日、最新日をdry-run結果と比較する。
 5. snapshot digest、更新後ETag、KV削除結果、API確認結果が運用記録と一致することを確認する。

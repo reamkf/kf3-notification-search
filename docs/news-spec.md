@@ -41,7 +41,7 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分
 | `daily/...`                                 | 触れない                                      | 触れない                                | current更新直前の元バイト列を保存 | current更新直前の元バイト列を保存 | 読み込みのみ            |
 | `monthly/...`                               | 触れない                                      | 触れない                                | 月最初の正常状態を保存            | 月最初の正常状態を保存            | 読み込みのみ            |
 | `KF3_NOTIF_CACHE/kf3-news`                  | merged snapshotを最優先で読む                 | 成功結果を保存                          | refresh由来のsnapshotを維持       | current更新成功後に削除           | current更新成功後に削除 |
-| `KF3_NOTIF_CACHE/kf3-news-archive-snapshot` | GET missのsnapshotを読む、またはwrite-through | 触れない                                | 触れない                          | 触れない                          | 触れない                |
+| `KF3_NOTIF_CACHE/kf3-news-archive-snapshot` | GET missのsnapshotを読む、またはwrite-through | 触れない                                | current更新成功後に削除           | current更新成功後に削除           | current復元成功後に削除 |
 | refresh制御metadata                         | 触れない                                      | CAS leaseとcooldownを更新               | 触れない                          | 触れない                          | 触れない                |
 | `kf3-notif-archive-update` Queue            | 触れない                                      | merge差分またはcurrent未作成時にpublish | messageをconsume                  | 触れない                          | 触れない                |
 | legacy `entries_merged_20241107.json`       | currentがない場合の読み込み元                 | currentがない場合のmerge入力            | currentがない初回移行の入力       | currentがない初回移行の入力       | 入力対象外              |

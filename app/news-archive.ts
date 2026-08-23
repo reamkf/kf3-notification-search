@@ -14,6 +14,7 @@ import {
   validateParsedStoredNewsDocumentShape,
 } from "./news-data";
 import type { StoredNewsDocument } from "./schema";
+import { NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, NEWS_CACHE_KEY } from "./news-cache-keys";
 
 export const OFFICIAL_NEWS_URL = `${OFFICIAL_NEWS_ORIGIN}/info/all/entries.txt`;
 export const OFFICIAL_FETCH_TIMEOUT_MS = 10_000;
@@ -885,12 +886,13 @@ export const updateNewsArchive = async (
       dailyBackupKey = backupKeys.dailyKey;
       await putDailyBackup(dependencies.backupBucket, dailyBackupKey, archive.text);
       updatedEtag = await putCurrentArchive(dependencies.dataBucket, archive, mergedJson);
-      if (dependencies.invalidateDisplayCache !== false) {
-        try {
-          await dependencies.cache.delete("kf3-news");
-        } catch (error) {
-          throw asArchiveError(error, "cache-delete", "お知らせキャッシュの削除に失敗しました");
+      try {
+        await dependencies.cache.delete(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY);
+        if (dependencies.invalidateDisplayCache !== false) {
+          await dependencies.cache.delete(NEWS_CACHE_KEY);
         }
+      } catch (error) {
+        throw asArchiveError(error, "cache-delete", "お知らせキャッシュの削除に失敗しました");
       }
     }
 

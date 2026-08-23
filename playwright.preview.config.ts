@@ -12,6 +12,7 @@ export default defineConfig({
   use: {
     baseURL,
     trace: "on-first-retry",
+    channel: process.env.CI ? "chrome" : undefined,
   },
   webServer: {
     command: "bun run build && bunx wrangler dev --ip 127.0.0.1 --port 8787",

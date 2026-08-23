@@ -50,7 +50,7 @@ KV hitから公式データ取得の失敗や`archive-fallback`を推測して�
 
 ### archive snapshot KV hit
 
-merged結果用KVに値がない場合、GET専用KV `kf3-news-archive-snapshot`に値があればR2へアクセスせず、そのJSONを返す。metadataはレスポンスヘッダーへ投影する。merged結果用KVを上書きしないため、遅延したGETのsnapshot保存がrefresh結果を置き換えることはない。
+merged結果用KVに値がない場合、GET専用KV `kf3-news-archive-snapshot`に値があればR2へアクセスせず、そのJSONを返す。metadataはレスポンスヘッダーへ投影する。merged結果用KVを上書きしないため、遅延したGETのsnapshot保存がrefresh結果を置き換えることはない。current更新またはrestore成功時にはこのsnapshot KVを削除する。
 
 ### KV miss
 

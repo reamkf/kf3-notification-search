@@ -640,6 +640,7 @@ describe("アーカイブ更新トランザクション", () => {
       `data:get:${CURRENT_ARCHIVE_KEY}`,
       `backup:put:${result.dailyBackupKey}`,
       `data:put:${CURRENT_ARCHIVE_KEY}`,
+      "cache:delete:kf3-news-archive-snapshot",
       "cache:delete:kf3-news",
       `backup:put:${result.monthlyBackupKey}`,
     ]);
@@ -692,6 +693,7 @@ describe("アーカイブ更新トランザクション", () => {
       `data:get:${CURRENT_ARCHIVE_KEY}`,
       `backup:put:${result.dailyBackupKey}`,
       `data:put:${CURRENT_ARCHIVE_KEY}`,
+      "cache:delete:kf3-news-archive-snapshot",
       `backup:put:${result.monthlyBackupKey}`,
     ]);
   });
@@ -961,7 +963,7 @@ describe("アーカイブ更新トランザクション", () => {
       `data:get:${CURRENT_ARCHIVE_KEY}`,
       `backup:put:${expectedDailyKey}`,
       `data:put:${CURRENT_ARCHIVE_KEY}`,
-      "cache:delete:kf3-news",
+      "cache:delete:kf3-news-archive-snapshot",
     ]);
     expect(setup.logger.errors[0]).toMatchObject({ stage: "cache-delete" });
   });
@@ -1078,6 +1080,7 @@ describe("アーカイブ更新トランザクション", () => {
       },
     });
     expect(setup.timeline).toContain(`data:put:${CURRENT_ARCHIVE_KEY}`);
+    expect(setup.timeline).toContain("cache:delete:kf3-news-archive-snapshot");
     expect(setup.timeline).toContain("cache:delete:kf3-news");
     expect(setup.timeline).toContain(`backup:put:${monthlyKey}`);
     expect(setup.logger.errors[0]).toMatchObject({

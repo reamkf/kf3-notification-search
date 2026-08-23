@@ -40,10 +40,11 @@ import {
   isReusableNewsCacheMetadata,
   type NewsCacheMetadata,
 } from "./news-response-metadata";
+import { NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, NEWS_CACHE_KEY } from "./news-cache-keys";
 
 const oldNewsPath = `/${LEGACY_ARCHIVE_KEY}`;
-const cacheKey = "kf3-news";
-const archiveSnapshotCacheKey = "kf3-news-archive-snapshot";
+const cacheKey = NEWS_CACHE_KEY;
+const archiveSnapshotCacheKey = NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY;
 const normalCacheTtl = 60 * 5;
 const heartbeatTimeoutMs = 10_000;
 
