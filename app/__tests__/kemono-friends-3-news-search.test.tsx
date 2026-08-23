@@ -2,7 +2,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot } from "hono/jsx/dom/client";
-import KemonoFriends3NewsSearch from "../islands/KemonoFriends3NewsSearch";
+import KemonoFriends3NewsSearch, {
+  INITIAL_LOADING_INDICATOR_ID,
+} from "../islands/KemonoFriends3NewsSearch";
 
 const createNews = (
   id: number,
@@ -150,7 +152,6 @@ describe("KemonoFriends3NewsSearch", () => {
     mockNewsApi({ news });
 
     mount();
-    expect(container.textContent).toContain("データを取得しています...");
     await waitForText("･ 25件");
     expect(container.querySelectorAll("li")).toHaveLength(20);
     expect(intersectionObservers).toHaveLength(1);
@@ -159,6 +160,21 @@ describe("KemonoFriends3NewsSearch", () => {
     intersectionObservers[0].trigger();
     await vi.waitFor(() => expect(container.querySelectorAll("li")).toHaveLength(25));
     expect(intersectionObservers[0].disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("Island外の初期スピナーをDOM置換せず取得完了後に非表示にする", async () => {
+    const indicator = document.createElement("div");
+    indicator.id = INITIAL_LOADING_INDICATOR_ID;
+    const spinner = document.createElement("div");
+    indicator.appendChild(spinner);
+    document.body.appendChild(indicator);
+    mockNewsApi({ news: [createNews(1)] });
+
+    mount();
+    await waitForText("･ 1件");
+
+    expect(indicator.hidden).toBe(true);
+    expect(indicator.firstElementChild).toBe(spinner);
   });
 
   it("検索時だけヒット件数を表示し、全件数は維持する", async () => {
@@ -583,10 +599,14 @@ describe("KemonoFriends3NewsSearch", () => {
       },
     },
   ])("$nameを利用者向けerror表示へ変換する", async ({ setup }) => {
+    const indicator = document.createElement("div");
+    indicator.id = INITIAL_LOADING_INDICATOR_ID;
+    document.body.appendChild(indicator);
     setup();
     mount();
 
     await waitForText("データの取得に失敗しました。");
+    expect(indicator.hidden).toBe(true);
     expect(container.querySelector('[role="alert"]')).not.toBeNull();
     expect(container.querySelectorAll("li")).toHaveLength(0);
   });

@@ -11,6 +11,12 @@ const STORAGE_KEYS = {
   isSearchVisible: "kf3notif:isSearchVisible",
 } as const;
 
+export const INITIAL_LOADING_INDICATOR_ID = "initial-loading-indicator";
+
+const hideInitialLoadingIndicator = () => {
+  document.getElementById(INITIAL_LOADING_INDICATOR_ID)?.setAttribute("hidden", "");
+};
+
 const NEWS_PAGE_SIZE = 20;
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const REFRESH_STALE_AFTER_MS = 5 * 60 * 1000;
@@ -436,6 +442,7 @@ const KemonoFriends3NewsSearch = () => {
         }
         if (!mountedRef.current || generationRef.current !== generation) return;
 
+        hideInitialLoadingIndicator();
         // 検索欄の表示状態を設定
         const savedSearchVisibility = localStorage.getItem(STORAGE_KEYS.isSearchVisible);
         if (savedSearchVisibility) setIsSearchVisible(savedSearchVisibility === "true");
@@ -455,6 +462,7 @@ const KemonoFriends3NewsSearch = () => {
         }
       } catch (error) {
         if (controller.signal.aborted || !mountedRef.current) return;
+        hideInitialLoadingIndicator();
         console.error("Failed to fetch news data:", error);
         setInitialErrorMessage("データの取得に失敗しました。\n時間を空けて再度お試しください。");
         setInitialLoadStatus("error");
@@ -606,262 +614,248 @@ const KemonoFriends3NewsSearch = () => {
     ? "text-gray-400"
     : "text-gray-700 hover:text-gray-900";
   return (
-    <div class="min-h-screen bg-yellow-400 px-4">
-      <div class="max-w-6xl mx-auto bg-white shadow-lg rounded-lg p-6 my-4">
-        {initialErrorMessage && (
-          <div
-            class="bg-red-100 text-red-700 px-4 py-3 rounded-lg relative flex items-center justify-center"
-            role="alert"
+    <div>
+      {initialErrorMessage && (
+        <div
+          class="bg-red-100 text-red-700 px-4 py-3 rounded-lg relative flex items-center justify-center"
+          role="alert"
+        >
+          <svg
+            class="w-6 h-6 mr-2 text-red-700 flex-shrink-0"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
           >
-            <svg
-              class="w-6 h-6 mr-2 text-red-700 flex-shrink-0"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="2"
-                d="M18.364 5.636l-12.728 12.728M5.636 5.636l12.728 12.728"
-              />
-            </svg>
-            <span class="block sm:inline">{initialErrorMessage}</span>
-          </div>
-        )}
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="2"
+              d="M18.364 5.636l-12.728 12.728M5.636 5.636l12.728 12.728"
+            />
+          </svg>
+          <span class="block sm:inline">{initialErrorMessage}</span>
+        </div>
+      )}
 
-        {newsPayload?.metadata.source === "archive-fallback" && (
-          <div class="mb-4 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-900">
-            <p role="status" aria-live="polite" aria-atomic="true">
-              公式データを利用できなかったため、保存済みアーカイブを表示しています。
-            </p>
-          </div>
-        )}
+      {newsPayload?.metadata.source === "archive-fallback" && (
+        <div class="mb-4 rounded-lg bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          <p role="status" aria-live="polite" aria-atomic="true">
+            公式データを利用できなかったため、保存済みアーカイブを表示しています。
+          </p>
+        </div>
+      )}
+
+      <div class={`space-y-2 ${isInitialLoading || !newsPayload ? "hidden" : ""}`}>
+        <button
+          type="button"
+          onClick={toggleSearchVisibility}
+          aria-expanded={isSearchVisible ? "true" : "false"}
+          aria-controls="news-search-options"
+          class={`w-full md:w-auto px-6 py-3 text-white font-medium rounded-lg transition-colors duration-200 flex items-center justify-center gap-2 focus:outline-none focus:ring-2 focus:ring-blue-700 focus:ring-offset-2 ${
+            isSearchVisible ? "bg-gray-500 hover:bg-gray-600" : "bg-blue-500 hover:bg-blue-600"
+          }`}
+        >
+          <svg
+            class={`w-5 h-5 transition-transform duration-200 ${isSearchVisible ? "rotate-180" : ""}`}
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+          </svg>
+          検索オプション
+        </button>
 
         <div
-          class={`flex justify-center items-center p-8 ${isInitialLoading && !initialErrorMessage ? "" : "hidden"}`}
+          id="news-search-options"
+          aria-hidden={isSearchVisible ? "false" : "true"}
+          class={`transition-all duration-300 ease-in-out overflow-hidden ${
+            isSearchVisible ? "max-h-screen opacity-100" : "max-h-0 opacity-0"
+          }`}
         >
-          <div class="w-8 h-8 border-4 border-blue-200 border-t-blue-500 rounded-full animate-spin"></div>
-          <span class="ml-4 text-gray-600 font-medium">データを取得しています...</span>
-        </div>
-
-        <div class={`space-y-2 ${isInitialLoading || !newsPayload ? "hidden" : ""}`}>
-          <button
-            type="button"
-            onClick={toggleSearchVisibility}
-            aria-expanded={isSearchVisible ? "true" : "false"}
-            aria-controls="news-search-options"
-            class={`w-full md:w-auto px-6 py-3 text-white font-medium rounded-lg transition-colors duration-200 flex items-center justify-center gap-2 focus:outline-none focus:ring-2 focus:ring-blue-700 focus:ring-offset-2 ${
-              isSearchVisible ? "bg-gray-500 hover:bg-gray-600" : "bg-blue-500 hover:bg-blue-600"
-            }`}
-          >
-            <svg
-              class={`w-5 h-5 transition-transform duration-200 ${isSearchVisible ? "rotate-180" : ""}`}
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="2"
-                d="M19 9l-7 7-7-7"
-              />
-            </svg>
-            検索オプション
-          </button>
-
-          <div
-            id="news-search-options"
-            aria-hidden={isSearchVisible ? "false" : "true"}
-            class={`transition-all duration-300 ease-in-out overflow-hidden ${
-              isSearchVisible ? "max-h-screen opacity-100" : "max-h-0 opacity-0"
-            }`}
-          >
-            {isSearchVisible && (
-              <div class="bg-white p-1 rounded-lg space-y-3">
-                <div class="flex flex-wrap items-center gap-4">
-                  <div class="flex items-center gap-2">
-                    <label
-                      class="text-sm font-medium text-gray-700 whitespace-nowrap"
-                      for="sortOrder"
+          {isSearchVisible && (
+            <div class="bg-white p-1 rounded-lg space-y-3">
+              <div class="flex flex-wrap items-center gap-4">
+                <div class="flex items-center gap-2">
+                  <label
+                    class="text-sm font-medium text-gray-700 whitespace-nowrap"
+                    for="sortOrder"
+                  >
+                    ソート順:
+                  </label>
+                  <div className="relative">
+                    <select
+                      id="sortOrder"
+                      value={sortOrder}
+                      onChange={handleSortOrderChange}
+                      className="w-full pl-4 pr-8 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
                     >
-                      ソート順:
-                    </label>
-                    <div className="relative">
-                      <select
-                        id="sortOrder"
-                        value={sortOrder}
-                        onChange={handleSortOrderChange}
-                        className="w-full pl-4 pr-8 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+                      <option value="desc">新しい順</option>
+                      <option value="asc">古い順</option>
+                    </select>
+                    <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none">
+                      <svg
+                        className="w-5 h-5 text-gray-500"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
                       >
-                        <option value="desc">新しい順</option>
-                        <option value="asc">古い順</option>
-                      </select>
-                      <div className="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none">
-                        <svg
-                          className="w-5 h-5 text-gray-500"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth="2"
-                            d="M19 9l-7 7-7-7"
-                          />
-                        </svg>
-                      </div>
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="2"
+                          d="M19 9l-7 7-7-7"
+                        />
+                      </svg>
                     </div>
                   </div>
                 </div>
+              </div>
 
-                <div className="space-y-2">
-                  <label className="block text-sm font-medium text-gray-700" for="news-keyword">
-                    キーワード検索:
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-gray-700" for="news-keyword">
+                  キーワード検索:
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    type="text"
+                    id="news-keyword"
+                    className="flex-1 min-w-[200px] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="(測定 or 掃除) 開催 -予告"
+                    value={searchKeyword}
+                    onChange={handleSearchChange}
+                    onKeyDown={handleKeyDown}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSearch}
+                    className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-700 focus:ring-offset-2"
+                  >
+                    検索
+                  </button>
+                </div>
+              </div>
+
+              <div class="space-y-2">
+                <span class="block text-sm font-medium text-gray-700">期間:</span>
+                <div class="flex flex-wrap items-center gap-2">
+                  <label for="startDate" class="sr-only">
+                    開始日
                   </label>
-                  <div className="flex flex-wrap gap-2">
-                    <input
-                      type="text"
-                      id="news-keyword"
-                      className="flex-1 min-w-[200px] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      placeholder="(測定 or 掃除) 開催 -予告"
-                      value={searchKeyword}
-                      onChange={handleSearchChange}
-                      onKeyDown={handleKeyDown}
-                    />
-                    <button
-                      type="button"
-                      onClick={handleSearch}
-                      className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-700 focus:ring-offset-2"
-                    >
-                      検索
-                    </button>
-                  </div>
-                </div>
-
-                <div class="space-y-2">
-                  <span class="block text-sm font-medium text-gray-700">期間:</span>
-                  <div class="flex flex-wrap items-center gap-2">
-                    <label for="startDate" class="sr-only">
-                      開始日
-                    </label>
-                    <input
-                      type="date"
-                      id="startDate"
-                      value={startDate}
-                      onChange={handleStartDateChange}
-                      class="px-4 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
-                    />
-                    <span class="text-gray-500" aria-hidden="true">
-                      ～
-                    </span>
-                    <label for="endDate" class="sr-only">
-                      終了日
-                    </label>
-                    <input
-                      type="date"
-                      id="endDate"
-                      value={endDate}
-                      onChange={handleEndDateChange}
-                      class="px-4 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-            {isSearchVisible && <div class="border-t border-gray-300 mt-4 mb-2"></div>}
-          </div>
-
-          <div class="flex items-center gap-3 mt-0">
-            {isKeywordSearchApplied && (
-              <span class={METADATA_TEXT_CLASS}>検索結果: {numberOfNews}件</span>
-            )}
-            {metadata && (
-              <div class="ml-auto flex items-center gap-1.5">
-                <span
-                  data-testid="news-metadata"
-                  data-refresh-status={refreshState.status}
-                  aria-busy={isRefreshing ? "true" : "false"}
-                  class="inline-flex items-center gap-1.5 whitespace-nowrap"
-                >
-                  <RefreshStatusIcon status={refreshState.status} />
-                  <span class={METADATA_TEXT_CLASS}>
-                    最終取得:{" "}
-                    {metadata.fetchedAt ? (
-                      <time dateTime={metadata.fetchedAt}>{lastFetchedText}</time>
-                    ) : (
-                      lastFetchedText
-                    )}
-                    {" ･ "}
-                    {totalNewsCount}件
+                  <input
+                    type="date"
+                    id="startDate"
+                    value={startDate}
+                    onChange={handleStartDateChange}
+                    class="px-4 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+                  />
+                  <span class="text-gray-500" aria-hidden="true">
+                    ～
                   </span>
-                </span>
-                <button
-                  type="button"
-                  data-testid="news-refresh-button"
-                  onClick={() => refreshNewsRef.current?.()}
-                  disabled={isRefreshDisabled}
-                  aria-label="お知らせを再取得"
-                  aria-describedby="news-refresh-status"
-                  title="お知らせを再取得"
-                  class={`inline-flex min-h-7 cursor-pointer items-center justify-center rounded p-1 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed ${refreshButtonClasses}`}
-                >
-                  <ReloadIcon />
-                </button>
+                  <label for="endDate" class="sr-only">
+                    終了日
+                  </label>
+                  <input
+                    type="date"
+                    id="endDate"
+                    value={endDate}
+                    onChange={handleEndDateChange}
+                    class="px-4 py-2 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+                  />
+                </div>
               </div>
-            )}
-            <span
-              id="news-refresh-status"
-              class="sr-only"
-              role="status"
-              aria-live="polite"
-              aria-atomic="true"
-            >
-              {refreshStatusMessage}
-            </span>
-          </div>
-
-          <ul class="space-y-4">
-            {newsData.map((news) => (
-              <li
-                key={news.targetUrl}
-                class="group bg-white hover:bg-blue-50 border border-gray-300 rounded-lg transition-all duration-200 hover:shadow-lg"
-              >
-                <a
-                  href={`https://kemono-friends-3.jp${news.targetUrl}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  class="block p-4"
-                >
-                  <div class="flex flex-wrap items-center gap-2 mb-2">
-                    <time class="text-sm text-gray-500">{news.newsDate.slice(0, 11)}</time>
-                    {getCategoryLabels(news.category).map((categoryLabel, categoryIndex) => (
-                      <span
-                        class={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${getCategoryLabelClass(categoryLabel, categoryIndex)}`}
-                        data-testid="news-category"
-                        key={`${categoryLabel}-${categoryIndex}`}
-                      >
-                        <span class="sr-only">分類: </span>
-                        {categoryLabel}
-                      </span>
-                    ))}
-                  </div>
-                  <p class="text-gray-800 group-hover:text-blue-600 transition-colors duration-200">
-                    {news.title}
-                  </p>
-                </a>
-              </li>
-            ))}
-          </ul>
-
-          {hasMoreNews && (
-            <div ref={loadMoreRef} class="flex justify-center py-4" role="status">
-              <span class="text-sm text-gray-500">お知らせを読み込んでいます...</span>
             </div>
           )}
+          {isSearchVisible && <div class="border-t border-gray-300 mt-4 mb-2"></div>}
         </div>
+
+        <div class="flex items-center gap-3 mt-0">
+          {isKeywordSearchApplied && (
+            <span class={METADATA_TEXT_CLASS}>検索結果: {numberOfNews}件</span>
+          )}
+          {metadata && (
+            <div class="ml-auto flex items-center gap-1.5">
+              <span
+                data-testid="news-metadata"
+                data-refresh-status={refreshState.status}
+                aria-busy={isRefreshing ? "true" : "false"}
+                class="inline-flex items-center gap-1.5 whitespace-nowrap"
+              >
+                <RefreshStatusIcon status={refreshState.status} />
+                <span class={METADATA_TEXT_CLASS}>
+                  最終取得:{" "}
+                  {metadata.fetchedAt ? (
+                    <time dateTime={metadata.fetchedAt}>{lastFetchedText}</time>
+                  ) : (
+                    lastFetchedText
+                  )}
+                  {" ･ "}
+                  {totalNewsCount}件
+                </span>
+              </span>
+              <button
+                type="button"
+                data-testid="news-refresh-button"
+                onClick={() => refreshNewsRef.current?.()}
+                disabled={isRefreshDisabled}
+                aria-label="お知らせを再取得"
+                aria-describedby="news-refresh-status"
+                title="お知らせを再取得"
+                class={`inline-flex min-h-7 cursor-pointer items-center justify-center rounded p-1 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed ${refreshButtonClasses}`}
+              >
+                <ReloadIcon />
+              </button>
+            </div>
+          )}
+          <span
+            id="news-refresh-status"
+            class="sr-only"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {refreshStatusMessage}
+          </span>
+        </div>
+
+        <ul class="space-y-4">
+          {newsData.map((news) => (
+            <li
+              key={news.targetUrl}
+              class="group bg-white hover:bg-blue-50 border border-gray-300 rounded-lg transition-all duration-200 hover:shadow-lg"
+            >
+              <a
+                href={`https://kemono-friends-3.jp${news.targetUrl}`}
+                target="_blank"
+                rel="noreferrer"
+                class="block p-4"
+              >
+                <div class="flex flex-wrap items-center gap-2 mb-2">
+                  <time class="text-sm text-gray-500">{news.newsDate.slice(0, 11)}</time>
+                  {getCategoryLabels(news.category).map((categoryLabel, categoryIndex) => (
+                    <span
+                      class={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${getCategoryLabelClass(categoryLabel, categoryIndex)}`}
+                      data-testid="news-category"
+                      key={`${categoryLabel}-${categoryIndex}`}
+                    >
+                      <span class="sr-only">分類: </span>
+                      {categoryLabel}
+                    </span>
+                  ))}
+                </div>
+                <p class="text-gray-800 group-hover:text-blue-600 transition-colors duration-200">
+                  {news.title}
+                </p>
+              </a>
+            </li>
+          ))}
+        </ul>
+
+        {hasMoreNews && (
+          <div ref={loadMoreRef} class="flex justify-center py-4" role="status">
+            <span class="text-sm text-gray-500">お知らせを読み込んでいます...</span>
+          </div>
+        )}
       </div>
     </div>
   );
