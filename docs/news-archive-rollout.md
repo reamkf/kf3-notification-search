@@ -4,7 +4,7 @@
 
 本番Workerは次の処理を提供する。
 
-- `GET /`はお知らせ取得を行わないSSR shellを返す。
+- `GET /`はStatic Assetsからお知らせ取得を行わないSSG済みshellを返す。
 - `GET /api/kf3-news`はKV snapshotを即時返却し、KV miss時はR2のcurrentまたはlegacy snapshotを投影する。
 - `POST /api/kf3-news/refresh`は公式データを取得、検証、mergeし、成功結果を表示用KVへ保存して`{news, metadata}`形式で200を返す。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、送信失敗でも200を返す。実行中は202、cooldownは429、依存障害は503を返す。
 - refreshはR2 CAS leaseと5分cooldownで制限し、Cloudflare Rate LimitingとWAFで公開routeを保護する。
@@ -23,7 +23,7 @@
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | 本番Worker               | 現HEADに対応するWorker versionへ反映され、`GET /`、GET、refresh、Queue consumer、scheduled fallbackが有効                                       |
 | Queue                    | `kf3-notif-archive-update`を作成済みで、producerとconsumerが本番Workerに設定され、batch size 1、concurrency 1である                             |
-| HTTP `/`                 | SSR shellだけを返し、レスポンス中にお知らせ配列を含まず、shell処理中にお知らせ取得を開始しない                                                  |
+| HTTP `/`                 | Static AssetsからSSG済みshellだけを返し、レスポンス中にお知らせ配列を含まず、Workerを起動しない                    |
 | HTTP GET                 | KV hitがR2と公式サーバーへアクセスせず、KV missがR2 currentまたはlegacyを投影して直接返し、KVへ書き戻さない                                     |
 | HTTP refresh             | 実行中は202、成功時は200と`{news, metadata}`を返し、KVへ同じ表示用データを保存する。merge差分またはcurrent未作成をQueueへ通知する               |
 | refresh制御              | 別refreshの実行中は202、5分cooldown中は429、依存障害は503を返し、無条件上書きを行わない                                                         |
@@ -58,7 +58,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 
 ## 受け入れ条件
 
-- [ ] `GET /`がお知らせ取得なしのSSR shellを返す。
+- [ ] `GET /`がStatic Assetsからお知らせ取得なしのSSG済みshellを返し、Workerを起動しない。
 - [ ] GETのKV hitがKVだけで完了する。
 - [ ] GETのKV missがR2 currentまたはlegacyだけを投影して直接返し、KVへの書き込み、公式取得、mergeを行わない。
 - [ ] refresh実行中が202と`Retry-After`を返し、成功時は200と`{news, metadata}`を返して表示用KVへ保存する。
@@ -105,7 +105,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 
 復元操作の具体的な手順は [お知らせアーカイブ条件付き復元runbook](./news-archive-restore-runbook.md) を参照する。
 
-- HTTP API、SSR shell、Worker export、refresh制御にregressionがある場合は、反映直前に記録した正常なWorker versionへ戻す。
+- HTTP API、SSG shell、Worker export、refresh制御にregressionがある場合は、反映直前に記録した正常なWorker versionへ戻す。
 - `archive/current.json`だけが不正な場合は、restore runbookに従ってaccount、snapshot digest、current ETagを確認してから復元する。
 - 条件不一致や復元競合では無条件上書きを行わず、最新のdry-runからやり直す。
 - R2から復元できない場合だけ、APIの読み込み先をlegacyデータへ戻すコード変更を検討する。

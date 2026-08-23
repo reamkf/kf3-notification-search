@@ -5,7 +5,8 @@ import { Link } from "honox/server";
 export default jsxRenderer(({ children, title }, c) => {
   const pageTitle = "けもフレ３おしらせ検索";
   const description = "けもフレ３のおしらせを検索できるサイトです。";
-  const ogImageUrl = new URL("/og-image.jpg", c.req.url).href;
+  const siteOrigin = import.meta.env.VITE_SITE_ORIGIN || new URL(c.req.url).origin;
+  const ogImageUrl = new URL("/og-image.jpg", siteOrigin).href;
   return (
     <html lang="ja">
       <head>

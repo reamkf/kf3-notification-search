@@ -17,7 +17,7 @@ Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 - 統合結果のソートとJSONシリアライズ
 - 日次backup、current更新、KV削除
 
-表示用GETのKV missでは公式取得を行わず、R2 snapshotを投影して直接返す。GETはR2の投影結果を表示用KVへ書き戻さない。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KVとrefresh制御metadataだけを更新し、ETag state、current、daily、monthlyを更新しない。merge差分がある場合またはcurrentが未作成の場合のQueue publishは表示用refreshの委譲であり、ETag stateや永続archiveの書き込みではない。
+表示用GETのKV missでは公式取得を行わず、R2 snapshotを投影する。投影したJSONを表示用KVへTTL付きでbest-effort保存し、同じ本文を直接返す。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KVとrefresh制御metadataだけを更新し、ETag state、current、daily、monthlyを更新しない。merge差分がある場合またはcurrentが未作成の場合のQueue publishは表示用refreshの委譲であり、ETag stateや永続archiveの書き込みではない。
 
 ## 設計方針
 
@@ -194,7 +194,7 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - stateとcurrentの不一致時に、公式変更を取り逃がさず完全処理へ戻る。
 - refreshが表示用KVだけを更新し、永続archiveと公式ETag stateへ影響を与えない。
 - 別refreshの実行中とlease失効は202、cooldownは429、依存処理の失敗は503へ変換する。
-- `GET /`のshell応答が公式サーバー、R2、KVへのお知らせ取得を開始しない。
+- `GET /`のStatic Assets応答が公式サーバー、R2、KVへのお知らせ取得を開始せず、Workerを起動しない。
 - GET、refresh、Queue consumer、scheduled fallbackのCPU時間を別invocationとして確認できる。
 - 復元apply後の次回Queue consumerまたはscheduled fallbackが完全処理になる。
 - Queue consumer、scheduled fallback、refreshを別々にWorkers Invocation Logsで計測できる。
@@ -206,7 +206,7 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - `app/news-archive.ts`: 公式取得結果の200、304分岐、stateの読み書き、current HEAD、scheduled 304経路
 - `app/server.ts`: 表示用GET、refresh、Queue publish、Queue consumer、R2 leaseと制御metadata、KV投影
 - `app/news-archive-queue.ts`: Queue messageの形式と検証
-- `app/routes/index.tsx`: お知らせ取得を行わないSSR shell
+- `app/routes/index.tsx`: お知らせ取得を行わないSSG shell
 - `app/islands/KemonoFriends3NewsSearch.tsx`: shell表示後のGET、refresh呼び出し
 - `app/__tests__/news-archive.test.ts`: state、条件付き取得、scheduled処理順、失敗経路のテスト
 - `app/__tests__/server.test.ts`: GETのKV hit/miss、refresh、Queue publish、Queue consumer、lease、cooldown、scheduled、heartbeatの回帰テスト

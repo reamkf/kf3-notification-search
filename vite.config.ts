@@ -3,13 +3,14 @@ import { defineConfig } from "vite";
 import adapter from "@hono/vite-dev-server/cloudflare";
 import build from "@hono/vite-build/cloudflare-workers";
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   server: {
     host: true,
     allowedHosts: true,
   },
   plugins: [
     honox({
+      entry: command === "serve" ? "./app/dev-server.ts" : "./app/server.ts",
       client: {
         input: ["/app/client.ts", "/app/style.css"],
       },
@@ -27,4 +28,4 @@ export default defineConfig({
   ssr: {
     external: ["dayjs"],
   },
-});
+}));

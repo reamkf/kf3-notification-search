@@ -1,7 +1,6 @@
 import type { ExportedHandler } from "@cloudflare/workers-types";
+import { Hono } from "hono";
 import type { Context } from "hono";
-import { createHono } from "honox/factory";
-import { createApp } from "honox/server";
 import {
   CURRENT_ARCHIVE_KEY,
   LEGACY_ARCHIVE_KEY,
@@ -246,8 +245,8 @@ const createRefreshBusyResponse = (
   });
 };
 
-const createNewsApp = (dependencies: ServerDependencies) => {
-  const baseApp = createHono();
+export const createNewsApp = (dependencies: ServerDependencies) => {
+  const baseApp = new Hono<{ Bindings: WorkerBindings; Variables: {} }>();
   const logger = dependencies.logger ?? defaultLogger;
 
   baseApp.on(["GET", "HEAD"], oldNewsPath, async (context) => {
@@ -470,21 +469,11 @@ const runArchiveUpdate = (
 
 export const createWorkerHandler = (
   dependencies: ServerDependencies = {},
-  options: { useHonoxApp?: boolean } = {},
 ): ExportedHandler<WorkerBindings, unknown> => {
-  const baseApp = createNewsApp(dependencies);
-  let app = baseApp;
-  let honoxInitialized = false;
-  const getApp = () => {
-    if (options.useHonoxApp && !honoxInitialized) {
-      app = createApp({ app: baseApp });
-      honoxInitialized = true;
-    }
-    return app;
-  };
+  const app = createNewsApp(dependencies);
   return {
     fetch: ((request, env, context) =>
-      getApp().fetch(
+      app.fetch(
         request as unknown as globalThis.Request,
         env,
         context as unknown as globalThis.ExecutionContext,
@@ -537,6 +526,6 @@ export const createWorkerHandler = (
   };
 };
 
-const worker = createWorkerHandler({}, { useHonoxApp: true });
+const worker = createWorkerHandler();
 
 export default worker;

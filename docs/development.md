@@ -96,7 +96,7 @@ bun run preview
 
 `bun run preview`のR2はローカルストレージである。本番bucketへ接続する`--remote`操作をローカル確認で使用しない。
 
-`GET /`はSSR shellだけを返す。ブラウザはshell表示後に`GET /api/kf3-news`を呼び、必要に応じて`POST /api/kf3-news/refresh`を別リクエストで呼ぶ。公式取得やmergeのCPU時間をshellへ持ち込まず、`waitUntil`で処理を継続しない。
+`GET /`はStatic AssetsからSSG済みshellを返す。ブラウザはshell表示後に`GET /api/kf3-news`を呼び、必要に応じて`POST /api/kf3-news/refresh`を別リクエストで呼ぶ。Workerを起動せず、公式取得やmergeのCPU時間をshellへ持ち込まない。
 
 ## scheduled handlerをローカルで確認
 
@@ -151,6 +151,12 @@ bun run lint
 bun run format:check
 bunx tsc --noEmit
 bun run build
+```
+
+SSGで生成するOG image URLを本番originへ固定する場合は、`VITE_SITE_ORIGIN`を指定してbuildする。
+
+```bash
+VITE_SITE_ORIGIN=https://<worker-host> bun run build
 ```
 
 全ゲートとローカルscheduled確認が成功し、導入状態ドキュメントの受け入れ条件を確認した後にdeployする。本番外部状態と受け入れ項目は [お知らせアーカイブ導入状態](./news-archive-rollout.md) を参照する。

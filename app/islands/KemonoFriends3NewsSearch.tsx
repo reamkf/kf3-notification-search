@@ -297,7 +297,7 @@ const KemonoFriends3NewsSearch = () => {
   const [sortOrder, setSortOrder] = useState("desc");
   const [isSearchVisible, setIsSearchVisible] = useState(false);
   const [startDate, setStartDate] = useState("2019-09-24");
-  const [endDate, setEndDate] = useState(getJapaneseDate());
+  const [endDate, setEndDate] = useState("");
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
@@ -422,6 +422,10 @@ const KemonoFriends3NewsSearch = () => {
   };
 
   refreshNewsRef.current = refreshNews;
+
+  useEffect(() => {
+    setEndDate(getJapaneseDate());
+  }, []);
 
   // コンポーネント初回レンダリング時にお知らせデータを取得
   useEffect(() => {

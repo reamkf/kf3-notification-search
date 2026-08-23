@@ -6,7 +6,7 @@
 
 | 実行主体           | 入口                                 | 主な責務                                                                    | 書き込み可能なデータ                                       |
 | ------------------ | ------------------------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| ページ表示         | `GET /`                              | お知らせ表示用のSSR shellを返す                                             | なし                                                       |
+| ページ表示         | `GET /`                              | Static Assetsからお知らせ表示用のSSG済みshellを返す                         | なし                                                       |
 | 表示データ取得     | `GET /api/kf3-news`                  | KVの表示用snapshotを返し、KV miss時はR2 snapshotを投影する                  | なし                                                       |
 | 表示データrefresh  | `POST /api/kf3-news/refresh`         | 公式データを取得、検証、mergeし、成功結果をKVへ保存してQueueへ通知する      | 表示用KV、refresh制御metadata、archive更新Queueへのpublish |
 | Queue consumer     | `kf3-notif-archive-update`           | messageを検証し、`updateNewsArchive(trigger=queue)`を別invocationで実行する | current、daily、monthly、公式ETag state                    |
@@ -49,13 +49,13 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分
 
 ### ページ表示とデータ取得の分離
 
-`GET /`はSSR shellだけを返し、お知らせデータを取得しない。ブラウザのお知らせ取得は、shell表示後に`GET /api/kf3-news`へ送る別のHTTPリクエストで行う。GETからrefreshをdispatchしたり、`waitUntil`で公式取得を継続したりしない。refreshが必要な場合は`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
+`GET /`はStatic AssetsからSSG済みshellを返し、お知らせデータを取得しない。Workerを起動せず、ブラウザのお知らせ取得はshell表示後に`GET /api/kf3-news`へ送る別のHTTPリクエストで行う。GETからrefreshをdispatchしたり、`waitUntil`で公式取得を継続したりしない。refreshが必要な場合は`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
 
 この分離により、shellの応答時間と公式取得、検証、mergeのCPU時間を別リクエストとして計測する。refresh実行中もGETは既存のKV snapshotを返し、refreshが成功するまで表示用KVを置き換えない。
 
 ## 利用者から見た共通の振る舞い
 
-- `GET /`はお知らせデータを含まないSSR shellを返す。
+- `GET /`はStatic Assetsからお知らせデータを含まないSSG済みshellを返す。
 - `GET /api/kf3-news`はKV snapshotを即時返却する。
 - GETのKV missでは、currentまたはlegacyのsnapshotをクライアント用配列へ投影して直接返す。表示用KVへの書き込み、公式取得、mergeは行わない。
 - `POST /api/kf3-news/refresh`の成功時は、公式側の更新を反映した配列と表示用metadataをKVへ保存し、`{news, metadata}`形式で返す。
