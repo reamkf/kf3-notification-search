@@ -24,6 +24,7 @@ const MAX_REFRESH_ATTEMPTS = 3;
 const DEFAULT_RETRY_AFTER_MS = 1_000;
 const REFRESH_TIMEOUT_MS = 15_000;
 const REFRESH_COOLDOWN_MS = 5 * 60_000;
+const SEARCH_OPTIONS_TRANSITION_MS = 300;
 const METADATA_TEXT_CLASS = "text-sm font-normal leading-5 text-gray-600";
 
 const CATEGORY_LABEL_CLASSES: Record<string, string> = {
@@ -296,6 +297,7 @@ const KemonoFriends3NewsSearch = () => {
   const [visibleNewsCount, setVisibleNewsCount] = useState(NEWS_PAGE_SIZE);
   const [sortOrder, setSortOrder] = useState("desc");
   const [isSearchVisible, setIsSearchVisible] = useState(false);
+  const [isSearchOptionsRendered, setIsSearchOptionsRendered] = useState(false);
   const [startDate, setStartDate] = useState("2019-09-24");
   const [endDate, setEndDate] = useState("");
   const loadMoreRef = useRef<HTMLDivElement>(null);
@@ -484,6 +486,19 @@ const KemonoFriends3NewsSearch = () => {
       retryTimerRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (isSearchVisible) {
+      setIsSearchOptionsRendered(true);
+      return;
+    }
+    if (!isSearchOptionsRendered) return;
+
+    const timer = setTimeout(() => {
+      setIsSearchOptionsRendered(false);
+    }, SEARCH_OPTIONS_TRANSITION_MS);
+    return () => clearTimeout(timer);
+  }, [isSearchVisible, isSearchOptionsRendered]);
 
   useEffect(() => {
     if (!newsPayload?.metadata.fetchedAt && refreshState.status !== "cooldown") return;
@@ -677,7 +692,7 @@ const KemonoFriends3NewsSearch = () => {
             isSearchVisible ? "max-h-screen opacity-100" : "max-h-0 opacity-0"
           }`}
         >
-          {isSearchVisible && (
+          {isSearchOptionsRendered && (
             <div class="bg-white p-1 rounded-lg space-y-3">
               <div class="flex flex-wrap items-center gap-4">
                 <div class="flex items-center gap-2">
@@ -770,7 +785,7 @@ const KemonoFriends3NewsSearch = () => {
               </div>
             </div>
           )}
-          {isSearchVisible && <div class="border-t border-gray-300 mt-4 mb-2"></div>}
+          {isSearchOptionsRendered && <div class="border-t border-gray-300 mt-4 mb-2"></div>}
         </div>
 
         <div class="flex items-center gap-3 mt-0">
