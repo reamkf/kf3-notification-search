@@ -886,13 +886,24 @@ export const updateNewsArchive = async (
       dailyBackupKey = backupKeys.dailyKey;
       await putDailyBackup(dependencies.backupBucket, dailyBackupKey, archive.text);
       updatedEtag = await putCurrentArchive(dependencies.dataBucket, archive, mergedJson);
-      try {
-        await dependencies.cache.delete(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY);
-        if (dependencies.invalidateDisplayCache !== false) {
-          await dependencies.cache.delete(NEWS_CACHE_KEY);
-        }
-      } catch (error) {
-        throw asArchiveError(error, "cache-delete", "お知らせキャッシュの削除に失敗しました");
+      const cacheDeletions = [
+        Promise.resolve().then(() => dependencies.cache.delete(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY)),
+      ];
+      if (dependencies.invalidateDisplayCache !== false) {
+        cacheDeletions.push(
+          Promise.resolve().then(() => dependencies.cache.delete(NEWS_CACHE_KEY)),
+        );
+      }
+      const deletionResults = await Promise.allSettled(cacheDeletions);
+      const failedDeletion = deletionResults.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failedDeletion) {
+        throw asArchiveError(
+          failedDeletion.reason,
+          "cache-delete",
+          "お知らせキャッシュの削除に失敗しました",
+        );
       }
     }
 

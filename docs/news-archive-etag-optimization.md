@@ -203,7 +203,7 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - refreshが表示用KVだけを更新し、永続archiveと公式ETag stateへ影響を与えない。
 - 別refreshの実行中とlease失効は202、cooldownは429、依存処理の失敗は503へ変換する。
 - `GET /`のStatic Assets応答が公式サーバー、R2、KVへのお知らせ取得を開始せず、Workerを起動しない。
-- GETのKV write-through失敗でもHTTP 200を維持し、`news_api_cache_write_failed`を記録できる。
+- GETのKV write-through後にcurrent ETagを再確認し、古いsnapshotを削除できる。writeまたは確認失敗でもHTTP 200を維持し、`news_api_cache_write_failed`を記録できる。
 - 304かつKV v2/current ETag一致時にR2 current本文の読み込み、JSON解析、検証、再projection、再シリアライズを行わない。
 - GET、refresh、Queue consumer、scheduled fallbackのCPU時間を別invocationとして確認できる。
 - 復元apply後の次回Queue consumerまたはscheduled fallbackが完全処理になる。

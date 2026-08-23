@@ -219,10 +219,11 @@ const restore = async (input: RestoreInput, env: RestoreBindings) => {
     );
   }
 
-  try {
-    await env.KF3_NOTIF_CACHE.delete(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY);
-    await env.KF3_NOTIF_CACHE.delete(cacheKey);
-  } catch {
+  const cacheDeletions = await Promise.allSettled([
+    Promise.resolve().then(() => env.KF3_NOTIF_CACHE.delete(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY)),
+    Promise.resolve().then(() => env.KF3_NOTIF_CACHE.delete(cacheKey)),
+  ]);
+  if (cacheDeletions.some((result) => result.status === "rejected")) {
     throw new RestoreError(
       502,
       "cache_delete_failed",

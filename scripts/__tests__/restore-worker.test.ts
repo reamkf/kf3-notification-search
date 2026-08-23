@@ -393,5 +393,12 @@ describe("operator-only復元tool", () => {
     expect(await readBody(response)).toMatchObject({
       error: { code: "cache_delete_failed", updatedEtag: "updated-etag" },
     });
+    expect(setup.calls).toEqual([
+      `backup:get:${snapshotKey}`,
+      `data:head:${CURRENT_ARCHIVE_KEY}`,
+      `data:put:${CURRENT_ARCHIVE_KEY}`,
+      `cache:delete:${NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY}`,
+      `cache:delete:${NEWS_CACHE_KEY}`,
+    ]);
   });
 });

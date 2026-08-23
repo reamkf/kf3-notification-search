@@ -60,8 +60,8 @@ merged結果用KVに値がない場合、GET専用KV `kf3-news-archive-snapshot`
 2. currentが存在しない場合だけlegacy `entries_merged_20241107.json`を読む。
 3. currentが存在するもののJSONまたは内容が不正な場合はlegacyへフォールバックせず、異常として扱う。
 4. 検証済みsnapshotをクライアント用配列へ投影し、JSON.stringifyを1回だけ実行する。
-5. 同じJSON文字列をGET専用KV `kf3-news-archive-snapshot`へTTL 300秒、metadata付きでbest-effort保存する。
-6. KV保存の成否にかかわらず、同じJSON文字列をHTTP 200本文へ返す。
+5. 同じJSON文字列をGET専用KV `kf3-news-archive-snapshot`へTTL 300秒、metadata付きでbest-effort保存する。保存後にcurrentのETagをHEADで再確認し、読み込み時と異なる場合は保存したsnapshotを削除する。
+6. KV保存または競合確認の成否にかかわらず、同じJSON文字列をHTTP 200本文へ返す。
 
 metadataは`version: 2`、`source: "archive-snapshot"`、`fetchedAt`、`baseArchiveEtag`、`newsCount`を含む。legacy snapshotでは`baseArchiveEtag`を`null`とする。
 
@@ -73,7 +73,7 @@ R2 snapshotを読み込めない場合、または保存用スキーマの検証
 }
 ```
 
-GETのR2 snapshot、KV読み込み、またはレスポンス生成の失敗は`news_api_error`として記録する。GETのwrite-through失敗はHTTP成功を維持し、`news_api_cache_write_failed`として記録する。GETは`news_api_fallback`を記録しない。refreshの失敗は`news_refresh_failed`として記録する。
+GETのR2 snapshot、KV読み込み、またはレスポンス生成の失敗は`news_api_error`として記録する。GETのwrite-throughまたは競合確認の失敗はHTTP成功を維持し、`news_api_cache_write_failed`として記録する。保存後の競合削除自体に失敗した場合は`news_api_cache_cleanup_failed`として記録する。GETは`news_api_fallback`を記録しない。refreshの失敗は`news_refresh_failed`として記録する。
 
 ## `POST /api/kf3-news/refresh`
 

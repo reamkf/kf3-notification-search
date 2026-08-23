@@ -367,6 +367,21 @@ describe("Worker API handler", () => {
     });
   });
 
+  it("snapshot保存後にcurrentが変わった場合はsnapshotを削除する", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      currentChangesOnCachePut: true,
+    });
+    const response = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(setup.cacheDeletes).toContain("kf3-news-archive-snapshot");
+    expect(setup.cacheValues.get("kf3-news-archive-snapshot")).toBeUndefined();
+  });
+
   it("merged cacheをarchive snapshot cacheより優先する", async () => {
     const setup = createBindings(null);
     setup.cacheValues.set("kf3-news", "merged-json");

@@ -964,6 +964,7 @@ describe("アーカイブ更新トランザクション", () => {
       `backup:put:${expectedDailyKey}`,
       `data:put:${CURRENT_ARCHIVE_KEY}`,
       "cache:delete:kf3-news-archive-snapshot",
+      "cache:delete:kf3-news",
     ]);
     expect(setup.logger.errors[0]).toMatchObject({ stage: "cache-delete" });
   });

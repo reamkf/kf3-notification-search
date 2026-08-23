@@ -83,7 +83,7 @@ flowchart TD
 7. 内容変更がある場合だけ、統合結果を`newsDate`の降順、同時刻の場合は`id`の降順で決定的にソートし、JSONを1回だけシリアライズする。オブジェクトのキーは再帰的に並べ替えず、SHA-256 digestも計算しない。
 8. 内容変更がある場合、更新前のarchiveの元のバイト列を`If-None-Match: *`の条件付きPUTで日次backupへ新規作成する。
 9. 読み込み時のETagを条件に`archive/current.json`を更新する。初回作成時は、currentが存在しないことを条件にする。
-10. `invalidateDisplayCache`が有効なscheduledまたはmanual更新では、current更新成功後にKVの`kf3-news`を削除する。Queue consumerはrefresh由来の表示KVを維持する。
+10. current更新成功後はGET専用snapshot KVを削除する。`invalidateDisplayCache`が有効なscheduledまたはmanual更新ではKVの`kf3-news`も削除し、Queue consumerはrefresh由来のmerged KVを維持する。
 11. 当月の月次backupを条件付きで新規作成する。すでに存在する場合は内容を再取得しない。条件不一致の場合は既存として扱い、本文を取得しない。
 12. 200経路ではmonthly完了後に、公式strong ETagと確定済みcurrentのR2 raw ETagをstateへCAS保存する。state保存の失敗・競合でarchiveを巻き戻さず、結果の`etagStateStatus`へ反映して処理結果を構造化ログへ記録する。
 
@@ -179,21 +179,22 @@ heartbeatはHTTP POSTで送信する。ping URLの末尾の`/`は取り除いて
 
 主な構造化ログイベントは次のとおり。
 
-| イベント                             | 意味                                             |
-| ------------------------------------ | ------------------------------------------------ |
-| `news_archive_update`                | scheduledまたはqueueの更新が完了した             |
-| `news_archive_update_failed`         | scheduledまたはqueueの更新がいずれかで失敗した   |
-| `news_archive_update_queued`         | refreshがQueueへ更新messageを送信した            |
-| `news_archive_update_enqueue_failed` | refreshのQueue送信に失敗した                     |
-| `news_archive_queue_succeeded`       | Queue messageの更新処理とackが完了した           |
-| `news_archive_queue_failed`          | Queue messageの更新処理に失敗しretryした         |
-| `news_archive_queue_invalid_message` | 不正なQueue messageを更新せずackした             |
-| `news_archive_heartbeat_failed`      | scheduledのheartbeat送信に失敗した               |
-| `news_api_error`                     | GETがレスポンスを構築できなかった                |
-| `news_api_cache_write_failed`        | GETのwrite-throughに失敗したがHTTP 200を維持した |
-| `news_refresh_failed`                | refreshの依存処理または検証に失敗した            |
-| `news_refresh_cache_cleanup_failed`  | current競合後の表示用KV削除に失敗した            |
-| `news_refresh_succeeded`             | refreshが表示用KVを更新した                      |
+| イベント                             | 意味                                                           |
+| ------------------------------------ | -------------------------------------------------------------- |
+| `news_archive_update`                | scheduledまたはqueueの更新が完了した                           |
+| `news_archive_update_failed`         | scheduledまたはqueueの更新がいずれかで失敗した                 |
+| `news_archive_update_queued`         | refreshがQueueへ更新messageを送信した                          |
+| `news_archive_update_enqueue_failed` | refreshのQueue送信に失敗した                                   |
+| `news_archive_queue_succeeded`       | Queue messageの更新処理とackが完了した                         |
+| `news_archive_queue_failed`          | Queue messageの更新処理に失敗しretryした                       |
+| `news_archive_queue_invalid_message` | 不正なQueue messageを更新せずackした                           |
+| `news_archive_heartbeat_failed`      | scheduledのheartbeat送信に失敗した                             |
+| `news_api_error`                     | GETがレスポンスを構築できなかった                              |
+| `news_api_cache_write_failed`        | GETのwrite-throughまたは競合確認に失敗したがHTTP 200を維持した |
+| `news_api_cache_cleanup_failed`      | GETの競合後snapshot削除に失敗した                              |
+| `news_refresh_failed`                | refreshの依存処理または検証に失敗した                          |
+| `news_refresh_cache_cleanup_failed`  | current競合後の表示用KV削除に失敗した                          |
+| `news_refresh_succeeded`             | refreshが表示用KVを更新した                                    |
 
 GETのKV missはarchive snapshotを投影してwrite-throughするが、公式取得失敗によるfallbackログを記録しない。write-throughだけに失敗した場合は`news_api_cache_write_failed`を記録してHTTP 200を維持する。refreshの公式取得失敗、leaseまたはcooldownによる拒否は`news_refresh_failed`として記録し、scheduledまたはqueueのarchive更新失敗と区別する。Queue送信失敗は`news_archive_update_enqueue_failed`として記録するが、refresh成功を失敗へ変換しない。refresh成功は`news_refresh_succeeded`として記録する。
 

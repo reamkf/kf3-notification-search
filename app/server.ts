@@ -311,17 +311,34 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         snapshot.archive.etag,
         archiveCount,
       );
+      let snapshotWasWritten = false;
       try {
         await context.env.KF3_NOTIF_CACHE.put(archiveSnapshotCacheKey, responseJson, {
           expirationTtl: normalCacheTtl,
           metadata,
         });
+        snapshotWasWritten = true;
+        const current = await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY);
+        if ((snapshot.archive.etag ?? null) !== (current?.etag ?? null)) {
+          await context.env.KF3_NOTIF_CACHE.delete(archiveSnapshotCacheKey);
+        }
       } catch (error) {
         logger.error({
           event: "news_api_cache_write_failed",
           originalError: serializeArchiveErrorForLog(error),
           archiveCount,
         });
+        if (snapshotWasWritten) {
+          try {
+            await context.env.KF3_NOTIF_CACHE.delete(archiveSnapshotCacheKey);
+          } catch (cleanupError) {
+            logger.error({
+              event: "news_api_cache_cleanup_failed",
+              originalError: serializeArchiveErrorForLog(cleanupError),
+              archiveCount,
+            });
+          }
+        }
       }
       return createJsonResponse(responseJson, metadata);
     } catch (error) {
