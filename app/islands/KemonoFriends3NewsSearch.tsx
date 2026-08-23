@@ -645,7 +645,7 @@ const KemonoFriends3NewsSearch = () => {
           <span class="ml-4 text-gray-600 font-medium">データを取得しています...</span>
         </div>
 
-        <div class={`space-y-3 ${isInitialLoading || !newsPayload ? "hidden" : ""}`}>
+        <div class={`space-y-2 ${isInitialLoading || !newsPayload ? "hidden" : ""}`}>
           <button
             type="button"
             onClick={toggleSearchVisibility}
@@ -771,7 +771,7 @@ const KemonoFriends3NewsSearch = () => {
                 </div>
               </div>
             )}
-            {isSearchVisible && <div class="border-t border-gray-300 my-4"></div>}
+            {isSearchVisible && <div class="border-t border-gray-300 mt-4 mb-2"></div>}
           </div>
 
           <div class="flex items-center gap-3 mt-0">
