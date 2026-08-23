@@ -26,7 +26,7 @@
 
 ### 表示データと永続アーカイブの違い
 
-表示用KVは、refreshが正常完了した表示用配列のsnapshotを保持する。`GET /api/kf3-news`はこのsnapshotを読み、KVにない場合だけ`archive/current.json`またはlegacy objectを読み込んでクライアント用配列へ投影する。GETは投影したJSONを表示用KVへTTL 300秒でbest-effort保存するが、公式サーバーからの取得やアーカイブとのmergeは行わない。
+表示用KV `kf3-news`は、refreshが正常完了した表示用配列のsnapshotを保持する。`GET /api/kf3-news`はこのsnapshotを最優先で読み、値がない場合はGET専用KV `kf3-news-archive-snapshot`を読む。両方にない場合だけ`archive/current.json`またはlegacy objectを読み込んでクライアント用配列へ投影し、GET専用KVへTTL 300秒でbest-effort保存する。GETは公式サーバーからの取得やアーカイブとのmergeを行わない。
 
 `POST /api/kf3-news/refresh`は表示用データを最新化する公開操作である。R2のCAS leaseと5分cooldownで同時実行と連続実行を制限し、leaseを取得した要求だけが公式データの取得、検証、mergeを行う。KV finalization前に同じtokenのleaseをCASで5分間へ延長し、成功した結果を表示用KVへ保存して`{news, metadata}`形式でレスポンス本文へ返す。
 
@@ -34,16 +34,17 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分
 
 ### 共有データの読み書き責務
 
-| データ                                | GET `/api/kf3-news`                         | POST `/api/kf3-news/refresh`            | Queue consumer                    | scheduled fallback                | restore                 |
-| ------------------------------------- | ------------------------------------------- | --------------------------------------- | --------------------------------- | --------------------------------- | ----------------------- |
-| `archive/current.json`                | 読み込み、snapshot投影                      | 読み込み、mergeの入力                   | 検証してETag条件付き更新          | 検証してETag条件付き更新          | applyで条件付き置換     |
-| `archive/official-fetch-state.json`   | 触れない                                    | 変更しない                              | 条件付き取得の結果を保存          | 条件付き取得の結果を保存          | 変更しない              |
-| `daily/...`                           | 触れない                                    | 触れない                                | current更新直前の元バイト列を保存 | current更新直前の元バイト列を保存 | 読み込みのみ            |
-| `monthly/...`                         | 触れない                                    | 触れない                                | 月最初の正常状態を保存            | 月最初の正常状態を保存            | 読み込みのみ            |
-| `KF3_NOTIF_CACHE/kf3-news`            | snapshotを読み、miss時はR2からwrite-through | 成功結果を保存                          | refresh由来のsnapshotを維持       | current更新成功後に削除           | current更新成功後に削除 |
-| refresh制御metadata                   | 触れない                                    | CAS leaseとcooldownを更新               | 触れない                          | 触れない                          | 触れない                |
-| `kf3-notif-archive-update` Queue      | 触れない                                    | merge差分またはcurrent未作成時にpublish | messageをconsume                  | 触れない                          | 触れない                |
-| legacy `entries_merged_20241107.json` | currentがない場合の読み込み元               | currentがない場合のmerge入力            | currentがない初回移行の入力       | currentがない初回移行の入力       | 入力対象外              |
+| データ                                      | GET `/api/kf3-news`                           | POST `/api/kf3-news/refresh`            | Queue consumer                    | scheduled fallback                | restore                 |
+| ------------------------------------------- | --------------------------------------------- | --------------------------------------- | --------------------------------- | --------------------------------- | ----------------------- |
+| `archive/current.json`                      | 読み込み、snapshot投影                        | 読み込み、mergeの入力                   | 検証してETag条件付き更新          | 検証してETag条件付き更新          | applyで条件付き置換     |
+| `archive/official-fetch-state.json`         | 触れない                                      | 変更しない                              | 条件付き取得の結果を保存          | 条件付き取得の結果を保存          | 変更しない              |
+| `daily/...`                                 | 触れない                                      | 触れない                                | current更新直前の元バイト列を保存 | current更新直前の元バイト列を保存 | 読み込みのみ            |
+| `monthly/...`                               | 触れない                                      | 触れない                                | 月最初の正常状態を保存            | 月最初の正常状態を保存            | 読み込みのみ            |
+| `KF3_NOTIF_CACHE/kf3-news`                  | merged snapshotを最優先で読む                 | 成功結果を保存                          | refresh由来のsnapshotを維持       | current更新成功後に削除           | current更新成功後に削除 |
+| `KF3_NOTIF_CACHE/kf3-news-archive-snapshot` | GET missのsnapshotを読む、またはwrite-through | 触れない                                | 触れない                          | 触れない                          | 触れない                |
+| refresh制御metadata                         | 触れない                                      | CAS leaseとcooldownを更新               | 触れない                          | 触れない                          | 触れない                |
+| `kf3-notif-archive-update` Queue            | 触れない                                      | merge差分またはcurrent未作成時にpublish | messageをconsume                  | 触れない                          | 触れない                |
+| legacy `entries_merged_20241107.json`       | currentがない場合の読み込み元                 | currentがない場合のmerge入力            | currentがない初回移行の入力       | currentがない初回移行の入力       | 入力対象外              |
 
 `archive/current.json`が存在しない場合だけlegacyデータを読み込む。currentが存在するもののJSONまたは内容が不正な場合はlegacyへフォールバックせず、異常として扱う。refreshのmerge入力でもこの境界を維持する。
 
@@ -57,7 +58,7 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分
 
 - `GET /`はStatic Assetsからお知らせデータを含まないSSG済みshellを返す。
 - `GET /api/kf3-news`はKV snapshotを即時返却する。
-- GETのKV missでは、currentまたはlegacyのsnapshotをクライアント用配列へ投影し、同じJSONをTTL 300秒で表示用KVへbest-effort保存して返す。公式取得とmergeは行わない。KV write-throughが失敗してもHTTP 200を維持する。
+- GETの両KV missでは、currentまたはlegacyのsnapshotをクライアント用配列へ投影し、同じJSONをTTL 300秒で`kf3-news-archive-snapshot`へbest-effort保存して返す。公式取得とmergeは行わない。KV write-throughが失敗してもHTTP 200を維持する。
 - `POST /api/kf3-news/refresh`の成功時は、公式側の更新を反映したJSONとversion 2の表示用metadataをKVへ保存し、`{news, metadata}`形式で返す。304でcurrent ETagとKV metadataが一致する場合は、保存済みJSONを再利用する。
 - 公式サイトからお知らせが削除されても、Queue consumerまたはscheduled fallbackでcurrentへ保存済みの項目は残る。
 - 同じIDのお知らせが公式側で更新された場合、Queue consumer、scheduled fallback、またはrefreshのmergeでは公式側の内容を優先する。

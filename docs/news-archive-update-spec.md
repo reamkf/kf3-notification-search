@@ -4,7 +4,7 @@
 
 本書は、`updateNewsArchive`を実行するQueue consumerとscheduled handlerの共通仕様を定義する。Queue consumerはrefreshが検出したmerge差分またはcurrent未作成を契機に別invocationで実行し、scheduled handlerはQueueが届かない場合にも更新を実行できる03:15 JSTのfallbackである。どちらも公式データを検証して累積archiveの正しさを確定し、必要なbackupと公式ETag stateを保存する。
 
-`GET /`はStatic AssetsからSSG済みshellを返し、`GET /api/kf3-news`はKVまたはR2 snapshotを返す。GETのR2投影結果は表示用KVへbest-effortで書き戻す。`POST /api/kf3-news/refresh`は表示用KVを更新し、merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知するが、archive、backup、公式ETag stateを変更しない。refresh、Queue consumer、scheduled handlerは別invocationとして扱い、`waitUntil`で処理を継続しない。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [お知らせ機能共通仕様](./news-spec.md)、表示APIは [お知らせページリクエスト仕様](./news-page-request-spec.md) を参照する。
+`GET /`はStatic AssetsからSSG済みshellを返し、`GET /api/kf3-news`はmerged結果用KV、GET専用snapshot KV、またはR2 snapshotを返す。GETのR2投影結果はGET専用KVへbest-effortで書き戻す。`POST /api/kf3-news/refresh`は表示用KVを更新し、merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知するが、archive、backup、公式ETag stateを変更しない。refresh、Queue consumer、scheduled handlerは別invocationとして扱い、`waitUntil`で処理を継続しない。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [お知らせ機能共通仕様](./news-spec.md)、表示APIは [お知らせページリクエスト仕様](./news-page-request-spec.md) を参照する。
 
 ## 実行時刻と更新対象
 

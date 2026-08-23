@@ -17,13 +17,13 @@ Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 - 統合結果のソートとJSONシリアライズ
 - 日次backup、current更新、KV削除
 
-表示用GETのKV missでは公式取得を行わず、R2 snapshotを投影する。投影したJSONを表示用KVへTTL付きでbest-effort保存し、同じ本文を直接返す。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KVとrefresh制御metadataだけを更新し、ETag state、current、daily、monthlyを更新しない。merge差分がある場合またはcurrentが未作成の場合のQueue publishは表示用refreshの委譲であり、ETag stateや永続archiveの書き込みではない。
+表示用GETの両KV missでは公式取得を行わず、R2 snapshotを投影する。投影したJSONをGET専用KV `kf3-news-archive-snapshot`へTTL付きでbest-effort保存し、同じ本文を直接返す。merged結果用KVを最優先し、GET専用KVの保存がmerged結果用KVを上書きすることはない。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KVとrefresh制御metadataだけを更新し、ETag state、current、daily、monthlyを更新しない。merge差分がある場合またはcurrentが未作成の場合のQueue publishは表示用refreshの委譲であり、ETag stateや永続archiveの書き込みではない。
 
 ### refreshの304 fast path
 
 1. refreshは保存済みstateとcurrent HEADのETagが対応する場合だけ公式へ`If-None-Match`を送る。
 2. 公式が304を返したら、表示用KV `kf3-news`をmetadata付きで読む。
-3. metadataがv2で、`baseArchiveEtag`が現在のcurrent ETagと一致し、valueが存在する場合はvalueをclient JSONとして再利用する。
+3. metadataがv2で、`baseArchiveEtag`が現在のcurrent ETagと一致し、valueが存在する場合はvalueをclient JSONとして再利用する。変更を含むmerge結果やcurrent未作成の結果は`baseArchiveEtag`が`null`となるため再利用しない。
 4. 一致しない場合、v1、metadata欠落、value欠落の場合は`readCurrentArchiveDocumentIfEtag`へfallbackし、従来どおりR2本文を検証して投影する。
 5. 再利用したJSONも通常のrefresh finalizationでTTL 300秒、`fetchedAt`、`newsCount`を更新保存する。HTTP本文は同じJSONを`{news, metadata}`へ埋め込む。
 

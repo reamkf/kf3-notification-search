@@ -354,7 +354,7 @@ describe("Worker API handler", () => {
     expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
     expect(setup.cachePuts).toHaveLength(1);
     expect(setup.cachePuts[0]).toMatchObject({
-      key: "kf3-news",
+      key: "kf3-news-archive-snapshot",
       value: responseText,
       expirationTtl: 300,
       metadata: {
@@ -365,6 +365,43 @@ describe("Worker API handler", () => {
         newsCount: 2,
       },
     });
+  });
+
+  it("merged cacheをarchive snapshot cacheより優先する", async () => {
+    const setup = createBindings(null);
+    setup.cacheValues.set("kf3-news", "merged-json");
+    setup.cacheValues.set("kf3-news-archive-snapshot", "archive-json");
+
+    const response = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("merged-json");
+    expect(setup.dataGets).toEqual([]);
+    expect(setup.cachePuts).toEqual([]);
+  });
+
+  it("archive snapshot cache hitはR2へアクセスせず返す", async () => {
+    const setup = createBindings(null);
+    setup.cacheValues.set("kf3-news-archive-snapshot", "archive-json");
+    setup.cacheMetadata.set(
+      "kf3-news-archive-snapshot",
+      createNewsCacheMetadata("archive-snapshot", "2026-08-09T12:34:56.789Z", null, 1),
+    );
+
+    const response = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("archive-json");
+    expect(setup.dataGets).toEqual([]);
+    expect(setup.cachePuts).toEqual([]);
   });
 
   it("cache missのKV write失敗でもHTTP 200を維持する", async () => {
@@ -548,12 +585,7 @@ describe("Worker API handler", () => {
     expect(payload.news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
     expect(payload.news[0].category).toBe("refresh");
     expect(payload.metadata).toEqual(
-      createNewsCacheMetadata(
-        "merged",
-        "2026-08-09T12:34:56.789Z",
-        "current-etag",
-        MIN_OFFICIAL_ENTRY_COUNT,
-      ),
+      createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z", null, MIN_OFFICIAL_ENTRY_COUNT),
     );
     expect(response.headers.get("X-KF3-News-Source")).toBe("merged");
     expect(response.headers.get("cache-control")).toBe("no-store");

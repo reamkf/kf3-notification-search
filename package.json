@@ -12,6 +12,7 @@
     "deploy": "$npm_execpath run build && wrangler deploy",
     "test": "bun run test:unit && bun run test:worker",
     "test:e2e": "playwright test",
+    "test:e2e:preview": "playwright test --config playwright.preview.config.ts",
     "test:unit": "vitest run",
     "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:watch": "vitest",

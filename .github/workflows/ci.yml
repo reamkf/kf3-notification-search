@@ -78,6 +78,8 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      VITE_SITE_ORIGIN: https://example.com
 
     steps:
       - name: Check out repository
@@ -113,3 +115,6 @@ jobs:
 
       - name: Run E2E tests
         run: bun run test:e2e
+
+      - name: Run Static Assets E2E test
+        run: bun run test:e2e:preview

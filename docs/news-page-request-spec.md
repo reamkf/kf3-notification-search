@@ -16,7 +16,7 @@
 
 ### 成功レスポンス
 
-`GET /api/kf3-news`の成功レスポンスはトップレベルのJSON配列とする。KV miss時はR2 snapshotの投影結果を同じ配列形式でKVへwrite-throughし、同じJSON文字列を直接返す。
+`GET /api/kf3-news`の成功レスポンスはトップレベルのJSON配列とする。まずmerged結果用KV `kf3-news`を読み、値がない場合はGET専用のsnapshot KV `kf3-news-archive-snapshot`を読み込む。両方に値がない場合はR2 snapshotの投影結果をsnapshot KVへwrite-throughし、同じJSON文字列を直接返す。
 
 ```json
 [
@@ -48,15 +48,19 @@ APIはsnapshotの入力順を維持して返す。日付順への並べ替えは
 
 KV hitから公式データ取得の失敗や`archive-fallback`を推測してはならない。
 
+### archive snapshot KV hit
+
+merged結果用KVに値がない場合、GET専用KV `kf3-news-archive-snapshot`に値があればR2へアクセスせず、そのJSONを返す。metadataはレスポンスヘッダーへ投影する。merged結果用KVを上書きしないため、遅延したGETのsnapshot保存がrefresh結果を置き換えることはない。
+
 ### KV miss
 
-KVに値がない場合は、公式データを取得せず、R2のsnapshotをクライアント用配列へ投影する。
+両方の表示用KVに値がない場合は、公式データを取得せず、R2のsnapshotをクライアント用配列へ投影する。
 
 1. `archive/current.json`を読み、保存用スキーマを検証する。
 2. currentが存在しない場合だけlegacy `entries_merged_20241107.json`を読む。
 3. currentが存在するもののJSONまたは内容が不正な場合はlegacyへフォールバックせず、異常として扱う。
 4. 検証済みsnapshotをクライアント用配列へ投影し、JSON.stringifyを1回だけ実行する。
-5. 同じJSON文字列を表示用KV `kf3-news`へTTL 300秒、metadata付きでbest-effort保存する。
+5. 同じJSON文字列をGET専用KV `kf3-news-archive-snapshot`へTTL 300秒、metadata付きでbest-effort保存する。
 6. KV保存の成否にかかわらず、同じJSON文字列をHTTP 200本文へ返す。
 
 metadataは`version: 2`、`source: "archive-snapshot"`、`fetchedAt`、`baseArchiveEtag`、`newsCount`を含む。legacy snapshotでは`baseArchiveEtag`を`null`とする。
@@ -135,7 +139,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 3. 公式データの新規または変更項目を検証し、IDをキーにsnapshotとmergeする。同じIDには公式データを採用し、snapshotにだけ存在するIDは残す。
 4. 統合結果をクライアント用配列へ投影し、JSON.stringifyを1回だけ実行して`clientJson`を作る。304 fast pathでは既存KVのJSON文字列を`clientJson`としてそのまま使う。
 5. 同じtokenのrefresh leaseをCASで5分間へ延長し、KV finalization中に別refreshがleaseを取得できないようにする。延長できない場合はKVへ書き込まず202を返す。
-6. 表示用KV `kf3-news`へ`clientJson`をTTL 300秒で保存し、metadataの`version`を2、`source`を`merged`、`fetchedAt`をrefresh成功時刻、`baseArchiveEtag`をcurrent ETag、`newsCount`を配列件数として記録する。
+6. 表示用KV `kf3-news`へ`clientJson`をTTL 300秒で保存し、metadataの`version`を2、`source`を`merged`、`fetchedAt`をrefresh成功時刻、`newsCount`を配列件数として記録する。統合結果がcurrentの正確な投影である場合だけ`baseArchiveEtag`へcurrent ETagを記録し、それ以外は`null`とする。
 7. KV保存後にcurrent ETagとrefresh leaseを再確認する。archive更新と競合していた場合は保存したKVを削除し、Queueへ通知せず503を返す。leaseが失効または別tokenへ移行していた場合は、次refreshのKVを削除しないよう共有キーを変更せず202を返す。
 8. refresh leaseを成功として完了する。完了時にtoken不一致となった場合も共有KVを削除せず202を返す。
 9. merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへmessageをpublishする。送信失敗はログへ記録するが、KV保存を取り消さずHTTP 200を返す。

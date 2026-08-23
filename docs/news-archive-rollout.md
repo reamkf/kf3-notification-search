@@ -5,7 +5,7 @@
 本番Workerは次の処理を提供する。
 
 - `GET /`はStatic Assetsからお知らせ取得を行わないSSG済みshellを返す。
-- `GET /api/kf3-news`はKV snapshotを即時返却し、KV miss時はR2のcurrentまたはlegacy snapshotを投影して同じJSONを表示用KVへwrite-throughする。
+- `GET /api/kf3-news`はmerged結果用KVを最優先し、値がない場合はGET専用snapshot KVを返す。両方のKV miss時はR2のcurrentまたはlegacy snapshotを投影してGET専用KVへwrite-throughする。
 - `POST /api/kf3-news/refresh`は公式データを取得、検証、mergeし、成功結果を表示用KVへ保存して`{news, metadata}`形式で200を返す。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、送信失敗でも200を返す。実行中は202、cooldownは429、依存障害は503を返す。
 - refreshはR2 CAS leaseと5分cooldownで制限し、Cloudflare Rate LimitingとWAFで公開routeを保護する。
 - refresh invocation自身は表示用KVとrefresh制御metadataだけを変更し、current、daily、monthly、公式ETag stateを書き込まない。
@@ -24,7 +24,7 @@
 | 本番Worker               | 現HEADに対応するWorker versionへ反映され、`GET /`、GET、refresh、Queue consumer、scheduled fallbackが有効                                                                                         |
 | Queue                    | `kf3-notif-archive-update`を作成済みで、producerとconsumerが本番Workerに設定され、batch size 1、concurrency 1である                                                                               |
 | HTTP `/`                 | Static AssetsからSSG済みshellだけを返し、レスポンス中にお知らせ配列を含まず、Workerを起動しない                                                                                                   |
-| HTTP GET                 | KV hitがR2と公式サーバーへアクセスせず、KV missがR2 currentまたはlegacyを投影して同じJSONをKVへwrite-throughする。write失敗でも200を維持する                                                      |
+| HTTP GET                 | merged KVを最優先し、次にGET専用snapshot KVを読む。両方のmiss時はR2 currentまたはlegacyを投影してsnapshot KVへwrite-throughし、write失敗でも200を維持する                                         |
 | HTTP refresh             | 実行中は202、成功時は200と`{news, metadata}`を返し、KVへ同じ表示用データを保存する。304かつKV v2/current ETag一致時はcurrent本文を読まず再利用する。merge差分またはcurrent未作成をQueueへ通知する |
 | refresh制御              | 別refreshの実行中は202、5分cooldown中は429、依存障害は503を返し、無条件上書きを行わない                                                                                                           |
 | refresh書き込み境界      | refresh invocation自身はcurrent、daily、monthly、公式ETag stateを書き込まない。Queue送信失敗でも200を返す                                                                                         |
@@ -60,7 +60,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 
 - [ ] `GET /`がStatic Assetsからお知らせ取得なしのSSG済みshellを返し、Workerを起動しない。
 - [ ] GETのKV hitがKVだけで完了する。
-- [ ] GETのKV missがR2 currentまたはlegacyを投影し、同じJSONをTTL 300秒でKVへwrite-throughする。write失敗でも200を維持し、公式取得とmergeを行わない。
+- [ ] merged KVとGET専用snapshot KVの両方がmissした場合、R2 currentまたはlegacyを投影し、同じJSONをTTL 300秒でsnapshot KVへwrite-throughする。write失敗でも200を維持し、公式取得とmergeを行わない。
 - [ ] refresh実行中が202と`Retry-After`を返し、成功時は200と`{news, metadata}`を返して表示用KVへ保存する。
 - [ ] refreshのcooldownが429と`Retry-After`を返す。
 - [ ] KV finalization前に同じtokenのrefresh leaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す。

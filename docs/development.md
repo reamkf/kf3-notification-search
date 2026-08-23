@@ -91,7 +91,7 @@ bun run dev
 Worker、ローカルR2、scheduled handler、Queue consumerを確認する場合は次を起動する。
 
 ```bash
-bun run preview
+VITE_SITE_ORIGIN=http://127.0.0.1:8787 bun run preview
 ```
 
 `bun run preview`のR2はローカルストレージである。本番bucketへ接続する`--remote`操作をローカル確認で使用しない。
@@ -118,7 +118,7 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - local testがproduction bucketと本番Queueを変更していない
 - 304経路で公式本文とcurrent本文の不要な処理を行わない
 - `GET /`がStatic Assetsからお知らせ取得なしのSSG済みshellを返す
-- GETのKV hitが外部I/Oを行わず、KV missがR2 snapshotを投影して同じJSONをKVへwrite-throughする
+- GETのmerged KV hitが外部I/Oを行わず、両KV miss時はR2 snapshotを投影して同じJSONをGET専用KVへwrite-throughする
 - GETのKV write-through失敗でもHTTP 200と`news_api_cache_write_failed`ログを維持する
 - refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
 - refreshの公式304かつKV v2/current ETag一致時にR2 current本文を読まずKV JSONを再利用する
@@ -149,17 +149,14 @@ unit testは`Queue.send()`をmockしてrefreshのenqueue契約を確認し、Wor
 ```bash
 bun run test
 bun run test:e2e
+bun run test:e2e:preview
 bun run lint
 bun run format:check
 bunx tsc --noEmit
-bun run build
-```
-
-SSGで生成するOG image URLを本番originへ固定する場合は、`VITE_SITE_ORIGIN`を指定してbuildする。
-
-```bash
 VITE_SITE_ORIGIN=https://<worker-host> bun run build
 ```
+
+SSGのOG image URLを固定するため、`VITE_SITE_ORIGIN`はbuild時に必須である。ローカルのpreviewでも、使用するoriginを指定してbuildする。
 
 全ゲートとローカルscheduled確認が成功し、導入状態ドキュメントの受け入れ条件を確認した後にdeployする。本番外部状態と受け入れ項目は [お知らせアーカイブ導入状態](./news-archive-rollout.md) を参照する。
 

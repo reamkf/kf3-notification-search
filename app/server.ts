@@ -43,6 +43,7 @@ import {
 
 const oldNewsPath = `/${LEGACY_ARCHIVE_KEY}`;
 const cacheKey = "kf3-news";
+const archiveSnapshotCacheKey = "kf3-news-archive-snapshot";
 const normalCacheTtl = 60 * 5;
 const heartbeatTimeoutMs = 10_000;
 
@@ -289,6 +290,16 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       if (cachedNews.value !== null)
         return createJsonResponse(cachedNews.value, cachedNews.metadata ?? undefined);
 
+      const cachedArchiveSnapshot =
+        await context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(
+          archiveSnapshotCacheKey,
+        );
+      if (cachedArchiveSnapshot.value !== null)
+        return createJsonResponse(
+          cachedArchiveSnapshot.value,
+          cachedArchiveSnapshot.metadata ?? undefined,
+        );
+
       const snapshot = await readArchiveSnapshot(context.env);
       archiveCount = snapshot.clientNews.length;
       const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
@@ -300,7 +311,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         archiveCount,
       );
       try {
-        await context.env.KF3_NOTIF_CACHE.put(cacheKey, responseJson, {
+        await context.env.KF3_NOTIF_CACHE.put(archiveSnapshotCacheKey, responseJson, {
           expirationTtl: normalCacheTtl,
           metadata,
         });
@@ -369,10 +380,14 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       if (leaseRenewal !== "updated") return createRefreshLeaseExpiredResponse();
 
       const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
+      const reusableArchiveEtag =
+        result.currentExists && result.addedCount === 0 && result.updatedCount === 0
+          ? result.currentEtag
+          : null;
       const metadata = createNewsCacheMetadata(
         "merged",
         fetchedAt,
-        result.currentEtag,
+        reusableArchiveEtag,
         result.newsCount,
       );
       const responseJson = result.clientJson;
