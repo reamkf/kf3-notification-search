@@ -64,7 +64,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 - [ ] merged KVとGET専用snapshot KVの両方がmissした場合、R2 currentまたはlegacyを投影し、同じJSONをTTL 300秒でsnapshot KVへwrite-throughする。write失敗でも200を維持し、公式取得とmergeを行わない。
 - [ ] refresh実行中が202と`Retry-After`を返し、成功時は200と`{news, metadata}`を返して表示用KVへ保存する。
 - [ ] refreshのcooldownが429と`Retry-After`を返す。
-- [ ] KV finalization前に同じtokenのrefresh leaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す。
+- [ ] KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す。
 - [ ] KV保存中にrefresh leaseが失効または別tokenへ移行した場合は、他refreshのKVを削除せず、Queueへ通知せず202を返す。
 - [ ] refreshのR2、公式、検証、merge、KV保存の依存障害が503を返す。
 - [ ] refreshがcurrent、daily、monthly、公式ETag stateを変更しない。
@@ -79,7 +79,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 - [ ] Queue consumerとscheduled fallbackが競合してもcurrentを無条件PUTしない。
 - [ ] scheduled fallbackはQueueの成否に関係なく毎日03:15 JSTに実行される。
 - [ ] refresh、Queue consumer、scheduled fallbackが別invocationとしてCPU時間へ記録される。
-- [ ] `waitUntil`なしでshell、GET、refresh、scheduled、Queue consumerの処理完了を確認できる。
+- [ ] shell、GET、refresh、scheduled、Queue consumerを別invocationとして確認でき、refreshのQueue送信だけが`waitUntil`へ登録される。
 - [ ] 手動操作なしで毎日03:15 JSTにscheduled fallbackが実行される。
 - [ ] Healthchecks.ioからCron失敗またはCron欠落の通知を実受信できる。
 - [ ] 公式サイトから消えたIDがQueue consumerまたはscheduled fallbackのarchiveに残り、同一IDの更新には公式内容が採用される。

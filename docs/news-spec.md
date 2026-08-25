@@ -28,9 +28,9 @@
 
 表示用KV `kf3-news`は、refreshが正常完了した表示用配列のsnapshotを保持する。`GET /api/kf3-news`はこのsnapshotを最優先で読み、値がない場合はGET専用KV `kf3-news-archive-snapshot`を読む。両方にない場合だけ`archive/current.json`またはlegacy objectを読み込んでクライアント用配列へ投影し、GET専用KVへTTL 300秒でbest-effort保存する。GETは公式サーバーからの取得やアーカイブとのmergeを行わない。
 
-`POST /api/kf3-news/refresh`は表示用データを最新化する公開操作である。R2のCAS leaseと5分cooldownで同時実行と連続実行を制限し、leaseを取得した要求だけが公式データの取得、検証、mergeを行う。KV finalization前に同じtokenのleaseをCASで5分間へ延長し、成功した結果を表示用KVへ保存して`{news, metadata}`形式でレスポンス本文へ返す。
+`POST /api/kf3-news/refresh`は表示用データを最新化する公開操作である。R2のCAS leaseと5分cooldownで同時実行と連続実行を制限し、leaseを取得した要求だけが公式データの取得、検証、mergeを行う。KV finalization前にleaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長し、成功した結果を表示用KVへ保存して`{news, metadata}`形式でレスポンス本文へ返す。
 
-refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知するが、`archive/current.json`、daily、monthly、公式ETag stateはrefreshから変更しない。Queue consumerが別invocationで`updateNewsArchive(trigger=queue)`を実行し、refresh由来の表示KVを維持する。03:15 JSTのscheduled handlerは`trigger=scheduled`でfallback更新を行い、current更新時に表示KVを削除する。Queue送信に失敗してもrefreshは200を返す。currentをsnapshotへ戻す操作はrestoreの責務である。
+refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、Queue送信は`waitUntil`へ登録するが、`archive/current.json`、daily、monthly、公式ETag stateはrefreshから変更しない。Queue consumerが別invocationで`updateNewsArchive(trigger=queue)`を実行し、refresh由来の表示KVを維持する。03:15 JSTのscheduled handlerは`trigger=scheduled`でfallback更新を行い、current更新時に表示KVを削除する。Queue送信に失敗してもrefreshは200を返す。currentをsnapshotへ戻す操作はrestoreの責務である。
 
 ### 共有データの読み書き責務
 

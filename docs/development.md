@@ -78,7 +78,7 @@ bunx wrangler r2 object put kf3-notif-data/entries_merged_20241107.json --file="
 
 通常の累積archiveは`KF3_NOTIF_DATA/archive/current.json`である。これがない初回だけ`entries_merged_20241107.json`を読み込み、Queue consumerまたは03:15 JSTのscheduled fallbackの初回更新で`archive/current.json`を作成する。backupは`KF3_NOTIF_BACKUP/daily/YYYY/MM/DD/`と`KF3_NOTIF_BACKUP/monthly/YYYY-MM.json`へ保存する。
 
-refresh制御metadataは表示用KVやarchiveとは別にR2へ保存し、R2 CAS leaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。KV finalization前には同じtokenのleaseをCASで5分間へ延長する。refreshはcurrent、daily、monthly、公式ETag stateを変更せず、merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知する。Queue送信に失敗してもrefreshは200を返す。
+refresh制御metadataは表示用KVやarchiveとは別にR2へ保存し、R2 CAS leaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。KV finalization前にはleaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長する。refreshはcurrent、daily、monthly、公式ETag stateを変更せず、merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知する。Queue送信に失敗してもrefreshは200を返す。
 
 ## ローカルで実行
 
@@ -122,11 +122,11 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - GETのKV write-through失敗でもHTTP 200と`news_api_cache_write_failed`ログを維持する
 - refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
 - refreshの公式304かつKV v2/current ETag一致時にR2 current本文を読まずKV JSONを再利用する
-- KV finalization前に同じtokenのrefresh leaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す
+- KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す
 - refresh invocation自身は表示用KVとrefresh制御metadataだけを更新し、archiveを書き込まず、merge差分またはcurrent初期化をQueueへbest-effortで通知する
 - Queue consumer完了後にcurrent、daily、monthly、公式ETag stateが更新され、refresh由来の表示KVが維持される
 - Queue送信失敗でもrefreshが200を返し、`news_archive_update_enqueue_failed`を記録する
-- `waitUntil`を使わず、各HTTPリクエスト、scheduled、Queue invocationの完了を待っている
+- refresh本体、scheduled、Queue invocationの処理はリクエスト内で完了し、refreshのQueue送信だけを`waitUntil`へ登録している
 
 ## Queue consumerをローカルで確認
 

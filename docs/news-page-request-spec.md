@@ -88,8 +88,8 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 1. 制御metadataをR2から読み、CAS条件付きPUTでleaseを取得する。
 2. lease取得競合時は別refreshが実行中として扱い、公式取得を開始しない。
 3. lease取得後、最後の成功refreshから5分未満の場合はcooldownとして拒否し、公式取得を開始しない。
-4. 公式取得、検証、mergeの完了後、KV finalization前に同じtokenのleaseをCASで5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
-5. KV保存とcurrent ETag確認が完了したらleaseを解放し、成功時刻を制御metadataへCAS保存する。
+4. 公式取得、検証、mergeの完了後、KV finalization前にleaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
+5. KV保存とcurrent ETag確認が完了したら、completionでtokenとlease期限を検証してleaseを解放し、成功時刻を制御metadataへCAS保存する。
 6. 公式取得またはKV保存に失敗した場合もleaseを解放する。失敗したrefreshはcooldownを開始しない。
 7. leaseとcooldownの判定、取得、延長、解放はCASで行い、無条件上書きに切り替えない。
 
@@ -138,12 +138,11 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 2. 公式レスポンスを取得し、HTTPステータス、本文サイズ、JSON構造、必須フィールド、ID一意性、安全性閾値を検証する。
 3. 公式データの新規または変更項目を検証し、IDをキーにsnapshotとmergeする。同じIDには公式データを採用し、snapshotにだけ存在するIDは残す。
 4. 統合結果をクライアント用配列へ投影し、JSON.stringifyを1回だけ実行して`clientJson`を作る。304 fast pathでは既存KVのJSON文字列を`clientJson`としてそのまま使う。
-5. 同じtokenのrefresh leaseをCASで5分間へ延長し、KV finalization中に別refreshがleaseを取得できないようにする。延長できない場合はKVへ書き込まず202を返す。
+5. refresh leaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
 6. 表示用KV `kf3-news`へ`clientJson`をTTL 300秒で保存し、metadataの`version`を2、`source`を`merged`、`fetchedAt`をrefresh成功時刻、`newsCount`を配列件数として記録する。統合結果がcurrentの正確な投影である場合だけ`baseArchiveEtag`へcurrent ETagを記録し、それ以外は`null`とする。
-7. KV保存後にcurrent ETagとrefresh leaseを再確認する。archive更新と競合していた場合は保存したKVを削除し、Queueへ通知せず503を返す。leaseが失効または別tokenへ移行していた場合は、次refreshのKVを削除しないよう共有キーを変更せず202を返す。
-8. refresh leaseを成功として完了する。完了時にtoken不一致となった場合も共有KVを削除せず202を返す。
-9. merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへmessageをpublishする。送信失敗はログへ記録するが、KV保存を取り消さずHTTP 200を返す。
-10. `clientJson`を再シリアライズせずmetadataだけをJSON化し、保存したJSONを`{news, metadata}`形式の200本文へ埋め込む。
+7. KV保存後にcurrent ETagを確認する。archive更新と競合していた場合は保存したKVを削除し、Queueへ通知せず503を返す。currentが一致した場合は、同じtokenのleaseが未失効であることを確認して成功完了する。leaseが失効または別tokenへ移行していた場合は、次refreshのKVを削除しないよう共有キーを変更せず202を返す。
+8. merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへのmessage送信を`waitUntil`へ登録する。送信失敗はログへ記録するが、KV保存を取り消さずHTTP 200を返す。
+9. `clientJson`を再シリアライズせずmetadataだけをJSON化し、保存したJSONを`{news, metadata}`形式の200本文へ埋め込む。
 
 公式取得、検証、merge、KV保存のいずれかに失敗した場合、refreshはKVを置き換えず503を返す。Queue送信だけが失敗した場合は、表示用KVを保持したまま`news_archive_update_enqueue_failed`へ記録し、refreshは200を返す。refreshはarchive-fallbackを成功結果として返さない。古い表示を返す必要がある場合は、別途GETで既存KV snapshotを取得する。
 
@@ -155,7 +154,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 - refresh制御metadata以外のR2書き込み
 - 通常の成功経路でのKV `kf3-news`削除。current競合後の書き込みcleanupでは削除するが、leaseまたはtoken不一致では他refreshのKVを保護するため削除しない
 - GETリクエストからの公式取得
-- `waitUntil`によるrefresh処理の継続
+- refresh本体の処理を`waitUntil`へ移すこと。Queue送信だけはレスポンス経路から分離するため`waitUntil`へ登録する
 
 ## archive更新との分離
 
