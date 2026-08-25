@@ -80,6 +80,7 @@ type BindingOptions = {
   stateEtag?: string;
   conditionalCurrentMismatch?: boolean;
   currentChangesOnCachePut?: boolean;
+  cachePutBlock?: Promise<void>;
 };
 
 const createBindings = (
@@ -158,6 +159,7 @@ const createBindings = (
       putOptions: { expirationTtl?: number; metadata?: unknown },
     ) => {
       if (options.cachePutError) throw new Error("cache put failed");
+      if (options.cachePutBlock) await options.cachePutBlock;
       cacheValues.set(key, value);
       if (putOptions.metadata === undefined) cacheMetadata.delete(key);
       else cacheMetadata.set(key, putOptions.metadata);
@@ -203,9 +205,11 @@ const createBindings = (
   };
 };
 
-const createContext = () =>
+const createContext = (pending?: Promise<unknown>[]) =>
   ({
-    waitUntil: () => undefined,
+    waitUntil: (promise: Promise<unknown>) => {
+      pending?.push(promise);
+    },
     passThroughOnException: () => undefined,
   }) as unknown as ExecutionContext;
 
@@ -217,11 +221,12 @@ const callFetch = async (
   handler: ReturnType<typeof createWorkerHandler>,
   request: Request,
   env: WorkerBindings,
+  pending?: Promise<unknown>[],
 ) =>
   (await handler.fetch?.(
     request as unknown as Parameters<WorkerFetch>[0],
     env as unknown as Parameters<WorkerFetch>[1],
-    createContext() as unknown as Parameters<WorkerFetch>[2],
+    createContext(pending) as unknown as Parameters<WorkerFetch>[2],
   )) as unknown as Response;
 
 const callScheduled = async (
@@ -365,6 +370,32 @@ describe("Worker API handler", () => {
         newsCount: 2,
       },
     });
+  });
+
+  it("snapshot cache maintenanceはレスポンスを待たせない", async () => {
+    let releasePut!: () => void;
+    const cachePutBlock = new Promise<void>((resolve) => {
+      releasePut = resolve;
+    });
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      cachePutBlock,
+    });
+    const pending: Promise<unknown>[] = [];
+    const response = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+      pending,
+    );
+
+    expect(response.status).toBe(200);
+    expect((await response.json()) as unknown[]).toHaveLength(1);
+    expect(pending).toHaveLength(1);
+    expect(setup.cachePuts).toHaveLength(0);
+
+    releasePut();
+    await Promise.all(pending);
+    expect(setup.cachePuts).toHaveLength(1);
   });
 
   it("snapshot保存後にcurrentが変わった場合はsnapshotを削除する", async () => {
