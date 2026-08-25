@@ -343,12 +343,15 @@ describe("Worker API handler", () => {
       },
       clock: () => fetchedAt,
     });
+    const pending: Promise<unknown>[] = [];
     const response = await callFetch(
       handler,
       new Request("https://example.com/api/kf3-news"),
       setup.env,
+      pending,
     );
     const responseText = await response.text();
+    await Promise.all(pending);
     const body = JSON.parse(responseText) as Array<Record<string, unknown>>;
 
     expect(response.status).toBe(200);
@@ -402,11 +405,14 @@ describe("Worker API handler", () => {
     const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
       currentChangesOnCachePut: true,
     });
+    const pending: Promise<unknown>[] = [];
     const response = await callFetch(
       createWorkerHandler(),
       new Request("https://example.com/api/kf3-news"),
       setup.env,
+      pending,
     );
+    await Promise.all(pending);
 
     expect(response.status).toBe(200);
     expect(setup.cacheDeletes).toContain("kf3-news-archive-snapshot");
@@ -455,16 +461,19 @@ describe("Worker API handler", () => {
       cachePutError: true,
     });
     const logs: Record<string, unknown>[] = [];
+    const pending: Promise<unknown>[] = [];
     const response = await callFetch(
       createWorkerHandler({
         logger: { log: () => undefined, error: (event) => logs.push(event) },
       }),
       new Request("https://example.com/api/kf3-news"),
       setup.env,
+      pending,
     );
 
     expect(response.status).toBe(200);
     expect((await response.json()) as unknown[]).toHaveLength(1);
+    await Promise.all(pending);
     expect(setup.cachePuts).toHaveLength(0);
     expect(logs).toContainEqual(
       expect.objectContaining({ event: "news_api_cache_write_failed", archiveCount: 1 }),
@@ -474,11 +483,14 @@ describe("Worker API handler", () => {
 
   it("cache missではrefresh制御metadataへアクセスしない", async () => {
     const setup = createBindings(JSON.stringify(createDocument(1)));
+    const pending: Promise<unknown>[] = [];
     const response = await callFetch(
       createWorkerHandler(),
       new Request("https://example.com/api/kf3-news"),
       setup.env,
+      pending,
     );
+    await Promise.all(pending);
     expect(response.status).toBe(200);
     expect(setup.dataGets).not.toContain("control/news-refresh.json");
     expect(setup.cachePuts).toHaveLength(1);
@@ -501,13 +513,16 @@ describe("Worker API handler", () => {
       },
       clock: () => Date.parse("2026-08-09T12:34:56.789Z"),
     });
+    const pending: Promise<unknown>[] = [];
     const response = await callFetch(
       handler,
       new Request("https://example.com/api/kf3-news"),
       setup.env,
+      pending,
     );
     expect(response.status).toBe(200);
     expect((await response.json()) as unknown[]).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
+    await Promise.all(pending);
     expect(requestHeaders).toHaveLength(0);
     expect(setup.cachePuts).toHaveLength(1);
   });

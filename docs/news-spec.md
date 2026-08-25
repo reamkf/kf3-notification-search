@@ -50,7 +50,7 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分
 
 ### ページ表示とデータ取得の分離
 
-`GET /`はStatic AssetsからSSG済みshellを返し、お知らせデータを取得しない。Workerを起動せず、ブラウザのお知らせ取得はshell表示後に`GET /api/kf3-news`へ送る別のHTTPリクエストで行う。GETからrefreshをdispatchしたり、`waitUntil`で公式取得を継続したりしない。refreshが必要な場合は`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
+`GET /`はStatic AssetsからSSG済みshellを返し、お知らせデータを取得しない。Workerを起動せず、ブラウザのお知らせ取得はHTML解析中にpreloadを開始する別のHTTPリクエストで行い、hydration後のIslandがその結果を利用する。GETからrefreshをdispatchしたり、`waitUntil`で公式取得を継続したりしない。refreshが必要な場合は`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
 
 この分離により、shellの応答時間と公式取得、検証、mergeのCPU時間を別リクエストとして計測する。refresh実行中もGETは既存のKV snapshotを返し、refreshが成功するまで表示用KVを置き換えない。
 
@@ -58,7 +58,7 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分
 
 - `GET /`はStatic Assetsからお知らせデータを含まないSSG済みshellを返す。
 - `GET /api/kf3-news`はKV snapshotを即時返却する。
-- GETの両KV missでは、currentまたはlegacyのsnapshotをクライアント用配列へ投影し、同じJSONをTTL 300秒で`kf3-news-archive-snapshot`へbest-effort保存して返す。公式取得とmergeは行わない。KV write-throughが失敗してもHTTP 200を維持する。
+- GETの両KV missでは、currentまたはlegacyのsnapshotをクライアント用配列へ投影し、同じJSONをHTTP 200で返す。レスポンス返却後に`kf3-news-archive-snapshot`へTTL 300秒でbest-effort保存し、ETag fenceを行う。公式取得とmergeは行わず、KV write-throughが失敗してもHTTP 200を維持する。
 - `POST /api/kf3-news/refresh`の成功時は、公式側の更新を反映したJSONとversion 2の表示用metadataをKVへ保存し、`{news, metadata}`形式で返す。304でcurrent ETagとKV metadataが一致する場合は、保存済みJSONを再利用する。
 - 公式サイトからお知らせが削除されても、Queue consumerまたはscheduled fallbackでcurrentへ保存済みの項目は残る。
 - 同じIDのお知らせが公式側で更新された場合、Queue consumer、scheduled fallback、またはrefreshのmergeでは公式側の内容を優先する。

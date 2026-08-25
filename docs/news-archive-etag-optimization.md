@@ -217,7 +217,7 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - `app/server.ts`: 表示用GET、refresh、Queue publish、Queue consumer、R2 leaseと制御metadata、KV投影
 - `app/news-archive-queue.ts`: Queue messageの形式と検証
 - `app/routes/index.tsx`: お知らせ取得を行わないSSG shell
-- `app/islands/KemonoFriends3NewsSearch.tsx`: shell表示後のGET、refresh呼び出し
+- `app/islands/KemonoFriends3NewsSearch.tsx`: preload済みGETの利用、refresh呼び出し
 - `app/__tests__/news-archive.test.ts`: state、条件付き取得、scheduled処理順、失敗経路のテスト
 - `app/__tests__/server.test.ts`: GETのKV hit/miss、refresh、Queue publish、Queue consumer、lease、cooldown、scheduled、heartbeatの回帰テスト
 - `docs/news-spec.md`: 共通契約と仕様文書の入口

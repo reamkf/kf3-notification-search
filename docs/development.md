@@ -96,7 +96,7 @@ VITE_SITE_ORIGIN=http://127.0.0.1:8787 bun run preview
 
 `bun run preview`のR2はローカルストレージである。本番bucketへ接続する`--remote`操作をローカル確認で使用しない。
 
-`GET /`はStatic AssetsからSSG済みshellを返す。ブラウザはshell表示後に`GET /api/kf3-news`を呼び、必要に応じて`POST /api/kf3-news/refresh`を別リクエストで呼ぶ。Workerを起動せず、公式取得やmergeのCPU時間をshellへ持ち込まない。
+`GET /`はStatic AssetsからSSG済みshellを返す。ブラウザはHTML解析中に`GET /api/kf3-news`のpreloadを開始し、hydration後のIslandがその結果を利用する。必要に応じて`POST /api/kf3-news/refresh`を別リクエストで呼ぶ。Workerを起動せず、公式取得やmergeのCPU時間をshellへ持ち込まない。
 
 ## scheduled handlerをローカルで確認
 

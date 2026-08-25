@@ -2,7 +2,7 @@
 
 ## この文書の責務
 
-本書は、ページ表示と表示用お知らせAPIの仕様を定義する。`GET /`はStatic AssetsからSSG済みshellを返し、Workerを起動せず、お知らせ取得も行わない。ブラウザはshell表示後に`GET /api/kf3-news`を呼び出し、必要に応じて`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
+本書は、ページ表示と表示用お知らせAPIの仕様を定義する。`GET /`はStatic AssetsからSSG済みshellを返し、Workerを起動せず、お知らせ取得も行わない。ブラウザはHTML解析中に`GET /api/kf3-news`のpreloadを開始し、hydration後のIslandがその結果を利用する。必要に応じて`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
 
 表示用APIは永続archiveを更新しない。`archive/current.json`、daily、monthly、公式ETag stateはQueue consumerまたは03:15 JSTのscheduled fallbackが更新する。refreshは表示用KVとrefresh制御metadataだけを変更し、merge差分がある場合またはcurrentが未作成の場合はQueueへbest-effortで通知する。保存形式と共通契約は [お知らせ機能共通仕様](./news-spec.md)、永続archive更新は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md) を参照する。
 
@@ -10,13 +10,13 @@
 
 `GET /`はお知らせ検索UIのSSG済みshellをStatic Assetsから返す。Workerを起動せず、お知らせ配列の取得、公式サーバーへのアクセス、R2 snapshotの読み込み、KVへの書き込みは行わない。日付入力の終了日はHTMLへbuild日時として埋め込まず、hydration後にブラウザの日本時間で設定する。
 
-お知らせデータはshell表示後の別HTTPリクエストで取得する。shellの応答とデータ取得のCPU時間を同じリクエストへ合算しない。GETからrefreshを開始したり、`waitUntil`でデータ取得を継続したりしない。
+お知らせデータはshellのHTML解析中にpreloadを開始する別HTTPリクエストで取得し、hydration後のIslandがその結果を利用する。shellの応答とデータ取得のCPU時間を同じリクエストへ合算しない。GETからrefreshを開始したり、`waitUntil`でデータ取得を継続したりしない。
 
 ## `GET /api/kf3-news`
 
 ### 成功レスポンス
 
-`GET /api/kf3-news`の成功レスポンスはトップレベルのJSON配列とする。まずmerged結果用KV `kf3-news`を読み、値がない場合はGET専用のsnapshot KV `kf3-news-archive-snapshot`を読み込む。両方に値がない場合はR2 snapshotの投影結果をsnapshot KVへwrite-throughし、同じJSON文字列を直接返す。
+`GET /api/kf3-news`の成功レスポンスはトップレベルのJSON配列とする。まずmerged結果用KV `kf3-news`を読み、値がない場合はGET専用のsnapshot KV `kf3-news-archive-snapshot`を読み込む。両方に値がない場合はR2 snapshotを投影してレスポンスJSONを作成し、同じJSON文字列を直接返す。snapshot KVへのwrite-throughとETag fenceはレスポンス返却後のbest-effort cache maintenanceとして実行する。
 
 ```json
 [
@@ -59,9 +59,9 @@ merged結果用KVに値がない場合、GET専用KV `kf3-news-archive-snapshot`
 1. `archive/current.json`を読み、保存用スキーマを検証する。
 2. currentが存在しない場合だけlegacy `entries_merged_20241107.json`を読む。
 3. currentが存在するもののJSONまたは内容が不正な場合はlegacyへフォールバックせず、異常として扱う。
-4. 検証済みsnapshotをクライアント用配列へ投影し、JSON.stringifyを1回だけ実行する。
-5. 同じJSON文字列をGET専用KV `kf3-news-archive-snapshot`へTTL 300秒、metadata付きでbest-effort保存する。保存後にcurrentのETagをHEADで再確認し、読み込み時と異なる場合は保存したsnapshotを削除する。
-6. KV保存または競合確認の成否にかかわらず、同じJSON文字列をHTTP 200本文へ返す。
+4. 検証済みsnapshotをクライアント用配列へ投影し、JSON.stringifyを1回だけ実行する。ここまでがレスポンスcritical pathである。
+5. 同じJSON文字列からHTTP 200レスポンスを作成して返す。
+6. レスポンス返却後、`executionCtx.waitUntil()`で同じJSON文字列をGET専用KV `kf3-news-archive-snapshot`へTTL 300秒、metadata付きでbest-effort保存する。保存後にcurrentのETagをHEADで再確認し、読み込み時と異なる場合は保存したsnapshotを削除する。KV保存、競合確認、競合時の削除に失敗してもHTTP 200を変更しない。
 
 metadataは`version: 2`、`source: "archive-snapshot"`、`fetchedAt`、`baseArchiveEtag`、`newsCount`を含む。legacy snapshotでは`baseArchiveEtag`を`null`とする。
 
@@ -73,7 +73,7 @@ R2 snapshotを読み込めない場合、または保存用スキーマの検証
 }
 ```
 
-GETのR2 snapshot、KV読み込み、またはレスポンス生成の失敗は`news_api_error`として記録する。GETのwrite-throughまたは競合確認の失敗はHTTP成功を維持し、`news_api_cache_write_failed`として記録する。保存後の競合削除自体に失敗した場合は`news_api_cache_cleanup_failed`として記録する。GETは`news_api_fallback`を記録しない。refreshの失敗は`news_refresh_failed`として記録する。
+GETのR2 snapshot、KV読み込み、またはレスポンス生成の失敗は`news_api_error`として記録する。`waitUntil()`内のGET write-throughまたは競合確認の失敗はHTTP成功を維持し、`news_api_cache_write_failed`として記録する。保存後の競合削除自体に失敗した場合は`news_api_cache_cleanup_failed`として記録する。GETは`news_api_fallback`を記録しない。refreshの失敗は`news_refresh_failed`として記録する。
 
 ## `POST /api/kf3-news/refresh`
 
