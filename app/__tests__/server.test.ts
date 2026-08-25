@@ -679,6 +679,7 @@ describe("Worker API handler", () => {
         archiveChanged: true,
         archiveUpdateNeeded: true,
         archiveUpdateQueueStatus: "queued",
+        refreshLeaseAcquireDurationMs: expect.any(Number),
         refreshFetchDurationMs: expect.any(Number),
         refreshFinalizationDurationMs: expect.any(Number),
         refreshTotalDurationMs: expect.any(Number),

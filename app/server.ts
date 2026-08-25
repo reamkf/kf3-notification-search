@@ -362,11 +362,14 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
   ) => {
     let archiveCount: number | null = null;
     let token: string | null = null;
+    const refreshStartedAt = performance.now();
     try {
+      const leaseAcquireStartedAt = performance.now();
       const acquired = await acquireNewsRefreshLease(
         context.env.KF3_NOTIF_DATA,
         dependencies.clock?.() ?? Date.now(),
       );
+      const refreshLeaseAcquireDurationMs = performance.now() - leaseAcquireStartedAt;
       if (acquired.status !== "acquired") {
         logger.error({
           event: "news_refresh_failed",
@@ -501,9 +504,10 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         archiveUpdateNeeded,
         archiveUpdateQueueStatus,
         leaseCompletion,
+        refreshLeaseAcquireDurationMs,
         refreshFetchDurationMs,
         refreshFinalizationDurationMs: performance.now() - refreshFinalizationStartedAt,
-        refreshTotalDurationMs: performance.now() - refreshFetchStartedAt,
+        refreshTotalDurationMs: performance.now() - refreshStartedAt,
       });
       return createRefreshResponse(result.clientJson, metadata);
     } catch (error) {
