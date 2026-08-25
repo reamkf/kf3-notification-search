@@ -75,6 +75,7 @@ type BindingOptions = {
   cacheGetError?: boolean;
   cachePutError?: boolean;
   queueSendError?: boolean;
+  queueSendBlock?: Promise<void>;
   legacyMissing?: boolean;
   stateText?: string;
   stateEtag?: string;
@@ -185,6 +186,7 @@ const createBindings = (
   const archiveUpdateQueue = {
     send: async (message: NewsArchiveUpdateMessage) => {
       if (options.queueSendError) throw new Error("queue send failed");
+      if (options.queueSendBlock) await options.queueSendBlock;
       queueMessages.push(message);
     },
   } as unknown as Queue<NewsArchiveUpdateMessage>;
@@ -868,6 +870,7 @@ describe("Worker API handler", () => {
       queueSendError: true,
     });
     const logs: Record<string, unknown>[] = [];
+    const pending: Promise<unknown>[] = [];
     const response = await callFetch(
       createWorkerHandler({
         fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
@@ -875,7 +878,9 @@ describe("Worker API handler", () => {
       }),
       new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
       setup.env,
+      pending,
     );
+    await Promise.all(pending);
 
     expect(response.status).toBe(200);
     expect(setup.cachePuts).toHaveLength(1);
@@ -886,9 +891,36 @@ describe("Worker API handler", () => {
     expect(logs).toContainEqual(
       expect.objectContaining({
         event: "news_refresh_succeeded",
-        archiveUpdateQueueStatus: "failed",
+        archiveUpdateQueueStatus: "queued",
       }),
     );
+  });
+
+  it("Queue送信はレスポンスを待たせない", async () => {
+    let releaseSend!: () => void;
+    const queueSendBlock = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      queueSendBlock,
+    });
+    const pending: Promise<unknown>[] = [];
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+      pending,
+    );
+
+    expect(response.status).toBe(200);
+    expect(pending).toHaveLength(1);
+    expect(setup.queueMessages).toHaveLength(0);
+
+    releaseSend();
+    await Promise.all(pending);
+    expect(setup.queueMessages).toHaveLength(1);
   });
 
   it("refreshのPOST以外は405とAllowを返す", async () => {

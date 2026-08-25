@@ -464,9 +464,19 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           requiresInitialization,
         };
         try {
-          await context.env.KF3_ARCHIVE_UPDATE_QUEUE.send(message);
+          context.executionCtx.waitUntil(
+            context.env.KF3_ARCHIVE_UPDATE_QUEUE.send(message)
+              .then(() => logger.log({ event: "news_archive_update_queued", ...message }))
+              .catch((error) => {
+                logger.error({
+                  event: "news_archive_update_enqueue_failed",
+                  error: serializeArchiveErrorForLog(error),
+                  addedCount: result.addedCount,
+                  updatedCount: result.updatedCount,
+                });
+              }),
+          );
           archiveUpdateQueueStatus = "queued";
-          logger.log({ event: "news_archive_update_queued", ...message });
         } catch (error) {
           archiveUpdateQueueStatus = "failed";
           logger.error({
