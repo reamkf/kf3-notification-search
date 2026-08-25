@@ -30,6 +30,13 @@ if (!html.includes('href="/static/') || !html.includes('.css"')) {
   throw new Error("SSG HTML does not reference a stylesheet");
 }
 if (
+  !html.includes('rel="preload"') ||
+  !html.includes('href="/api/kf3-news"') ||
+  !html.includes('as="fetch"')
+) {
+  throw new Error("SSG HTML does not preload the news API");
+}
+if (
   !html.includes(`<meta property="og:image" content="${expectedOgImageUrl}"`) ||
   !html.includes(`<meta name="twitter:image" content="${expectedOgImageUrl}"`)
 ) {

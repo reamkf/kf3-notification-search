@@ -5,7 +5,8 @@ import { Link } from "honox/server";
 export default jsxRenderer(({ children, title }, c) => {
   const pageTitle = "けもフレ３おしらせ検索";
   const description = "けもフレ３のおしらせを検索できるサイトです。";
-  const siteOrigin = import.meta.env.VITE_SITE_ORIGIN || new URL(c.req.url).origin;
+  const requestUrl = new URL(c.req.url);
+  const siteOrigin = import.meta.env.VITE_SITE_ORIGIN || requestUrl.origin;
   const ogImageUrl = new URL("/og-image.jpg", siteOrigin).href;
   return (
     <html lang="ja">
@@ -25,6 +26,9 @@ export default jsxRenderer(({ children, title }, c) => {
         <meta name="twitter:image" content={ogImageUrl} />
 
         <title>{title}</title>
+        {requestUrl.pathname === "/" && (
+          <link rel="preload" href="/api/kf3-news" as="fetch" crossorigin="anonymous" />
+        )}
         <link rel="icon" href="/favicon.ico" />
         <Script src="/app/client.ts" async />
         <Link href="/app/style.css" rel="stylesheet" />
