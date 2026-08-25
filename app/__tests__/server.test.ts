@@ -80,6 +80,7 @@ type BindingOptions = {
   stateText?: string;
   stateEtag?: string;
   conditionalCurrentMismatch?: boolean;
+  conditionalCurrentReadMismatch?: boolean;
   currentChangesOnCachePut?: boolean;
   cachePutBlock?: Promise<void>;
 };
@@ -113,7 +114,7 @@ const createBindings = (
       if (
         key === CURRENT_ARCHIVE_KEY &&
         getOptions?.onlyIf?.etagMatches !== undefined &&
-        options.conditionalCurrentMismatch
+        (options.conditionalCurrentMismatch || options.conditionalCurrentReadMismatch)
       ) {
         return { etag: "new-current-etag" } as R2Object;
       }
@@ -679,8 +680,18 @@ describe("Worker API handler", () => {
         archiveChanged: true,
         archiveUpdateNeeded: true,
         archiveUpdateQueueStatus: "scheduled",
+        officialFetchCount: 1,
+        officialFetchStatus: "modified",
+        refreshDataSource: "full-merge",
         refreshLeaseAcquireDurationMs: expect.any(Number),
+        refreshEligibilityDurationMs: expect.any(Number),
         refreshFetchDurationMs: expect.any(Number),
+        officialFetchDurationMs: expect.any(Number),
+        refreshCacheReadDurationMs: expect.any(Number),
+        archiveReadDurationMs: expect.any(Number),
+        cachePutDurationMs: expect.any(Number),
+        currentEtagCheckDurationMs: expect.any(Number),
+        leaseCompletionDurationMs: expect.any(Number),
         refreshFinalizationDurationMs: expect.any(Number),
         refreshTotalDurationMs: expect.any(Number),
       }),
@@ -867,6 +878,42 @@ describe("Worker API handler", () => {
 
     expect(response.status).toBe(200);
     expect(setup.dataGets).toContain(CURRENT_ARCHIVE_KEY);
+  });
+
+  it("304からfull fallbackした場合は公式fetch回数を記録する", async () => {
+    const document = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    const setup = createBindings(JSON.stringify(document), undefined, {
+      conditionalCurrentReadMismatch: true,
+      stateText: JSON.stringify({
+        version: 1,
+        officialEtag: '"official-etag"',
+        currentEtag: "current-etag",
+      }),
+    });
+    const responses = [
+      new Response(null, { status: 304, headers: { etag: '"official-etag"' } }),
+      createResponse(document),
+    ];
+    const logs: Record<string, unknown>[] = [];
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => responses.shift()!,
+        logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(responses).toHaveLength(0);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "news_refresh_succeeded",
+        officialFetchCount: 2,
+        officialFetchStatus: "modified",
+        refreshDataSource: "full-merge",
+      }),
+    );
   });
 
   it("Queue送信失敗後もrefresh成功とKV更新を維持する", async () => {

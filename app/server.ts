@@ -143,25 +143,70 @@ const serializeClientNews = (news: ReturnType<typeof projectValidatedClientNews>
   newsCount: news.length,
 });
 
-type RefreshNewsResult = {
+type RefreshDurations = {
+  refreshEligibilityDurationMs: number;
+  officialFetchDurationMs: number;
+  refreshCacheReadDurationMs: number;
+  archiveReadDurationMs: number;
+};
+
+type RefreshMeasurements = RefreshDurations & {
+  officialFetchCount: number;
+  officialFetchStatus: "modified" | "not-modified" | null;
+  refreshDataSource: "kv" | "current" | "full-merge" | null;
+};
+
+type RefreshNewsResult = RefreshDurations & {
+  officialFetchCount: number;
   clientJson: string;
   newsCount: number;
   currentEtag: string | null;
   currentExists: boolean;
   addedCount: number;
   updatedCount: number;
+  officialFetchStatus: "modified" | "not-modified";
+  refreshDataSource: "kv" | "current" | "full-merge";
+};
+
+const measureRefreshOperation = async <T>(
+  durations: RefreshDurations,
+  field: keyof RefreshDurations,
+  operation: () => Promise<T>,
+): Promise<T> => {
+  const startedAt = performance.now();
+  try {
+    return await operation();
+  } finally {
+    durations[field] += performance.now() - startedAt;
+  }
+};
+
+const measureOfficialFetch = (
+  measurements: RefreshMeasurements,
+  fetcher: NewsFetcher,
+  options?: Parameters<typeof fetchOfficialNews>[1],
+) => {
+  measurements.officialFetchCount += 1;
+  return measureRefreshOperation(measurements, "officialFetchDurationMs", () =>
+    fetchOfficialNews(fetcher, options),
+  );
 };
 
 const getRefreshNewsUnconditionally = async (
   env: WorkerBindings,
   dependencies: ServerDependencies,
+  measurements: RefreshMeasurements,
 ): Promise<RefreshNewsResult> => {
   const [archiveResult, officialResult] = await Promise.allSettled([
-    readArchiveDocument(env.KF3_NOTIF_DATA),
-    fetchOfficialNews(dependencies.fetcher ?? fetch),
+    measureRefreshOperation(measurements, "archiveReadDurationMs", () =>
+      readArchiveDocument(env.KF3_NOTIF_DATA),
+    ),
+    measureOfficialFetch(measurements, dependencies.fetcher ?? fetch),
   ]);
   if (archiveResult.status === "rejected") throw archiveResult.reason;
   if (officialResult.status === "rejected") throw officialResult.reason;
+  measurements.officialFetchStatus = officialResult.value.status;
+  measurements.refreshDataSource = "full-merge";
   if (officialResult.value.status !== "modified") {
     throw new NewsArchiveError("official-fetch", "公式お知らせの応答形式が不正です");
   }
@@ -173,11 +218,14 @@ const getRefreshNewsUnconditionally = async (
     },
   );
   return {
+    ...measurements,
     ...serializeClientNews(projectValidatedClientNews(merged.document)),
     currentEtag: archiveResult.value.etag,
     currentExists: archiveResult.value.currentExists,
     addedCount: merged.stats.addedCount,
     updatedCount: merged.stats.updatedCount,
+    officialFetchStatus: "modified",
+    refreshDataSource: "full-merge",
   };
 };
 
@@ -185,56 +233,86 @@ const getRefreshNews = async (
   env: WorkerBindings,
   dependencies: ServerDependencies,
 ): Promise<RefreshNewsResult> => {
-  const eligibility = await readOfficialFetchEligibility(env.KF3_NOTIF_DATA);
-  if (!eligibility.ifNoneMatch) return getRefreshNewsUnconditionally(env, dependencies);
+  const measurements: RefreshMeasurements = {
+    refreshEligibilityDurationMs: 0,
+    officialFetchCount: 0,
+    officialFetchDurationMs: 0,
+    refreshCacheReadDurationMs: 0,
+    archiveReadDurationMs: 0,
+    officialFetchStatus: null,
+    refreshDataSource: null,
+  };
+  const eligibility = await measureRefreshOperation(
+    measurements,
+    "refreshEligibilityDurationMs",
+    () => readOfficialFetchEligibility(env.KF3_NOTIF_DATA),
+  );
+  if (!eligibility.ifNoneMatch)
+    return getRefreshNewsUnconditionally(env, dependencies, measurements);
 
-  const official = await fetchOfficialNews(dependencies.fetcher ?? fetch, {
-    ifNoneMatch: eligibility.ifNoneMatch,
+  const official = await measureOfficialFetch(measurements, dependencies.fetcher ?? fetch, {
+    ifNoneMatch: eligibility.ifNoneMatch!,
   });
+  measurements.officialFetchStatus = official.status;
   if (official.status === "not-modified") {
-    const cached = await env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey);
+    const cached = await measureRefreshOperation(measurements, "refreshCacheReadDurationMs", () =>
+      env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey),
+    );
     if (
       cached.value !== null &&
       isReusableNewsCacheMetadata(cached.metadata) &&
       cached.metadata.baseArchiveEtag === eligibility.currentEtag
     ) {
       return {
+        ...measurements,
         clientJson: cached.value,
         newsCount: cached.metadata.newsCount,
         currentEtag: eligibility.currentEtag,
         currentExists: true,
         addedCount: 0,
         updatedCount: 0,
+        officialFetchStatus: "not-modified",
+        refreshDataSource: "kv",
       };
     }
 
-    const current = await readCurrentArchiveDocumentIfEtag(
-      env.KF3_NOTIF_DATA,
-      eligibility.currentEtag ?? "",
+    const current = await measureRefreshOperation(measurements, "archiveReadDurationMs", () =>
+      readCurrentArchiveDocumentIfEtag(env.KF3_NOTIF_DATA, eligibility.currentEtag ?? ""),
     );
     if (current) {
       return {
+        ...measurements,
         ...serializeClientNews(projectValidatedClientNews(current.document)),
         currentEtag: current.etag,
         currentExists: true,
         addedCount: 0,
         updatedCount: 0,
+        officialFetchStatus: "not-modified",
+        refreshDataSource: "current",
       };
     }
-    return getRefreshNewsUnconditionally(env, dependencies);
+    return getRefreshNewsUnconditionally(env, dependencies, measurements);
   }
 
-  const archive = await readArchiveDocument(env.KF3_NOTIF_DATA);
-  let merged: ValidatedNewsMergeResult;
-  merged = mergeValidatedNewsDocument(archive.document, official.document, {
-    validateOfficialEntries: true,
-  });
+  const archive = await measureRefreshOperation(measurements, "archiveReadDurationMs", () =>
+    readArchiveDocument(env.KF3_NOTIF_DATA),
+  );
+  const merged: ValidatedNewsMergeResult = mergeValidatedNewsDocument(
+    archive.document,
+    official.document,
+    {
+      validateOfficialEntries: true,
+    },
+  );
   return {
+    ...measurements,
     ...serializeClientNews(projectValidatedClientNews(merged.document)),
     currentEtag: archive.etag,
     currentExists: archive.currentExists,
     addedCount: merged.stats.addedCount,
     updatedCount: merged.stats.updatedCount,
+    officialFetchStatus: "modified",
+    refreshDataSource: "full-merge",
   };
 };
 
@@ -363,6 +441,9 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
   ) => {
     let archiveCount: number | null = null;
     let lease: NewsRefreshLease | null = null;
+    let cachePutDurationMs = 0;
+    let currentEtagCheckDurationMs = 0;
+    let leaseCompletionDurationMs = 0;
     const refreshStartedAt = performance.now();
     try {
       const leaseAcquireStartedAt = performance.now();
@@ -417,10 +498,15 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         result.newsCount,
       );
       const responseJson = result.clientJson;
-      await context.env.KF3_NOTIF_CACHE.put(cacheKey, responseJson, {
-        expirationTtl: normalCacheTtl,
-        metadata,
-      });
+      const cachePutStartedAt = performance.now();
+      try {
+        await context.env.KF3_NOTIF_CACHE.put(cacheKey, responseJson, {
+          expirationTtl: normalCacheTtl,
+          metadata,
+        });
+      } finally {
+        cachePutDurationMs = performance.now() - cachePutStartedAt;
+      }
       const deleteWrittenCache = async () => {
         try {
           await context.env.KF3_NOTIF_CACHE.delete(cacheKey);
@@ -432,8 +518,14 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         }
       };
       try {
-        const currentAfterCachePut = await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY);
-        if ((result.currentEtag ?? null) !== (currentAfterCachePut?.etag ?? null)) {
+        const currentEtagCheckStartedAt = performance.now();
+        let currentEtag: string | null;
+        try {
+          currentEtag = (await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY))?.etag ?? null;
+        } finally {
+          currentEtagCheckDurationMs = performance.now() - currentEtagCheckStartedAt;
+        }
+        if ((result.currentEtag ?? null) !== currentEtag) {
           throw new NewsArchiveError("etag-conflict", "refreshのKV保存中にcurrentが競合しました");
         }
       } catch (error) {
@@ -441,6 +533,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         throw error;
       }
       let leaseCompletion: string;
+      const leaseCompletionStartedAt = performance.now();
       try {
         leaseCompletion = await completeNewsRefreshLease(
           context.env.KF3_NOTIF_DATA,
@@ -454,6 +547,8 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           event: "news_refresh_control_completion_failed",
           originalError: serializeArchiveErrorForLog(error),
         });
+      } finally {
+        leaseCompletionDurationMs = performance.now() - leaseCompletionStartedAt;
       }
       if (leaseCompletion === "lease-mismatch") {
         return createRefreshLeaseExpiredResponse();
@@ -506,8 +601,18 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         archiveUpdateNeeded,
         archiveUpdateQueueStatus,
         leaseCompletion,
+        officialFetchCount: result.officialFetchCount,
+        officialFetchStatus: result.officialFetchStatus,
+        refreshDataSource: result.refreshDataSource,
         refreshLeaseAcquireDurationMs,
+        refreshEligibilityDurationMs: result.refreshEligibilityDurationMs,
         refreshFetchDurationMs,
+        officialFetchDurationMs: result.officialFetchDurationMs,
+        refreshCacheReadDurationMs: result.refreshCacheReadDurationMs,
+        archiveReadDurationMs: result.archiveReadDurationMs,
+        cachePutDurationMs,
+        currentEtagCheckDurationMs,
+        leaseCompletionDurationMs,
         refreshFinalizationDurationMs: performance.now() - refreshFinalizationStartedAt,
         refreshTotalDurationMs: performance.now() - refreshStartedAt,
       });

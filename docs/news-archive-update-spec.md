@@ -200,7 +200,7 @@ GETのKV missはarchive snapshotを投影してwrite-throughするが、公式�
 
 更新成功ログには更新有無、実行時刻、各件数、公式レスポンスのバイト数、backup key、`officialFetchStatus`、`conditionalRequestUsed`、`currentEtagMatchedState`、`officialBodyProcessed`、`monthlyBackupStatus`、`etagStateStatus`、処理時間を含める。公式ETagとR2 ETagの値自体はログへ出さない。処理時間は外部I/O待ちを含む経過時間であり、WorkersのCPU時間判定には使用しない。
 
-refresh成功ログにはarchive件数、merge後件数、追加件数、変更件数、current初期化の要否、archive更新の要否、Queue送信状態、lease完了状態を含める。制御metadataの内容、ETag値、公式本文、secretは記録しない。
+refresh成功ログにはarchive件数、merge後件数、追加件数、変更件数、current初期化の要否、archive更新の要否、Queue送信状態、lease完了状態、`officialFetchCount`、`officialFetchStatus`、`refreshDataSource`、`refreshEligibilityDurationMs`、`officialFetchDurationMs`、`refreshCacheReadDurationMs`、`archiveReadDurationMs`、`cachePutDurationMs`、`currentEtagCheckDurationMs`、`leaseCompletionDurationMs`を含める。各durationは外部I/O待ちを含む経過時間であり、制御metadataの内容、ETag値、公式本文、secretは記録しない。
 
 失敗ログには処理段階とエラー詳細を含めるが、公式レスポンス本文やheartbeat URL、ETag値、refresh制御metadataの秘密値は含めない。汎用エラーの詳細には`originalError`としてnameとmessageだけを含める。制御文字と改行を空白へ正規化し、URL、Authorization、Bearer、一般的なtoken・secret・password形式、JWTと既知のtoken prefixをredactした後、nameを100文字、messageを500文字までに制限する。stack、cause、独自プロパティは含めず、非`Error`値は任意に文字列化せず固定値で記録する。
 
