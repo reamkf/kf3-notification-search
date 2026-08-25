@@ -679,6 +679,9 @@ describe("Worker API handler", () => {
         archiveChanged: true,
         archiveUpdateNeeded: true,
         archiveUpdateQueueStatus: "queued",
+        refreshFetchDurationMs: expect.any(Number),
+        refreshFinalizationDurationMs: expect.any(Number),
+        refreshTotalDurationMs: expect.any(Number),
       }),
     );
   });

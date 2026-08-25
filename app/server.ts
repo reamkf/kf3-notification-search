@@ -383,7 +383,10 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       }
       token = acquired.token;
 
+      const refreshFetchStartedAt = performance.now();
       const result = await getRefreshNews(context.env, dependencies);
+      const refreshFetchDurationMs = performance.now() - refreshFetchStartedAt;
+      const refreshFinalizationStartedAt = performance.now();
       archiveCount = result.newsCount;
       const nowMs = dependencies.clock?.() ?? Date.now();
       const remainingLeaseMs = Date.parse(acquired.control.leaseUntil) - nowMs;
@@ -498,6 +501,9 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         archiveUpdateNeeded,
         archiveUpdateQueueStatus,
         leaseCompletion,
+        refreshFetchDurationMs,
+        refreshFinalizationDurationMs: performance.now() - refreshFinalizationStartedAt,
+        refreshTotalDurationMs: performance.now() - refreshFetchStartedAt,
       });
       return createRefreshResponse(result.clientJson, metadata);
     } catch (error) {
