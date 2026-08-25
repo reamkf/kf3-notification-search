@@ -394,13 +394,17 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         }
       }
       archiveCount = result.newsCount;
-      const leaseRenewal = await renewNewsRefreshLease(
-        context.env.KF3_NOTIF_DATA,
-        token,
-        dependencies.clock?.() ?? Date.now(),
-        NEWS_REFRESH_FINALIZATION_LEASE_MS,
-      );
-      if (leaseRenewal !== "updated") return createRefreshLeaseExpiredResponse();
+      const nowMs = dependencies.clock?.() ?? Date.now();
+      const remainingLeaseMs = Date.parse(acquired.control.leaseUntil) - nowMs;
+      if (remainingLeaseMs < 20_000) {
+        const leaseRenewal = await renewNewsRefreshLease(
+          context.env.KF3_NOTIF_DATA,
+          token,
+          nowMs,
+          NEWS_REFRESH_FINALIZATION_LEASE_MS,
+        );
+        if (leaseRenewal !== "updated") return createRefreshLeaseExpiredResponse();
+      }
 
       const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
       const reusableArchiveEtag =

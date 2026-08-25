@@ -609,6 +609,7 @@ describe("Worker API handler", () => {
     const originalData = setup.env.KF3_NOTIF_DATA;
     let controlText: string | null = null;
     let controlEtag = "control-etag-0";
+    let controlPuts = 0;
     setup.env.KF3_NOTIF_DATA = {
       get: async (key: string, options?: unknown) => {
         if (key === "control/news-refresh.json") {
@@ -619,6 +620,7 @@ describe("Worker API handler", () => {
       head: originalData.head.bind(originalData),
       put: async (key: string, value: string) => {
         if (key === "control/news-refresh.json") {
+          controlPuts += 1;
           controlText = value;
           controlEtag = `control-etag-${controlText.length}`;
           return { etag: controlEtag } as R2Object;
@@ -643,6 +645,7 @@ describe("Worker API handler", () => {
     };
 
     expect(response.status).toBe(200);
+    expect(controlPuts).toBe(2);
     expect(payload.news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
     expect(payload.news[0].category).toBe("refresh");
     expect(payload.metadata).toEqual(
@@ -944,6 +947,8 @@ describe("Worker API handler", () => {
 
   it("refresh leaseの延長CAS競合時はKVを更新せず202にする", async () => {
     const setup = createBindings(JSON.stringify(createDocument(1)));
+    const startedAt = Date.parse("2026-08-09T12:00:00.000Z");
+    const clockValues = [startedAt, startedAt + 50_000];
     const originalData = setup.env.KF3_NOTIF_DATA;
     let controlPuts = 0;
     setup.env.KF3_NOTIF_DATA = {
@@ -961,6 +966,7 @@ describe("Worker API handler", () => {
     const response = await callFetch(
       createWorkerHandler({
         fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+        clock: () => clockValues.shift() ?? startedAt + 50_000,
       }),
       new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
       setup.env,
@@ -1019,7 +1025,7 @@ describe("Worker API handler", () => {
     expect(setup.queueMessages).toHaveLength(0);
   });
 
-  it("refreshのlease失効時はKVを更新せず202にする", async () => {
+  it("refreshのlease失効をKV保存後に検出して202にする", async () => {
     const setup = createBindings(JSON.stringify(createDocument(1)));
     const originalData = setup.env.KF3_NOTIF_DATA;
     let controlText: string | null = null;
@@ -1055,7 +1061,7 @@ describe("Worker API handler", () => {
       setup.env,
     );
     expect(response.status).toBe(202);
-    expect(setup.cachePuts).toHaveLength(0);
+    expect(setup.cachePuts).toHaveLength(1);
     expect(setup.queueMessages).toHaveLength(0);
   });
 
@@ -1089,7 +1095,7 @@ describe("Worker API handler", () => {
       get: async (key: string, options?: unknown) => {
         if (key === "control/news-refresh.json") {
           controlReads += 1;
-          if (controlReads === 4) {
+          if (controlReads === 2) {
             setup.cacheValues.set("kf3-news", "newer-refresh-cache");
             return createR2Object(
               JSON.stringify({
