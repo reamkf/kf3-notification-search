@@ -977,31 +977,25 @@ describe("Worker API handler", () => {
     expect(setup.queueMessages).toHaveLength(0);
   });
 
-  it("refresh中にcurrentが競合するとKVを更新せず503にする", async () => {
-    const setup = createBindings(JSON.stringify(createDocument(1)));
-    let headCalls = 0;
-    const originalData = setup.env.KF3_NOTIF_DATA;
-    setup.env.KF3_NOTIF_DATA = {
-      get: originalData.get.bind(originalData),
-      head: async (key: string) => {
-        if (key === CURRENT_ARCHIVE_KEY) {
-          headCalls += 1;
-          return { etag: headCalls > 1 ? "changed-current" : "current-etag" } as R2Object;
-        }
-        return null;
-      },
-      put: originalData.put?.bind(originalData),
-    } as unknown as R2Bucket;
-    const handler = createWorkerHandler({
-      fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+  it("refresh後にcurrentが競合するとstaleなKVを削除して503にする", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      conditionalCurrentMismatch: true,
     });
+    let fetchCalls = 0;
     const response = await callFetch(
-      handler,
+      createWorkerHandler({
+        fetcher: async () => {
+          fetchCalls += 1;
+          return createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT));
+        },
+      }),
       new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
       setup.env,
     );
     expect(response.status).toBe(503);
-    expect(setup.cachePuts).toHaveLength(0);
+    expect(fetchCalls).toBe(1);
+    expect(setup.cachePuts).toHaveLength(1);
+    expect(setup.cacheDeletes).toContain("kf3-news");
     expect(setup.queueMessages).toHaveLength(0);
   });
 

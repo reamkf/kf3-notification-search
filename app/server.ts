@@ -383,15 +383,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       }
       token = acquired.token;
 
-      let result = await getRefreshNews(context.env, dependencies);
-      let current = await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY);
-      if ((result.currentEtag ?? null) !== (current?.etag ?? null)) {
-        result = await getRefreshNews(context.env, dependencies);
-        current = await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY);
-        if ((result.currentEtag ?? null) !== (current?.etag ?? null)) {
-          throw new NewsArchiveError("etag-conflict", "refresh中にcurrentが競合しました");
-        }
-      }
+      const result = await getRefreshNews(context.env, dependencies);
       archiveCount = result.newsCount;
       const nowMs = dependencies.clock?.() ?? Date.now();
       const remainingLeaseMs = Date.parse(acquired.control.leaseUntil) - nowMs;
