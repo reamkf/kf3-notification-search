@@ -20,9 +20,13 @@ const createBucket = (initial: string | null = null) => {
   let value = initial;
   let etag = initial === null ? null : "etag-1";
   let sequence = 1;
+  let getCalls = 0;
   return {
     bucket: {
-      get: async () => (value === null || etag === null ? null : object(value, etag)),
+      get: async () => {
+        getCalls += 1;
+        return value === null || etag === null ? null : object(value, etag);
+      },
       put: async (_key: string, next: string, options?: { onlyIf?: unknown }) => {
         const condition = options?.onlyIf as
           | { etagMatches?: string; etagDoesNotMatch?: string }
@@ -41,6 +45,7 @@ const createBucket = (initial: string | null = null) => {
       },
     } as unknown as R2Bucket,
     read: () => (value === null ? null : JSON.parse(value)),
+    getCalls: () => getCalls,
   };
 };
 
@@ -56,32 +61,36 @@ describe("news refresh control", () => {
 
     const recovered = await acquireNewsRefreshLease(setup.bucket, 61_000);
     expect(recovered.status).toBe("acquired");
-    expect(recovered.status === "acquired" && recovered.token).not.toBe(first.token);
+    if (recovered.status === "acquired") {
+      expect(recovered.lease.leaseToken).not.toBe(first.lease.leaseToken);
+    }
   });
 
-  it("renews the active token before finalization without reviving expired leases", async () => {
+  it("renews the active lease before finalization without reviving expired leases", async () => {
     const setup = createBucket();
     const acquired = await acquireNewsRefreshLease(setup.bucket, 0);
     expect(acquired.status).toBe("acquired");
     if (acquired.status !== "acquired") return;
 
-    expect(
-      await renewNewsRefreshLease(
-        setup.bucket,
-        acquired.token,
-        59_000,
-        NEWS_REFRESH_FINALIZATION_LEASE_MS,
-      ),
-    ).toBe("updated");
+    const renewed = await renewNewsRefreshLease(
+      setup.bucket,
+      acquired.lease,
+      59_000,
+      NEWS_REFRESH_FINALIZATION_LEASE_MS,
+    );
+    expect(renewed).toMatchObject({
+      leaseToken: acquired.lease.leaseToken,
+      leaseUntil: new Date(59_000 + NEWS_REFRESH_FINALIZATION_LEASE_MS).toISOString(),
+    });
+    expect(setup.getCalls()).toBe(1);
     expect(setup.read()).toMatchObject({
       status: "running",
-      token: acquired.token,
+      token: acquired.lease.leaseToken,
       leaseUntil: new Date(59_000 + NEWS_REFRESH_FINALIZATION_LEASE_MS).toISOString(),
     });
     expect(await acquireNewsRefreshLease(setup.bucket, 61_000)).toMatchObject({
       status: "running",
     });
-    expect(await renewNewsRefreshLease(setup.bucket, "wrong", 61_000)).toBe("inactive");
 
     const expired = createBucket(
       JSON.stringify({
@@ -93,21 +102,38 @@ describe("news refresh control", () => {
         lastOutcome: null,
       }),
     );
-    expect(await renewNewsRefreshLease(expired.bucket, "expired-token", 60_000)).toBe("inactive");
+    expect(
+      await renewNewsRefreshLease(
+        expired.bucket,
+        {
+          leaseToken: "expired-token",
+          etag: "etag-1",
+          leaseUntil: new Date(60_000).toISOString(),
+        },
+        60_000,
+      ),
+    ).toBe("inactive");
   });
 
-  it("returns cooldown only after a successful token-matched completion", async () => {
+  it("returns cooldown only after a successful lease-matched completion", async () => {
     const setup = createBucket();
     const acquired = await acquireNewsRefreshLease(setup.bucket, 1000);
     expect(acquired.status).toBe("acquired");
     if (acquired.status !== "acquired") return;
 
-    expect(await completeNewsRefreshLease(setup.bucket, "wrong", "success", 1000)).toBe(
-      "token-mismatch",
-    );
-    expect(await completeNewsRefreshLease(setup.bucket, acquired.token, "success", 1000)).toBe(
+    expect(
+      await completeNewsRefreshLease(
+        setup.bucket,
+        { ...acquired.lease, etag: "wrong-etag" },
+        "success",
+        1000,
+      ),
+    ).toBe("lease-mismatch");
+    expect(setup.getCalls()).toBe(1);
+    expect(await completeNewsRefreshLease(setup.bucket, acquired.lease, "success", 1000)).toBe(
       "updated",
     );
+    expect(setup.getCalls()).toBe(1);
 
     const cooldown = await acquireNewsRefreshLease(setup.bucket, 1001);
     expect(cooldown.status).toBe("cooldown");
@@ -125,10 +151,10 @@ describe("news refresh control", () => {
     expect(acquired.status).toBe("acquired");
     if (acquired.status !== "acquired") return;
 
-    expect(await completeNewsRefreshLease(setup.bucket, acquired.token, "success", 60_000)).toBe(
-      "token-mismatch",
+    expect(await completeNewsRefreshLease(setup.bucket, acquired.lease, "success", 60_000)).toBe(
+      "lease-mismatch",
     );
-    expect(setup.read()).toMatchObject({ status: "running", token: acquired.token });
+    expect(setup.read()).toMatchObject({ status: "running", token: acquired.lease.leaseToken });
   });
 
   it("does not start cooldown for a failed refresh", async () => {
@@ -137,7 +163,7 @@ describe("news refresh control", () => {
     expect(acquired.status).toBe("acquired");
     if (acquired.status !== "acquired") return;
 
-    expect(await completeNewsRefreshLease(setup.bucket, acquired.token, "failure", 0)).toBe(
+    expect(await completeNewsRefreshLease(setup.bucket, acquired.lease, "failure", 0)).toBe(
       "updated",
     );
     expect(setup.read()).toMatchObject({ status: "idle", lastOutcome: "failure" });

@@ -32,6 +32,7 @@ import {
   completeNewsRefreshLease,
   renewNewsRefreshLease,
   type NewsRefreshAcquireResult,
+  type NewsRefreshLease,
 } from "./news-refresh-control";
 import {
   createNewsCacheMetadata,
@@ -361,7 +362,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
     >,
   ) => {
     let archiveCount: number | null = null;
-    let token: string | null = null;
+    let lease: NewsRefreshLease | null = null;
     const refreshStartedAt = performance.now();
     try {
       const leaseAcquireStartedAt = performance.now();
@@ -384,7 +385,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         });
         return createRefreshBusyResponse(acquired);
       }
-      token = acquired.token;
+      lease = acquired.lease;
 
       const refreshFetchStartedAt = performance.now();
       const result = await getRefreshNews(context.env, dependencies);
@@ -392,15 +393,16 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       const refreshFinalizationStartedAt = performance.now();
       archiveCount = result.newsCount;
       const nowMs = dependencies.clock?.() ?? Date.now();
-      const remainingLeaseMs = Date.parse(acquired.control.leaseUntil) - nowMs;
+      const remainingLeaseMs = Date.parse(lease.leaseUntil) - nowMs;
       if (remainingLeaseMs < 20_000) {
         const leaseRenewal = await renewNewsRefreshLease(
           context.env.KF3_NOTIF_DATA,
-          token,
+          lease,
           nowMs,
           NEWS_REFRESH_FINALIZATION_LEASE_MS,
         );
-        if (leaseRenewal !== "updated") return createRefreshLeaseExpiredResponse();
+        if (typeof leaseRenewal === "string") return createRefreshLeaseExpiredResponse();
+        lease = leaseRenewal;
       }
 
       const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
@@ -442,7 +444,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       try {
         leaseCompletion = await completeNewsRefreshLease(
           context.env.KF3_NOTIF_DATA,
-          token,
+          lease,
           "success",
           dependencies.clock?.() ?? Date.now(),
         );
@@ -453,7 +455,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           originalError: serializeArchiveErrorForLog(error),
         });
       }
-      if (leaseCompletion === "token-mismatch") {
+      if (leaseCompletion === "lease-mismatch") {
         return createRefreshLeaseExpiredResponse();
       }
       const requiresInitialization = !result.currentExists;
@@ -512,11 +514,11 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       return createRefreshResponse(result.clientJson, metadata);
     } catch (error) {
       logger.error(createRefreshErrorLog(error, archiveCount));
-      if (token !== null) {
+      if (lease !== null) {
         try {
           await completeNewsRefreshLease(
             context.env.KF3_NOTIF_DATA,
-            token,
+            lease,
             "failure",
             dependencies.clock?.() ?? Date.now(),
           );

@@ -18,6 +18,13 @@ export type NewsRefreshControl = {
   lastOutcome: NewsRefreshOutcome | null;
 };
 
+/** The ETag is the CAS capability; leaseToken is persisted control metadata. */
+export type NewsRefreshLease = Readonly<{
+  leaseToken: string;
+  etag: string;
+  leaseUntil: string;
+}>;
+
 type RefreshControlObject = {
   object: R2Object | null;
   control: NewsRefreshControl | null;
@@ -26,8 +33,7 @@ type RefreshControlObject = {
 export type NewsRefreshAcquireResult =
   | {
       status: "acquired";
-      token: string;
-      control: NewsRefreshControl;
+      lease: NewsRefreshLease;
     }
   | {
       status: "running";
@@ -40,8 +46,8 @@ export type NewsRefreshAcquireResult =
       nextAvailableAt: string;
     };
 
-export type NewsRefreshCompletionResult = "updated" | "token-mismatch" | "conflict";
-export type NewsRefreshRenewalResult = "updated" | "inactive" | "conflict";
+export type NewsRefreshCompletionResult = "updated" | "lease-mismatch";
+export type NewsRefreshRenewalResult = NewsRefreshLease | "inactive" | "lease-mismatch";
 
 const contentType = "application/json; charset=utf-8";
 const maxCasAttempts = 5;
@@ -119,14 +125,12 @@ const readControl = async (bucket: R2Bucket): Promise<RefreshControlObject> => {
 const putControl = async (
   bucket: R2Bucket,
   control: NewsRefreshControl,
-  object: R2Object | null,
-): Promise<boolean> => {
-  const result = await bucket.put(NEWS_REFRESH_CONTROL_KEY, JSON.stringify(control), {
-    onlyIf: object ? { etagMatches: object.etag } : createIfAbsentCondition(),
+  etag: string | null,
+): Promise<R2Object | null> =>
+  bucket.put(NEWS_REFRESH_CONTROL_KEY, JSON.stringify(control), {
+    onlyIf: etag ? { etagMatches: etag } : createIfAbsentCondition(),
     httpMetadata: { contentType },
   });
-  return result !== null;
-};
 
 const secondsUntil = (untilMs: number, nowMs: number) =>
   Math.max(1, Math.ceil(Math.max(0, untilMs - nowMs) / 1000));
@@ -145,30 +149,25 @@ export const readNewsRefreshControl = readControl;
 
 export const renewNewsRefreshLease = async (
   bucket: R2Bucket,
-  token: string,
+  lease: NewsRefreshLease,
   nowMs = Date.now(),
   leaseMs = NEWS_REFRESH_LEASE_MS,
 ): Promise<NewsRefreshRenewalResult> => {
-  for (let attempt = 0; attempt < maxCasAttempts; attempt += 1) {
-    const current = await readControl(bucket);
-    const leaseUntil = parseTime(current.control?.leaseUntil);
-    if (
-      current.control?.status !== "running" ||
-      current.control.token !== token ||
-      leaseUntil === null ||
-      leaseUntil <= nowMs
-    ) {
-      return "inactive";
-    }
+  const currentLeaseUntil = parseTime(lease.leaseUntil);
+  if (currentLeaseUntil === null || currentLeaseUntil <= nowMs) return "inactive";
 
-    const nextControl: NewsRefreshControl = {
-      ...current.control,
-      leaseUntil: toIso(nowMs + leaseMs),
-    };
-    if (await putControl(bucket, nextControl, current.object)) return "updated";
-  }
-
-  return "conflict";
+  const nextLeaseUntil = toIso(nowMs + leaseMs);
+  const nextControl: NewsRefreshControl = {
+    version: NEWS_REFRESH_CONTROL_VERSION,
+    status: "running",
+    token: lease.leaseToken,
+    leaseUntil: nextLeaseUntil,
+    cooldownUntil: null,
+    lastOutcome: null,
+  };
+  const result = await putControl(bucket, nextControl, lease.etag);
+  if (!result) return "lease-mismatch";
+  return { ...lease, etag: result.etag, leaseUntil: nextLeaseUntil };
 };
 
 export const acquireNewsRefreshLease = async (
@@ -198,8 +197,12 @@ export const acquireNewsRefreshLease = async (
 
     const token = crypto.randomUUID();
     const nextControl = createRunningControl(token, nowMs);
-    if (await putControl(bucket, nextControl, current.object)) {
-      return { status: "acquired", token, control: nextControl };
+    const result = await putControl(bucket, nextControl, current.object?.etag ?? null);
+    if (result) {
+      return {
+        status: "acquired",
+        lease: { leaseToken: token, etag: result.etag, leaseUntil: nextControl.leaseUntil! },
+      };
     }
   }
 
@@ -225,32 +228,21 @@ export const acquireNewsRefreshLease = async (
 
 export const completeNewsRefreshLease = async (
   bucket: R2Bucket,
-  token: string,
+  lease: NewsRefreshLease,
   outcome: NewsRefreshOutcome,
   nowMs = Date.now(),
 ): Promise<NewsRefreshCompletionResult> => {
-  for (let attempt = 0; attempt < maxCasAttempts; attempt += 1) {
-    const current = await readControl(bucket);
-    const leaseUntil = parseTime(current.control?.leaseUntil);
-    if (
-      current.control?.status !== "running" ||
-      current.control.token !== token ||
-      leaseUntil === null ||
-      leaseUntil <= nowMs
-    ) {
-      return "token-mismatch";
-    }
+  const leaseUntil = parseTime(lease.leaseUntil);
+  if (leaseUntil === null || leaseUntil <= nowMs) return "lease-mismatch";
 
-    const nextControl: NewsRefreshControl = {
-      version: NEWS_REFRESH_CONTROL_VERSION,
-      status: outcome === "success" ? "cooldown" : "idle",
-      token: null,
-      leaseUntil: null,
-      cooldownUntil: outcome === "success" ? toIso(nowMs + NEWS_REFRESH_COOLDOWN_MS) : null,
-      lastOutcome: outcome,
-    };
-    if (await putControl(bucket, nextControl, current.object)) return "updated";
-  }
-
-  return "conflict";
+  const nextControl: NewsRefreshControl = {
+    version: NEWS_REFRESH_CONTROL_VERSION,
+    status: outcome === "success" ? "cooldown" : "idle",
+    token: null,
+    leaseUntil: null,
+    cooldownUntil: outcome === "success" ? toIso(nowMs + NEWS_REFRESH_COOLDOWN_MS) : null,
+    lastOutcome: outcome,
+  };
+  const result = await putControl(bucket, nextControl, lease.etag);
+  return result ? "updated" : "lease-mismatch";
 };

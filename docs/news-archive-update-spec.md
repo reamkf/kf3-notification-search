@@ -29,7 +29,7 @@ refreshは公式データとcurrentまたはlegacyをmergeし、表示用配列�
 - merge差分では`reason=refresh-detected-change`、current未作成では`reason=refresh-current-missing`と`requiresInitialization=true`を使用する。current未作成messageは追加・変更件数が0でも有効とする。
 - Queue送信はbest-effortで行い、`waitUntil`へ登録する。送信失敗は`news_archive_update_enqueue_failed`へ記録するが、refreshの表示用KV保存を取り消さず、HTTP 200を返す。
 - KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
-- KV保存後にcurrent ETagを確認し、競合時は保存したKVを削除して503を返す。currentが一致した場合はcompletionでleaseのtokenと期限を検証し、失効または別tokenへの移行時は他refreshのKVを削除せず202を返し、Queueへ通知しない。
+- KV保存後にcurrent ETagを確認し、競合時は保存したKVを削除して503を返す。currentが一致した場合は取得時または延長後のlease handleの期限を検証し、leaseTokenはcontrol metadataとして扱い、保持したcontrol ETagだけでcompletionをCASする。CAS不成立または期限切れの場合は他refreshのKVを削除せず202を返し、Queueへ通知しない。
 - Queue consumerはmessageを検証し、別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行する。`requiresInitialization=true`の場合も公式データを再取得し、currentがなければ既存の初回作成経路を使用する。
 - Queue consumerが成功したmessageはackし、更新処理が失敗したmessageはackせず60秒後にretryする。
 - scheduled handlerはQueue送信またはconsumer実行に依存せず、毎日03:15 JSTに`trigger=scheduled`で同じ更新処理を実行する。

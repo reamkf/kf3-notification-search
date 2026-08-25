@@ -941,7 +941,7 @@ describe("Worker API handler", () => {
     }
   });
 
-  it("refresh完了CAS失敗後もKV更新済みの成功を返し失敗ログを出さない", async () => {
+  it("refresh完了CAS失敗後はKVを維持して202を返す", async () => {
     const setup = createBindings(JSON.stringify(createDocument(1)));
     setup.cacheValues.set("kf3-news", "old-cache");
     const originalData = setup.env.KF3_NOTIF_DATA;
@@ -959,7 +959,7 @@ describe("Worker API handler", () => {
       put: async (key: string, value: string) => {
         if (key !== "control/news-refresh.json") return null;
         puts += 1;
-        if (puts > 2) return null;
+        if (puts > 1) return null;
         controlText = value;
         controlEtag = "control-1";
         return { etag: controlEtag } as R2Object;
@@ -975,9 +975,9 @@ describe("Worker API handler", () => {
       new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
       setup.env,
     );
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(setup.cacheValues.get("kf3-news")).not.toBe("old-cache");
-    expect(logs).toContainEqual(expect.objectContaining({ event: "news_refresh_succeeded" }));
+    expect(logs).not.toContainEqual(expect.objectContaining({ event: "news_refresh_succeeded" }));
     expect(logs).not.toContainEqual(expect.objectContaining({ event: "news_refresh_failed" }));
   });
 
@@ -1059,6 +1059,7 @@ describe("Worker API handler", () => {
     const setup = createBindings(JSON.stringify(createDocument(1)));
     const originalData = setup.env.KF3_NOTIF_DATA;
     let controlText: string | null = null;
+    let controlPuts = 0;
     setup.env.KF3_NOTIF_DATA = {
       get: async (key: string, options?: unknown) => {
         if (key === "control/news-refresh.json") {
@@ -1070,6 +1071,8 @@ describe("Worker API handler", () => {
       head: originalData.head.bind(originalData),
       put: async (key: string, _value: string) => {
         if (key === "control/news-refresh.json") {
+          controlPuts += 1;
+          if (controlPuts > 1) return null;
           controlText = JSON.stringify({
             version: 1,
             status: "running",
@@ -1116,34 +1119,24 @@ describe("Worker API handler", () => {
     expect(setup.queueMessages).toHaveLength(1);
   });
 
-  it("KV保存後にlease tokenが変わっても次refreshのKVを削除しない", async () => {
+  it("KV保存後にleaseが不一致でも次refreshのKVを削除しない", async () => {
     const setup = createBindings(JSON.stringify(createDocument(1)));
     setup.cacheValues.set("kf3-news", "old-cache");
     const originalData = setup.env.KF3_NOTIF_DATA;
-    let controlReads = 0;
+    let controlPuts = 0;
     setup.env.KF3_NOTIF_DATA = {
-      get: async (key: string, options?: unknown) => {
+      get: originalData.get.bind(originalData),
+      head: originalData.head.bind(originalData),
+      put: async (key: string, value: string, options?: unknown) => {
         if (key === "control/news-refresh.json") {
-          controlReads += 1;
-          if (controlReads === 2) {
+          controlPuts += 1;
+          if (controlPuts > 1) {
             setup.cacheValues.set("kf3-news", "newer-refresh-cache");
-            return createR2Object(
-              JSON.stringify({
-                version: 1,
-                status: "running",
-                token: "other-token",
-                leaseUntil: "2099-01-01T00:00:00.000Z",
-                cooldownUntil: null,
-                lastOutcome: null,
-              }),
-              "other-control-etag",
-            );
+            return null;
           }
         }
-        return originalData.get(key, options as never);
+        return originalData.put(key, value, options as never);
       },
-      head: originalData.head.bind(originalData),
-      put: originalData.put.bind(originalData),
     } as unknown as R2Bucket;
     const response = await callFetch(
       createWorkerHandler({
