@@ -30,7 +30,6 @@ import {
   NEWS_REFRESH_FINALIZATION_LEASE_MS,
   acquireNewsRefreshLease,
   completeNewsRefreshLease,
-  hasActiveNewsRefreshLease,
   renewNewsRefreshLease,
   type NewsRefreshAcquireResult,
 } from "./news-refresh-control";
@@ -440,15 +439,6 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       } catch (error) {
         await deleteWrittenCache();
         throw error;
-      }
-      if (
-        !(await hasActiveNewsRefreshLease(
-          context.env.KF3_NOTIF_DATA,
-          token,
-          dependencies.clock?.() ?? Date.now(),
-        ))
-      ) {
-        return createRefreshLeaseExpiredResponse();
       }
       let leaseCompletion: string;
       try {

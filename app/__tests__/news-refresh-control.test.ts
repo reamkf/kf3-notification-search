@@ -119,6 +119,18 @@ describe("news refresh control", () => {
     expect(next.status).toBe("acquired");
   });
 
+  it("does not complete an expired lease", async () => {
+    const setup = createBucket();
+    const acquired = await acquireNewsRefreshLease(setup.bucket, 0);
+    expect(acquired.status).toBe("acquired");
+    if (acquired.status !== "acquired") return;
+
+    expect(await completeNewsRefreshLease(setup.bucket, acquired.token, "success", 60_000)).toBe(
+      "token-mismatch",
+    );
+    expect(setup.read()).toMatchObject({ status: "running", token: acquired.token });
+  });
+
   it("does not start cooldown for a failed refresh", async () => {
     const setup = createBucket();
     const acquired = await acquireNewsRefreshLease(setup.bucket, 0);

@@ -143,21 +143,6 @@ const createRunningControl = (token: string, nowMs: number): NewsRefreshControl 
 export const parseNewsRefreshControl = parseControl;
 export const readNewsRefreshControl = readControl;
 
-export const hasActiveNewsRefreshLease = async (
-  bucket: R2Bucket,
-  token: string,
-  nowMs = Date.now(),
-): Promise<boolean> => {
-  const current = await readControl(bucket);
-  const leaseUntil = parseTime(current.control?.leaseUntil);
-  return (
-    current.control?.status === "running" &&
-    current.control.token === token &&
-    leaseUntil !== null &&
-    leaseUntil > nowMs
-  );
-};
-
 export const renewNewsRefreshLease = async (
   bucket: R2Bucket,
   token: string,
@@ -246,7 +231,13 @@ export const completeNewsRefreshLease = async (
 ): Promise<NewsRefreshCompletionResult> => {
   for (let attempt = 0; attempt < maxCasAttempts; attempt += 1) {
     const current = await readControl(bucket);
-    if (current.control?.status !== "running" || current.control.token !== token) {
+    const leaseUntil = parseTime(current.control?.leaseUntil);
+    if (
+      current.control?.status !== "running" ||
+      current.control.token !== token ||
+      leaseUntil === null ||
+      leaseUntil <= nowMs
+    ) {
       return "token-mismatch";
     }
 
