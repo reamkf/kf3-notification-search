@@ -459,7 +459,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       const requiresInitialization = !result.currentExists;
       const archiveChanged = result.addedCount > 0 || result.updatedCount > 0;
       const archiveUpdateNeeded = requiresInitialization || archiveChanged;
-      let archiveUpdateQueueStatus: "not-needed" | "queued" | "failed" = "not-needed";
+      let archiveUpdateQueueStatus: "not-needed" | "scheduled" | "schedule-failed" = "not-needed";
       if (archiveUpdateNeeded) {
         const message: NewsArchiveUpdateMessage = {
           version: NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
@@ -482,9 +482,9 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
                 });
               }),
           );
-          archiveUpdateQueueStatus = "queued";
+          archiveUpdateQueueStatus = "scheduled";
         } catch (error) {
-          archiveUpdateQueueStatus = "failed";
+          archiveUpdateQueueStatus = "schedule-failed";
           logger.error({
             event: "news_archive_update_enqueue_failed",
             error: serializeArchiveErrorForLog(error),

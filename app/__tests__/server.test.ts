@@ -678,7 +678,7 @@ describe("Worker API handler", () => {
         requiresInitialization: false,
         archiveChanged: true,
         archiveUpdateNeeded: true,
-        archiveUpdateQueueStatus: "queued",
+        archiveUpdateQueueStatus: "scheduled",
         refreshLeaseAcquireDurationMs: expect.any(Number),
         refreshFetchDurationMs: expect.any(Number),
         refreshFinalizationDurationMs: expect.any(Number),
@@ -895,7 +895,7 @@ describe("Worker API handler", () => {
     expect(logs).toContainEqual(
       expect.objectContaining({
         event: "news_refresh_succeeded",
-        archiveUpdateQueueStatus: "queued",
+        archiveUpdateQueueStatus: "scheduled",
       }),
     );
   });
