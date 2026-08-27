@@ -363,6 +363,7 @@ describe("Worker API handler", () => {
     expect(body).toHaveLength(2);
     expect(response.headers.get("X-KF3-News-Source")).toBe("archive-snapshot");
     expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
+    expect(response.headers.get("X-KF3-News-Data-Version")).toBe("current-etag");
     expect(setup.cachePuts).toHaveLength(1);
     expect(setup.cachePuts[0]).toMatchObject({
       key: "kf3-news-archive-snapshot",
@@ -729,6 +730,7 @@ describe("Worker API handler", () => {
     );
 
     expect(response.status).toBe(200);
+    expect((await response.json()) as { news: unknown[] }).toHaveProperty("news");
     expect(setup.queueMessages).toHaveLength(0);
     expect(logs).toContainEqual(
       expect.objectContaining({
@@ -738,6 +740,36 @@ describe("Worker API handler", () => {
         archiveUpdateQueueStatus: "not-needed",
       }),
     );
+  });
+
+  it("client data versionが一致する変更なしrefreshはnews全件を返さない", async () => {
+    const document = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    const setup = createBindings(JSON.stringify(document));
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => createResponse(document),
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", {
+        method: "POST",
+        headers: { "X-KF3-News-Data-Version": "current-etag" },
+      }),
+      setup.env,
+    );
+    const payload = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({
+      changed: false,
+      metadata: expect.objectContaining({
+        version: 2,
+        source: "merged",
+        baseArchiveEtag: "current-etag",
+        newsCount: MIN_OFFICIAL_ENTRY_COUNT,
+      }),
+    });
+    expect(payload).not.toHaveProperty("news");
+    expect(response.headers.get("X-KF3-News-Data-Version")).toBe("current-etag");
+    expect(response.headers.get("Vary")).toBe("X-KF3-News-Data-Version");
   });
 
   it("current未作成ならmerge差分がなくても初期化Queue messageを送る", async () => {
@@ -826,14 +858,21 @@ describe("Worker API handler", () => {
           new Response(null, { status: 304, headers: { etag: '"official-etag"' } }),
         clock: () => fetchedAt,
       }),
-      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      new Request("https://example.com/api/kf3-news/refresh", {
+        method: "POST",
+        headers: { "X-KF3-News-Data-Version": "current-etag" },
+      }),
       setup.env,
     );
+    const payload = (await response.json()) as Record<string, unknown>;
 
     expect(response.status).toBe(200);
-    expect((await response.json()) as { news: unknown[] }).toEqual(
-      expect.objectContaining({ news: JSON.parse(clientJson) }),
-    );
+    expect(payload).toMatchObject({
+      changed: false,
+      metadata: expect.objectContaining({ baseArchiveEtag: "current-etag" }),
+    });
+    expect(payload).not.toHaveProperty("news");
+    expect(response.headers.get("X-KF3-News-Data-Version")).toBe("current-etag");
     expect(setup.dataGets).not.toContain(CURRENT_ARCHIVE_KEY);
     expect(setup.cachePuts).toHaveLength(1);
     expect(setup.cachePuts[0].value).toBe(clientJson);

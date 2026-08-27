@@ -310,6 +310,54 @@ describe("KemonoFriends3NewsSearch", () => {
     await waitForText("再取得済み");
   });
 
+  it("data version一致時の変更なしrefreshは一覧を維持してmetadataだけ更新する", async () => {
+    const dataVersion = "current-etag";
+    const fetchedAt = new Date().toISOString();
+    const refreshedAt = new Date(Date.now() + 1_000).toISOString();
+    mockNewsApi({
+      news: [createNews(1, "保持する一覧")],
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Fetched-At": fetchedAt,
+        "X-KF3-News-Data-Version": dataVersion,
+      },
+      refreshResponses: [
+        jsonResponse(
+          {
+            changed: false,
+            metadata: { source: "merged", fetchedAt: refreshedAt },
+          },
+          200,
+          {
+            "X-KF3-News-Source": "merged",
+            "X-KF3-News-Fetched-At": refreshedAt,
+            "X-KF3-News-Data-Version": dataVersion,
+          },
+        ),
+      ],
+    });
+
+    mount();
+    await waitForText("保持する一覧");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await vi.waitFor(() => {
+      expect(container.querySelector(`time[datetime="${refreshedAt}"]`)).not.toBeNull();
+    });
+
+    expect(container.textContent).toContain("保持する一覧");
+    expect(container.textContent).not.toContain("更新された一覧");
+    const refreshCall = vi
+      .mocked(fetch)
+      .mock.calls.find(([input]) => String(input).endsWith("/api/kf3-news/refresh"));
+    expect(refreshCall?.[1]).toEqual(
+      expect.objectContaining({
+        headers: { "X-KF3-News-Data-Version": dataVersion },
+      }),
+    );
+    expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("cooldown");
+  });
+
   it("refreshの200がmerged以外なら前回一覧を維持する", async () => {
     mockNewsApi({
       news: [createNews(1, "前回一覧")],

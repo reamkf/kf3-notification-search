@@ -121,12 +121,13 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - GETのmerged KV hitが外部I/Oを行わず、両KV miss時はR2 snapshotを投影して同じJSONをGET専用KVへwrite-throughする
 - GETのKV write-through失敗でもHTTP 200と`news_api_cache_write_failed`ログを維持する
 - refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
-- refreshの公式304かつKV v2/current ETag一致時にR2 current本文を読まずKV JSONを再利用する
+- refreshの公式304かつKV v2/current ETag一致時にR2 current本文を読まずKV JSONを再利用し、data version一致時はレスポンスのnews配列を省略する
 - KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す
 - refresh invocation自身は表示用KVとrefresh制御metadataだけを更新し、archiveを書き込まず、merge差分またはcurrent初期化をQueueへbest-effortで通知する
 - Queue consumer完了後にcurrent、daily、monthly、公式ETag stateが更新され、refresh由来の表示KVが維持される
 - Queue送信失敗でもrefreshが200を返し、`news_archive_update_enqueue_failed`を記録する
 - refresh本体、scheduled、Queue invocationの処理はリクエスト内で完了し、refreshのQueue送信だけを`waitUntil`へ登録している
+- Workers LogsとTracingが有効で、refreshの公式fetch、KV、R2のI/O spanをWorkers Observabilityで確認できる
 
 ## Queue consumerをローカルで確認
 

@@ -4,7 +4,11 @@ import { newsArraySchema, News, summarizeValidationIssues } from "../schema";
 import { QueryParser } from "../query-parser";
 import { normalizeQuery } from "../query-normalizer";
 import { getJapaneseDate } from "../get-japanese-date";
-import { parseNewsResponseHeaders, type NewsResponseMetadata } from "../news-response-metadata";
+import {
+  NEWS_DATA_VERSION_HEADER,
+  parseNewsResponseHeaders,
+  type NewsResponseMetadata,
+} from "../news-response-metadata";
 
 // localStorageのキー(同一ドメインでの競合回避のためアプリ固有のprefixを付与)
 const STORAGE_KEYS = {
@@ -70,24 +74,27 @@ type RefreshState =
   | { status: "error" }
   | { status: "cooldown"; retryAt: number };
 
-type RefreshResponse = {
-  news: Array<News>;
-  metadata: {
-    source: "merged";
-    fetchedAt: string;
-  };
+type RefreshMetadata = {
+  source: "merged";
+  fetchedAt: string;
 };
 
-const refreshResponseSchema = v.object({
-  news: newsArraySchema,
-  metadata: v.object({
-    source: v.literal("merged"),
-    fetchedAt: v.pipe(
-      v.string(),
-      v.check((value) => Number.isFinite(Date.parse(value)), "fetchedAt must be a timestamp"),
-    ),
-  }),
+type RefreshResponse =
+  | { news: Array<News>; metadata: RefreshMetadata }
+  | { changed: false; metadata: RefreshMetadata };
+
+const refreshMetadataSchema = v.object({
+  source: v.literal("merged"),
+  fetchedAt: v.pipe(
+    v.string(),
+    v.check((value) => Number.isFinite(Date.parse(value)), "fetchedAt must be a timestamp"),
+  ),
 });
+
+const refreshResponseSchema = v.union([
+  v.object({ news: newsArraySchema, metadata: refreshMetadataSchema }),
+  v.object({ changed: v.literal(false), metadata: refreshMetadataSchema }),
+]);
 
 type RefreshStatusIconProps = {
   status: RefreshState["status"];
@@ -164,10 +171,21 @@ const parseDateString = (dateString: string): number => {
   );
 };
 
-const formatRelativeFetchedAt = (fetchedAt: string | null, now = Date.now()) => {
-  if (!fetchedAt || !Number.isFinite(Date.parse(fetchedAt))) return "不明";
+const newsDateTimestamps = new WeakMap<News, { value: string; timestamp: number }>();
 
-  const elapsedMs = Math.max(0, now - Date.parse(fetchedAt));
+const getNewsTimestamp = (news: News) => {
+  const cached = newsDateTimestamps.get(news);
+  if (cached?.value === news.newsDate) return cached.timestamp;
+  const timestamp = parseDateString(news.newsDate);
+  newsDateTimestamps.set(news, { value: news.newsDate, timestamp });
+  return timestamp;
+};
+
+const formatRelativeFetchedAt = (fetchedAt: string | null, now = Date.now()) => {
+  const fetchedAtMs = fetchedAt ? Date.parse(fetchedAt) : Number.NaN;
+  if (!Number.isFinite(fetchedAtMs)) return "不明";
+
+  const elapsedMs = Math.max(0, now - fetchedAtMs);
   const elapsedSeconds = Math.floor(elapsedMs / 1000);
   if (elapsedSeconds < 60) return `${elapsedSeconds}秒前`;
 
@@ -195,8 +213,9 @@ const getRefreshCooldownUntil = (fetchedAt: string | null, now = Date.now()) => 
 
 const isRefreshNeeded = (metadata: NewsResponseMetadata) => {
   if (metadata.source === "archive-snapshot" || metadata.source === "archive-fallback") return true;
-  if (!metadata.fetchedAt || !Number.isFinite(Date.parse(metadata.fetchedAt))) return true;
-  return Date.now() - Date.parse(metadata.fetchedAt) >= REFRESH_STALE_AFTER_MS;
+  const fetchedAtMs = metadata.fetchedAt ? Date.parse(metadata.fetchedAt) : Number.NaN;
+  if (!Number.isFinite(fetchedAtMs)) return true;
+  return Date.now() - fetchedAtMs >= REFRESH_STALE_AFTER_MS;
 };
 
 const parseRetryAfterMs = (value: string | null, now = Date.now()) => {
@@ -271,7 +290,7 @@ const filterNewsByDate = (newsArray: Array<News>, start: string, end: string) =>
   const endTime = end ? Date.parse(`${end}T00:00:00+09:00`) : Infinity;
 
   return newsArray.filter((news) => {
-    const newsDate = parseDateString(news.newsDate);
+    const newsDate = getNewsTimestamp(news);
     return newsDate >= startTime && newsDate < endTime + 86400000;
   });
 };
@@ -279,8 +298,8 @@ const filterNewsByDate = (newsArray: Array<News>, start: string, end: string) =>
 // お知らせデータをソート
 const getSortedNews = (data: Array<News>, sortOrder: string) => {
   return [...data].sort((a, b) => {
-    const aDate = parseDateString(a.newsDate);
-    const bDate = parseDateString(b.newsDate);
+    const aDate = getNewsTimestamp(a);
+    const bDate = getNewsTimestamp(b);
     return sortOrder === "asc" ? aDate - bDate : bDate - aDate;
   });
 };
@@ -354,6 +373,9 @@ const KemonoFriends3NewsSearch = () => {
       try {
         const response = await fetch("/api/kf3-news/refresh", {
           method: "POST",
+          ...(newsPayload.metadata.dataVersion
+            ? { headers: { [NEWS_DATA_VERSION_HEADER]: newsPayload.metadata.dataVersion } }
+            : {}),
           signal: controller.signal,
         });
         if (!mountedRef.current || generationRef.current !== generation) return;
@@ -394,13 +416,16 @@ const KemonoFriends3NewsSearch = () => {
         }
 
         const validated: RefreshResponse = result.output;
-        setNewsPayload({
-          data: validated.news,
-          metadata: {
-            source: validated.metadata.source as NewsResponseMetadata["source"],
-            fetchedAt: validated.metadata.fetchedAt,
-          },
-        });
+        const metadata: NewsResponseMetadata = {
+          source: validated.metadata.source,
+          fetchedAt: validated.metadata.fetchedAt,
+          dataVersion: parseNewsResponseHeaders(response.headers).dataVersion,
+        };
+        if ("changed" in validated) {
+          setNewsPayload((previous) => (previous ? { ...previous, metadata } : previous));
+        } else {
+          setNewsPayload({ data: validated.news, metadata });
+        }
         refreshInFlightRef.current = false;
         updateRefreshState({
           status: "cooldown",
@@ -581,12 +606,13 @@ const KemonoFriends3NewsSearch = () => {
     });
   };
 
+  const newsItems = newsPayload?.data;
   const filteredNews = useMemo(() => {
-    if (!newsPayload) return [];
-    const keywordFilteredNews = filterNewsByKeyword(newsPayload.data, appliedSearchKeyword);
+    if (!newsItems) return [];
+    const keywordFilteredNews = filterNewsByKeyword(newsItems, appliedSearchKeyword);
     const dateFilteredNews = filterNewsByDate(keywordFilteredNews, startDate, endDate);
     return getSortedNews(dateFilteredNews, sortOrder);
-  }, [newsPayload, appliedSearchKeyword, startDate, endDate, sortOrder]);
+  }, [newsItems, appliedSearchKeyword, startDate, endDate, sortOrder]);
 
   const newsData = useMemo(
     () => filteredNews.slice(0, visibleNewsCount),

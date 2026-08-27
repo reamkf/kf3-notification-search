@@ -31,13 +31,18 @@ describe("news response metadata", () => {
     expect(toNewsResponseMetadata(metadata)).toEqual({
       source: "archive-fallback",
       fetchedAt,
+      dataVersion: null,
     });
     expect(isReusableNewsCacheMetadata(metadata)).toBe(true);
   });
 
   it("keeps v1 metadata readable but not reusable", () => {
     expect(parseNewsCacheMetadata(v1Metadata)).toEqual(v1Metadata);
-    expect(toNewsResponseMetadata(v1Metadata)).toEqual({ source: "merged", fetchedAt });
+    expect(toNewsResponseMetadata(v1Metadata)).toEqual({
+      source: "merged",
+      fetchedAt,
+      dataVersion: null,
+    });
     expect(isReusableNewsCacheMetadata(v1Metadata)).toBe(false);
   });
 
@@ -52,7 +57,11 @@ describe("news response metadata", () => {
     { version: 2, source: "merged", fetchedAt, baseArchiveEtag: null, newsCount: 1.5 },
   ])("不正なmetadataをunknownとして扱う: %#", (metadata) => {
     expect(parseNewsCacheMetadata(metadata)).toBeNull();
-    expect(toNewsResponseMetadata(metadata)).toEqual({ source: "unknown", fetchedAt: null });
+    expect(toNewsResponseMetadata(metadata)).toEqual({
+      source: "unknown",
+      fetchedAt: null,
+      dataVersion: null,
+    });
     expect(isReusableNewsCacheMetadata(metadata)).toBe(false);
   });
 
@@ -68,24 +77,32 @@ describe("news response metadata", () => {
     expect(parseNewsResponseHeaders(createNewsResponseHeaders(metadata))).toEqual({
       source: "archive-snapshot",
       fetchedAt,
+      dataVersion: null,
     });
   });
 
   it("creates response headers and reads them back", () => {
-    const headers = createNewsResponseHeaders(createNewsCacheMetadata("merged", fetchedAt));
+    const headers = createNewsResponseHeaders(
+      createNewsCacheMetadata("merged", fetchedAt, "archive-etag"),
+    );
 
-    expect(parseNewsResponseHeaders(headers)).toEqual({ source: "merged", fetchedAt });
+    expect(headers.get("X-KF3-News-Data-Version")).toBe("archive-etag");
+    expect(parseNewsResponseHeaders(headers)).toEqual({
+      source: "merged",
+      fetchedAt,
+      dataVersion: "archive-etag",
+    });
   });
 
   it.each([
-    { headers: {}, expected: { source: "unknown", fetchedAt: null } },
+    { headers: {}, expected: { source: "unknown", fetchedAt: null, dataVersion: null } },
     {
       headers: { "X-KF3-News-Source": "unknown" },
-      expected: { source: "unknown", fetchedAt: null },
+      expected: { source: "unknown", fetchedAt: null, dataVersion: null },
     },
     {
       headers: { "X-KF3-News-Source": "archive-fallback", "X-KF3-News-Fetched-At": "invalid" },
-      expected: { source: "archive-fallback", fetchedAt: null },
+      expected: { source: "archive-fallback", fetchedAt: null, dataVersion: null },
     },
   ])("不正または欠落したheadersを安全に扱う: %#", ({ headers, expected }) => {
     expect(parseNewsResponseHeaders(new Headers(headers as HeadersInit))).toEqual(expected);

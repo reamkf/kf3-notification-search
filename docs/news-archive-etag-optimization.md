@@ -25,7 +25,7 @@ Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 2. 公式が304を返したら、表示用KV `kf3-news`をmetadata付きで読む。
 3. metadataがv2で、`baseArchiveEtag`が現在のcurrent ETagと一致し、valueが存在する場合はvalueをclient JSONとして再利用する。変更を含むmerge結果やcurrent未作成の結果は`baseArchiveEtag`が`null`となるため再利用しない。
 4. 一致しない場合、v1、metadata欠落、value欠落の場合は`readCurrentArchiveDocumentIfEtag`へfallbackし、従来どおりR2本文を検証して投影する。
-5. 再利用したJSONも通常のrefresh finalizationでTTL 300秒、`fetchedAt`、`newsCount`を更新保存する。HTTP本文は同じJSONを`{news, metadata}`へ埋め込む。
+5. 再利用したJSONも通常のrefresh finalizationでTTL 300秒、`fetchedAt`、`newsCount`を更新保存する。クライアントの`X-KF3-News-Data-Version`が一致する場合はHTTP本文からJSON配列を省略し`{changed:false, metadata}`を返し、それ以外は同じJSONを`{news, metadata}`へ埋め込む。
 
 ## 設計方針
 
@@ -187,9 +187,9 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - 304を公式取得エラーとして扱わない。
 - GETのKV hitではR2、公式サーバー、stateへアクセスしない。
 - GETのKV missでは公式サーバーへアクセスせず、R2 snapshotを投影して同じJSONを表示用KVへbest-effort保存する。
-- refreshは公式取得、検証、merge、KV保存を行い、成功本文は`{news, metadata}`とするが、current、daily、monthly、公式ETag stateを変更しない。304かつKV v2/current ETag一致時は、KV JSONを再利用してR2 current本文を読まない。
+- refreshは公式取得、検証、merge、KV保存を行い、成功本文はdata version一致時の`{changed:false, metadata}`または通常の`{news, metadata}`とするが、current、daily、monthly、公式ETag stateを変更しない。304かつKV v2/current ETag一致時は、KV JSONを再利用してR2 current本文を読まない。
 - 別refreshの実行中は公式取得前に202、5分cooldown中は429を返す。
-- refresh成功時は200と`{news, metadata}`を返す。
+- refresh成功時は200と、data versionの一致に応じたレスポンス本文を返す。
 - refreshの依存処理失敗時は503を返し、表示用KVを置き換えない。
 - refresh制御metadataのCAS競合で無条件上書きを行わない。
 - 復元後を模したcurrentのETag不一致ではQueue consumerまたはscheduled fallbackが完全処理へ戻る。

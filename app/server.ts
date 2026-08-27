@@ -35,6 +35,7 @@ import {
   type NewsRefreshLease,
 } from "./news-refresh-control";
 import {
+  NEWS_DATA_VERSION_HEADER,
   createNewsCacheMetadata,
   createNewsResponseHeaders,
   isReusableNewsCacheMetadata,
@@ -98,8 +99,22 @@ const createJsonResponse = (json: string, metadata?: NewsCacheMetadata) => {
   return new Response(json, { headers });
 };
 
-const createRefreshResponse = (clientJson: string, metadata: NewsCacheMetadata) =>
-  createJsonResponse(`{"news":${clientJson},"metadata":${JSON.stringify(metadata)}}`, metadata);
+const createRefreshResponse = (
+  clientJson: string,
+  metadata: NewsCacheMetadata,
+  clientDataVersion: string | null,
+) => {
+  const dataUnchanged =
+    isReusableNewsCacheMetadata(metadata) &&
+    clientDataVersion !== null &&
+    metadata.baseArchiveEtag === clientDataVersion;
+  const body = dataUnchanged
+    ? `{"changed":false,"metadata":${JSON.stringify(metadata)}}`
+    : `{"news":${clientJson},"metadata":${JSON.stringify(metadata)}}`;
+  const response = createJsonResponse(body, metadata);
+  response.headers.set("vary", NEWS_DATA_VERSION_HEADER);
+  return response;
+};
 
 type HeartbeatStage = "heartbeat-start" | "heartbeat-success" | "heartbeat-fail";
 
@@ -441,6 +456,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
   ) => {
     let archiveCount: number | null = null;
     let lease: NewsRefreshLease | null = null;
+    const clientDataVersion = context.req.header(NEWS_DATA_VERSION_HEADER) || null;
     let cachePutDurationMs = 0;
     let currentEtagCheckDurationMs = 0;
     let leaseCompletionDurationMs = 0;
@@ -616,7 +632,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         refreshFinalizationDurationMs: performance.now() - refreshFinalizationStartedAt,
         refreshTotalDurationMs: performance.now() - refreshStartedAt,
       });
-      return createRefreshResponse(result.clientJson, metadata);
+      return createRefreshResponse(result.clientJson, metadata, clientDataVersion);
     } catch (error) {
       logger.error(createRefreshErrorLog(error, archiveCount));
       if (lease !== null) {

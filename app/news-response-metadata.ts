@@ -1,5 +1,6 @@
 export const NEWS_SOURCE_HEADER = "X-KF3-News-Source";
 export const NEWS_FETCHED_AT_HEADER = "X-KF3-News-Fetched-At";
+export const NEWS_DATA_VERSION_HEADER = "X-KF3-News-Data-Version";
 export const NEWS_CACHE_METADATA_VERSION = 2;
 
 export type NewsCacheSource = "merged" | "archive-fallback" | "archive-snapshot";
@@ -24,6 +25,7 @@ export type NewsCacheMetadata = NewsCacheMetadataV1 | NewsCacheMetadataV2;
 export type NewsResponseMetadata = {
   source: NewsResponseSource;
   fetchedAt: string | null;
+  dataVersion: string | null;
 };
 
 const isValidTimestamp = (value: unknown): value is string =>
@@ -85,8 +87,15 @@ export const isReusableNewsCacheMetadata = (value: unknown): value is NewsCacheM
 
 export const toNewsResponseMetadata = (value: unknown): NewsResponseMetadata => {
   const metadata = parseNewsCacheMetadata(value);
-  if (!metadata) return { source: "unknown", fetchedAt: null };
-  return { source: metadata.source, fetchedAt: metadata.fetchedAt };
+  if (!metadata) return { source: "unknown", fetchedAt: null, dataVersion: null };
+  return {
+    source: metadata.source,
+    fetchedAt: metadata.fetchedAt,
+    dataVersion:
+      metadata.version === NEWS_CACHE_METADATA_VERSION && metadata.source !== "archive-fallback"
+        ? metadata.baseArchiveEtag
+        : null,
+  };
 };
 
 export const createNewsResponseHeaders = (metadata: unknown): Headers => {
@@ -97,6 +106,9 @@ export const createNewsResponseHeaders = (metadata: unknown): Headers => {
   });
   if (responseMetadata.fetchedAt) {
     headers.set(NEWS_FETCHED_AT_HEADER, responseMetadata.fetchedAt);
+  }
+  if (responseMetadata.dataVersion) {
+    headers.set(NEWS_DATA_VERSION_HEADER, responseMetadata.dataVersion);
   }
   return headers;
 };
@@ -111,5 +123,7 @@ export const parseNewsResponseHeaders = (headers: Headers): NewsResponseMetadata
   return {
     source: normalizedSource,
     fetchedAt: normalizedSource === "unknown" || !isValidTimestamp(fetchedAt) ? null : fetchedAt,
+    dataVersion:
+      normalizedSource === "unknown" ? null : headers.get(NEWS_DATA_VERSION_HEADER) || null,
   };
 };

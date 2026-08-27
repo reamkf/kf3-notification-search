@@ -6,7 +6,7 @@
 
 - `GET /`はStatic Assetsからお知らせ取得を行わないSSG済みshellを返す。
 - `GET /api/kf3-news`はmerged結果用KVを最優先し、値がない場合はGET専用snapshot KVを返す。両方のKV miss時はR2のcurrentまたはlegacy snapshotを投影してGET専用KVへwrite-throughする。
-- `POST /api/kf3-news/refresh`は公式データを取得、検証、mergeし、成功結果を表示用KVへ保存して`{news, metadata}`形式で200を返す。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、送信失敗でも200を返す。実行中は202、cooldownは429、依存障害は503を返す。
+- `POST /api/kf3-news/refresh`は公式データを取得、検証、mergeし、成功結果を表示用KVへ保存する。`X-KF3-News-Data-Version`が一致する場合は`{changed:false, metadata}`、それ以外は`{news, metadata}`形式で200を返す。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、送信失敗でも200を返す。実行中は202、cooldownは429、依存障害は503を返す。
 - refreshはR2 CAS leaseと5分cooldownで制限し、Cloudflare Rate LimitingとWAFで公開routeを保護する。
 - refresh invocation自身は表示用KVとrefresh制御metadataだけを変更し、current、daily、monthly、公式ETag stateを書き込まない。
 - Queue consumerは別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行し、scheduledの`updateNewsArchive`は03:15 JSTのfallbackとして`trigger=scheduled`で実行する。両方がcurrent、daily、monthly、公式ETag stateを更新する。
@@ -19,23 +19,23 @@
 
 本番反映後は、現行Worker version、Cron、R2、KV、refresh制御metadata、Healthchecks.io、Cloudflare Rate Limiting、WAFの設定を同じ運用記録で確認する。secret、lease token、ETag、公式本文は記録しない。
 
-| 項目                     | 確認内容                                                                                                                                                                                          |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 本番Worker               | 現HEADに対応するWorker versionへ反映され、`GET /`、GET、refresh、Queue consumer、scheduled fallbackが有効                                                                                         |
-| Queue                    | `kf3-notif-archive-update`を作成済みで、producerとconsumerが本番Workerに設定され、batch size 1、concurrency 1である                                                                               |
-| HTTP `/`                 | Static AssetsからSSG済みshellだけを返し、レスポンス中にお知らせ配列を含まず、Workerを起動しない                                                                                                   |
-| HTTP GET                 | merged KVを最優先し、次にGET専用snapshot KVを読む。両方のmiss時はR2 currentまたはlegacyを投影してsnapshot KVへwrite-throughし、write失敗でも200を維持する                                         |
-| HTTP refresh             | 実行中は202、成功時は200と`{news, metadata}`を返し、KVへ同じ表示用データを保存する。304かつKV v2/current ETag一致時はcurrent本文を読まず再利用する。merge差分またはcurrent未作成をQueueへ通知する |
-| refresh制御              | 別refreshの実行中は202、5分cooldown中は429、依存障害は503を返し、無条件上書きを行わない                                                                                                           |
-| refresh書き込み境界      | refresh invocation自身はcurrent、daily、monthly、公式ETag stateを書き込まない。Queue送信失敗でも200を返す                                                                                         |
-| Queue consumer           | 別invocationで`trigger=queue`を実行し、batch size 1、concurrency 1、60秒後retry、heartbeatなし、表示KV維持を確認する                                                                              |
-| Cron Trigger             | `15 18 * * *`を1本だけ登録し、Queueのfallbackとして毎日03:15 JSTに実行される                                                                                                                      |
-| archive update           | Queue consumerとscheduled fallbackが同じETag/CAS/304、CAS更新、daily/monthly backup、公式ETag state保存を行う                                                                                     |
-| ETag                     | Queue consumerとscheduled fallbackの200と304、stateとcurrent ETag不一致時の完全処理を確認する                                                                                                     |
-| Healthchecks.io          | `kf3notif-daily-archive`をUTC `15 18 * * *`、grace 30分で運用し、失敗とCron欠落を通知する                                                                                                         |
-| Cloudflare Rate Limiting | refresh routeを対象に、通常利用を許容しつつ短時間の反復POSTを抑制する。429応答と適用範囲を確認する                                                                                                |
-| Cloudflare WAF           | refresh routeにManaged Rulesと必要なカスタムルールを適用し、異常な自動化、明らかな攻撃、想定外のmethodを遮断する。正規refreshの誤検知を確認する                                                   |
-| restore                  | localhost専用Workerをdeployせず、dry-runがR2とKVへ書き込まない                                                                                                                                    |
+| 項目                     | 確認内容                                                                                                                                                                                                                                                         |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 本番Worker               | 現HEADに対応するWorker versionへ反映され、`GET /`、GET、refresh、Queue consumer、scheduled fallbackが有効                                                                                                                                                        |
+| Queue                    | `kf3-notif-archive-update`を作成済みで、producerとconsumerが本番Workerに設定され、batch size 1、concurrency 1である                                                                                                                                              |
+| HTTP `/`                 | Static AssetsからSSG済みshellだけを返し、レスポンス中にお知らせ配列を含まず、Workerを起動しない                                                                                                                                                                  |
+| HTTP GET                 | merged KVを最優先し、次にGET専用snapshot KVを読む。両方のmiss時はR2 currentまたはlegacyを投影してsnapshot KVへwrite-throughし、write失敗でも200を維持する                                                                                                        |
+| HTTP refresh             | 実行中は202、成功時は200とし、data version一致時は`{changed:false, metadata}`、それ以外は`{news, metadata}`を返してKVへ同じ表示用データを保存する。304かつKV v2/current ETag一致時はcurrent本文を読まず再利用する。merge差分またはcurrent未作成をQueueへ通知する |
+| refresh制御              | 別refreshの実行中は202、5分cooldown中は429、依存障害は503を返し、無条件上書きを行わない                                                                                                                                                                          |
+| refresh書き込み境界      | refresh invocation自身はcurrent、daily、monthly、公式ETag stateを書き込まない。Queue送信失敗でも200を返す                                                                                                                                                        |
+| Queue consumer           | 別invocationで`trigger=queue`を実行し、batch size 1、concurrency 1、60秒後retry、heartbeatなし、表示KV維持を確認する                                                                                                                                             |
+| Cron Trigger             | `15 18 * * *`を1本だけ登録し、Queueのfallbackとして毎日03:15 JSTに実行される                                                                                                                                                                                     |
+| archive update           | Queue consumerとscheduled fallbackが同じETag/CAS/304、CAS更新、daily/monthly backup、公式ETag state保存を行う                                                                                                                                                    |
+| ETag                     | Queue consumerとscheduled fallbackの200と304、stateとcurrent ETag不一致時の完全処理を確認する                                                                                                                                                                    |
+| Healthchecks.io          | `kf3notif-daily-archive`をUTC `15 18 * * *`、grace 30分で運用し、失敗とCron欠落を通知する                                                                                                                                                                        |
+| Cloudflare Rate Limiting | refresh routeを対象に、通常利用を許容しつつ短時間の反復POSTを抑制する。429応答と適用範囲を確認する                                                                                                                                                               |
+| Cloudflare WAF           | refresh routeにManaged Rulesと必要なカスタムルールを適用し、異常な自動化、明らかな攻撃、想定外のmethodを遮断する。正規refreshの誤検知を確認する                                                                                                                  |
+| restore                  | localhost専用Workerをdeployせず、dry-runがR2とKVへ書き込まない                                                                                                                                                                                                   |
 
 ## refresh運用ポリシー
 
@@ -62,7 +62,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 - [ ] GETのKV hitがKVだけで完了する。
 - [ ] current更新時にGET専用snapshot KVを削除し、Queueではmerged KVを維持する。
 - [ ] merged KVとGET専用snapshot KVの両方がmissした場合、R2 currentまたはlegacyを投影し、同じJSONをTTL 300秒でsnapshot KVへwrite-throughする。write失敗でも200を維持し、公式取得とmergeを行わない。
-- [ ] refresh実行中が202と`Retry-After`を返し、成功時は200と`{news, metadata}`を返して表示用KVへ保存する。
+- [ ] refresh実行中が202と`Retry-After`を返し、成功時は200とし、data version一致時は`{changed:false, metadata}`、それ以外は`{news, metadata}`を返して表示用KVへ保存する。
 - [ ] refreshのcooldownが429と`Retry-After`を返す。
 - [ ] KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す。
 - [ ] KV保存中にrefresh leaseが失効または別tokenへ移行した場合は、他refreshのKVを削除せず、Queueへ通知せず202を返す。
@@ -91,6 +91,7 @@ refreshは公開APIであり、アプリケーション内のR2 CAS leaseと5分
 - [ ] Cloudflare WAFが異常なrefresh requestを遮断し、正規JSONを誤検知しない。
 - [ ] 本番snapshotを使ったrestore dry-runでR2とKVへのwriteが0件になる。
 - [ ] `news_refresh_succeeded`、`news_refresh_failed`を含む構造化ログをWorkers Logsで確認できる。
+- [ ] Workers TracingでGET、refresh、scheduled、Queueのinvocationとfetch、KV、R2 spanを確認できる。
 - [ ] Queue consumer、scheduled fallback、GET、refreshのCPU時間を別invocationとして確認できる。
 
 ## 障害調査
