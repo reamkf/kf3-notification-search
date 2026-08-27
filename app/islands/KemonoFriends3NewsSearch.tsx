@@ -426,10 +426,13 @@ const KemonoFriends3NewsSearch = () => {
         } else {
           setNewsPayload({ data: validated.news, metadata });
         }
+        const refreshedAt = Date.now();
+        setRelativeNow(refreshedAt);
         refreshInFlightRef.current = false;
         updateRefreshState({
           status: "cooldown",
-          retryAt: getRefreshCooldownUntil(validated.metadata.fetchedAt),
+          retryAt:
+            Math.max(refreshedAt, Date.parse(validated.metadata.fetchedAt)) + REFRESH_COOLDOWN_MS,
         });
       } catch (error) {
         if (!mountedRef.current) return;

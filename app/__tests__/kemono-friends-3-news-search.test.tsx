@@ -430,6 +430,38 @@ describe("KemonoFriends3NewsSearch", () => {
     expect((container.querySelector("#news-keyword") as HTMLInputElement).value).toBe("対象");
   });
 
+  it("refresh成功後のcooldownをレスポンス受信時刻から計算する", async () => {
+    const baseTime = Date.parse("2026-08-27T12:00:00.000Z");
+    const initialFetchedAt = new Date(baseTime).toISOString();
+    const refreshFetchedAt = new Date(baseTime + 5 * 60_000 - 1_000).toISOString();
+    vi.spyOn(Date, "now").mockReturnValue(baseTime);
+    mockNewsApi({
+      news: [createNews(1, "更新前")],
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Fetched-At": initialFetchedAt,
+      },
+      refreshResponses: [
+        jsonResponse({
+          news: [createNews(1, "更新後")],
+          metadata: { source: "merged", fetchedAt: refreshFetchedAt },
+        }),
+      ],
+    });
+
+    mount();
+    await waitForText("更新前");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("更新後");
+    expect(container.querySelector(`time[datetime="${refreshFetchedAt}"]`)).not.toBeNull();
+
+    await advanceRefreshCooldown(5 * 60_000 - 500);
+    expect(getRefreshButton()?.disabled).toBe(true);
+    await advanceRefreshCooldown(1_000);
+    expect(getRefreshButton()?.disabled).toBe(false);
+  });
+
   it("日付やソート変更では未送信のキーワードを適用しない", async () => {
     mockNewsApi({
       news: [createNews(1, "対象お知らせ"), createNews(2, "別お知らせ")],
