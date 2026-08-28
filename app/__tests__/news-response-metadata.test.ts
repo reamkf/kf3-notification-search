@@ -4,43 +4,53 @@ import {
   createNewsResponseHeaders,
   isReusableNewsCacheMetadata,
   NEWS_CACHE_METADATA_VERSION,
+  NEWS_OFFICIAL_CHECKED_AT_HEADER,
+  NEWS_REFRESH_AVAILABLE_AT_HEADER,
   parseNewsCacheMetadata,
   parseNewsResponseHeaders,
   toNewsResponseMetadata,
 } from "../news-response-metadata";
 
-const fetchedAt = "2026-08-09T12:34:56.789Z";
+const officialCheckedAt = "2026-08-09T12:34:56.789Z";
+const refreshAvailableAt = "2026-08-09T12:39:56.789Z";
 
 const v1Metadata = {
   version: 1,
   source: "merged" as const,
-  fetchedAt,
+  fetchedAt: officialCheckedAt,
 };
 
 describe("news response metadata", () => {
   it("validates and normalizes v2 cache metadata", () => {
-    const metadata = createNewsCacheMetadata("archive-fallback", fetchedAt, "archive-etag", 12);
+    const metadata = createNewsCacheMetadata(
+      "archive-fallback",
+      officialCheckedAt,
+      "archive-etag",
+      12,
+    );
 
     expect(parseNewsCacheMetadata(metadata)).toEqual({
       version: NEWS_CACHE_METADATA_VERSION,
       source: "archive-fallback",
-      fetchedAt,
+      officialCheckedAt,
       baseArchiveEtag: "archive-etag",
       newsCount: 12,
     });
     expect(toNewsResponseMetadata(metadata)).toEqual({
       source: "archive-fallback",
-      fetchedAt,
+      officialCheckedAt,
+      refreshAvailableAt: null,
       dataVersion: null,
     });
     expect(isReusableNewsCacheMetadata(metadata)).toBe(true);
   });
 
-  it("keeps v1 metadata readable but not reusable", () => {
+  it("keeps v1 metadata readable without treating fetchedAt as officialCheckedAt", () => {
     expect(parseNewsCacheMetadata(v1Metadata)).toEqual(v1Metadata);
     expect(toNewsResponseMetadata(v1Metadata)).toEqual({
       source: "merged",
-      fetchedAt,
+      officialCheckedAt: null,
+      refreshAvailableAt: null,
       dataVersion: null,
     });
     expect(isReusableNewsCacheMetadata(v1Metadata)).toBe(false);
@@ -49,60 +59,118 @@ describe("news response metadata", () => {
   it.each([
     null,
     [],
-    { version: 3, source: "merged", fetchedAt },
-    { version: 1, source: "unknown", fetchedAt },
+    { version: 3, source: "merged", officialCheckedAt },
+    { version: 1, source: "unknown", fetchedAt: officialCheckedAt },
     { version: 1, source: "merged", fetchedAt: "invalid" },
-    { version: 2, source: "merged", fetchedAt, baseArchiveEtag: "", newsCount: 1 },
-    { version: 2, source: "merged", fetchedAt, baseArchiveEtag: null, newsCount: -1 },
-    { version: 2, source: "merged", fetchedAt, baseArchiveEtag: null, newsCount: 1.5 },
+    { version: 2, source: "merged", officialCheckedAt, baseArchiveEtag: "", newsCount: 1 },
+    { version: 2, source: "merged", officialCheckedAt: null, baseArchiveEtag: null, newsCount: -1 },
+    { version: 2, source: "merged", officialCheckedAt, baseArchiveEtag: null, newsCount: 1.5 },
   ])("不正なmetadataをunknownとして扱う: %#", (metadata) => {
     expect(parseNewsCacheMetadata(metadata)).toBeNull();
     expect(toNewsResponseMetadata(metadata)).toEqual({
       source: "unknown",
-      fetchedAt: null,
+      officialCheckedAt: null,
+      refreshAvailableAt: null,
       dataVersion: null,
     });
     expect(isReusableNewsCacheMetadata(metadata)).toBe(false);
   });
 
-  it("supports legacy snapshots with a null archive ETag", () => {
-    const metadata = createNewsCacheMetadata("archive-snapshot", fetchedAt, null, 3);
+  it("keeps legacy v2 metadata readable without reusing its request time", () => {
+    const metadata = {
+      version: 2,
+      source: "merged" as const,
+      fetchedAt: officialCheckedAt,
+      baseArchiveEtag: "archive-etag",
+      newsCount: 12,
+    };
+
+    expect(parseNewsCacheMetadata(metadata)).toEqual(metadata);
+    expect(toNewsResponseMetadata(metadata)).toEqual({
+      source: "merged",
+      officialCheckedAt: null,
+      refreshAvailableAt: null,
+      dataVersion: null,
+    });
+    expect(isReusableNewsCacheMetadata(metadata)).toBe(false);
+  });
+
+  it("supports snapshots with a null official ETag or check time", () => {
+    const metadata = createNewsCacheMetadata("archive-snapshot", null, null, 3);
     expect(parseNewsCacheMetadata(metadata)).toEqual({
       version: NEWS_CACHE_METADATA_VERSION,
       source: "archive-snapshot",
-      fetchedAt,
+      officialCheckedAt: null,
       baseArchiveEtag: null,
       newsCount: 3,
     });
     expect(parseNewsResponseHeaders(createNewsResponseHeaders(metadata))).toEqual({
       source: "archive-snapshot",
-      fetchedAt,
+      officialCheckedAt: null,
+      refreshAvailableAt: null,
       dataVersion: null,
     });
   });
 
-  it("creates response headers and reads them back", () => {
-    const headers = createNewsResponseHeaders(
-      createNewsCacheMetadata("merged", fetchedAt, "archive-etag"),
-    );
+  it("creates response headers and reads official and cooldown times back", () => {
+    const metadata = {
+      ...createNewsCacheMetadata("merged", officialCheckedAt, "archive-etag"),
+      refreshAvailableAt,
+    };
+    const headers = createNewsResponseHeaders(metadata);
 
-    expect(headers.get("X-KF3-News-Data-Version")).toBe("archive-etag");
+    expect(headers.get(NEWS_OFFICIAL_CHECKED_AT_HEADER)).toBe(officialCheckedAt);
+    expect(headers.get(NEWS_REFRESH_AVAILABLE_AT_HEADER)).toBe(refreshAvailableAt);
     expect(parseNewsResponseHeaders(headers)).toEqual({
       source: "merged",
-      fetchedAt,
+      officialCheckedAt,
+      refreshAvailableAt,
       dataVersion: "archive-etag",
     });
   });
 
+  it("reads the legacy fetched-at header during wire migration", () => {
+    expect(
+      parseNewsResponseHeaders(
+        new Headers({
+          "X-KF3-News-Source": "merged",
+          "X-KF3-News-Fetched-At": officialCheckedAt,
+        }),
+      ),
+    ).toMatchObject({ source: "merged", officialCheckedAt });
+  });
+
   it.each([
-    { headers: {}, expected: { source: "unknown", fetchedAt: null, dataVersion: null } },
     {
-      headers: { "X-KF3-News-Source": "unknown" },
-      expected: { source: "unknown", fetchedAt: null, dataVersion: null },
+      headers: {},
+      expected: {
+        source: "unknown",
+        officialCheckedAt: null,
+        refreshAvailableAt: null,
+        dataVersion: null,
+      },
     },
     {
-      headers: { "X-KF3-News-Source": "archive-fallback", "X-KF3-News-Fetched-At": "invalid" },
-      expected: { source: "archive-fallback", fetchedAt: null, dataVersion: null },
+      headers: { "X-KF3-News-Source": "unknown" },
+      expected: {
+        source: "unknown",
+        officialCheckedAt: null,
+        refreshAvailableAt: null,
+        dataVersion: null,
+      },
+    },
+    {
+      headers: {
+        "X-KF3-News-Source": "archive-fallback",
+        [NEWS_OFFICIAL_CHECKED_AT_HEADER]: "invalid",
+        [NEWS_REFRESH_AVAILABLE_AT_HEADER]: "invalid",
+      },
+      expected: {
+        source: "archive-fallback",
+        officialCheckedAt: null,
+        refreshAvailableAt: null,
+        dataVersion: null,
+      },
     },
   ])("不正または欠落したheadersを安全に扱う: %#", ({ headers, expected }) => {
     expect(parseNewsResponseHeaders(new Headers(headers as HeadersInit))).toEqual(expected);

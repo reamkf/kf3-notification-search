@@ -106,7 +106,7 @@ describe("Cloudflare bindings", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(cached);
     expect(response.headers.get("X-KF3-News-Source")).toBe("archive-fallback");
-    expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe("2026-08-09T12:34:56.789Z");
     expect(fetcher).not.toHaveBeenCalled();
   });
 

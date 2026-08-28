@@ -4,20 +4,20 @@
 
 本書は、お知らせ表示、表示用データの更新、永続アーカイブ、復元に関する共通契約と各処理仕様への入口を定義する。実行主体ごとの処理順、書き込み責務、失敗時の扱いは次の文書に分けて記載する。
 
-| 実行主体           | 入口                                 | 主な責務                                                                    | 書き込み可能なデータ                                       |
-| ------------------ | ------------------------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| ページ表示         | `GET /`                              | Static Assetsからお知らせ表示用のSSG済みshellを返す                         | なし                                                       |
-| 表示データ取得     | `GET /api/kf3-news`                  | KVの表示用snapshotを返し、KV miss時はR2 snapshotを投影してwrite-throughする | 表示用KVへのbest-effort保存                                |
-| 表示データrefresh  | `POST /api/kf3-news/refresh`         | 公式データを取得、検証、mergeし、成功結果をKVへ保存してQueueへ通知する      | 表示用KV、refresh制御metadata、archive更新Queueへのpublish |
-| Queue consumer     | `kf3-notif-archive-update`           | messageを検証し、`updateNewsArchive(trigger=queue)`を別invocationで実行する | current、daily、monthly、公式ETag state                    |
-| scheduled fallback | Cronから呼ばれるscheduled handler    | 03:15 JSTに`updateNewsArchive(trigger=scheduled)`を実行するfallback         | current、daily、monthly、公式ETag state、必要時のKV削除    |
-| 復元操作           | localhost専用Workerの`POST /restore` | snapshotからcurrentを条件付きで復元する                                     | apply時の`archive/current.json`とKV削除                    |
+| 実行主体           | 入口                                 | 主な責務                                                                    | 書き込み可能なデータ                                                          |
+| ------------------ | ------------------------------------ | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| ページ表示         | `GET /`                              | Static Assetsからお知らせ表示用のSSG済みshellを返す                         | なし                                                                          |
+| 表示データ取得     | `GET /api/kf3-news`                  | KVの表示用snapshotを返し、KV miss時はR2 snapshotを投影してwrite-throughする | 表示用KVへのbest-effort保存                                                   |
+| 表示データrefresh  | `POST /api/kf3-news/refresh`         | 公式データを取得、検証、mergeし、成功結果をKVへ保存してQueueへ通知する      | 表示用KV、公式確認時刻state、refresh制御metadata、archive更新Queueへのpublish |
+| Queue consumer     | `kf3-notif-archive-update`           | messageを検証し、`updateNewsArchive(trigger=queue)`を別invocationで実行する | current、daily、monthly、公式ETag state、公式確認時刻state                    |
+| scheduled fallback | Cronから呼ばれるscheduled handler    | 03:15 JSTに`updateNewsArchive(trigger=scheduled)`を実行するfallback         | current、daily、monthly、公式ETag state、公式確認時刻state、必要時のKV削除    |
+| 復元操作           | localhost専用Workerの`POST /restore` | snapshotからcurrentを条件付きで復元する                                     | apply時の`archive/current.json`とKV削除                                       |
 
 ### 実行主体ごとの詳細
 
 - [公式お知らせ配信仕様](./official-news-spec.md) は、公式データ形式、HTTP応答、ETagの契約を扱う。
 - [お知らせページリクエスト仕様](./news-page-request-spec.md) は、`/`、`GET /api/kf3-news`、`POST /api/kf3-news/refresh`の表示フローとHTTP契約を扱う。
-- [アーカイブ更新仕様](./news-archive-update-spec.md) は、Queue consumerと03:15 JSTのscheduled fallbackによるcurrent、backup、公式ETag stateの更新、heartbeat、retry、構造化ログを扱う。
+- [アーカイブ更新仕様](./news-archive-update-spec.md) は、Queue consumerと03:15 JSTのscheduled fallbackによるcurrent、backup、公式ETag state、公式確認時刻stateの更新、heartbeat、retry、構造化ログを扱う。
 - [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) は、Queue consumerとscheduled fallbackに共通する公式ETagと304経路の最適化を扱う。
 - [お知らせアーカイブ導入状態](./news-archive-rollout.md) は、デプロイ後の受け入れ確認、公開refreshの保護、障害時の運用確認を扱う。
 - [お知らせアーカイブ条件付き復元runbook](./news-archive-restore-runbook.md) は、復元操作の手順を扱う。
@@ -26,11 +26,11 @@
 
 ### 表示データと永続アーカイブの違い
 
-表示用KV `kf3-news`は、refreshが正常完了した表示用配列のsnapshotを保持する。`GET /api/kf3-news`はこのsnapshotを最優先で読み、値がない場合はGET専用KV `kf3-news-archive-snapshot`を読む。両方にない場合だけ`archive/current.json`またはlegacy objectを読み込んでクライアント用配列へ投影し、GET専用KVへTTL 300秒でbest-effort保存する。GETは公式サーバーからの取得やアーカイブとのmergeを行わない。
+表示用KV `kf3-news`は、refreshが正常完了した表示用配列のsnapshotを保持する。`GET /api/kf3-news`はこのsnapshotを最優先で読み、値がない場合はGET専用KV `kf3-news-archive-snapshot`を読む。両方にない場合だけ`archive/current.json`またはlegacy objectを読み込んでクライアント用配列へ投影し、GET専用KVへTTL 300秒でbest-effort保存する。このR2 snapshot経路では、独立した公式確認時刻stateの`checkedAt`をレスポンスmetadataへ投影する。GETは公式サーバーからの取得やアーカイブとのmergeを行わない。
 
 `POST /api/kf3-news/refresh`は表示用データを最新化する公開操作である。R2のCAS leaseと5分cooldownで同時実行と連続実行を制限し、leaseを取得した要求だけが公式データの取得、検証、mergeを行う。KV finalization前にleaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長し、成功した結果を表示用KVへ保存する。`X-KF3-News-Data-Version`が今回の表示データと一致する場合は`{changed:false, metadata}`を返して表示用配列を省略し、それ以外は`{news, metadata}`形式で返す。
 
-refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、Queue送信は`waitUntil`へ登録するが、`archive/current.json`、daily、monthly、公式ETag stateはrefreshから変更しない。Queue consumerが別invocationで`updateNewsArchive(trigger=queue)`を実行し、refresh由来の表示KVを維持する。03:15 JSTのscheduled handlerは`trigger=scheduled`でfallback更新を行い、current更新時に表示KVを削除する。Queue送信に失敗してもrefreshは200を返す。currentをsnapshotへ戻す操作はrestoreの責務である。
+refreshは表示用KV、公式確認時刻state、refresh制御metadataを変更する。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、Queue送信は`waitUntil`へ登録するが、`archive/current.json`、daily、monthly、公式ETag stateはrefreshから変更しない。Queue consumerが別invocationで`updateNewsArchive(trigger=queue)`を実行し、refresh由来の表示KVを維持する。03:15 JSTのscheduled handlerは`trigger=scheduled`でfallback更新を行い、current更新時に表示KVを削除する。Queue送信に失敗してもrefreshは200を返す。currentをsnapshotへ戻す操作はrestoreの責務である。
 
 ### 共有データの読み書き責務
 
@@ -38,6 +38,7 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分
 | ------------------------------------------- | --------------------------------------------- | --------------------------------------- | --------------------------------- | --------------------------------- | ----------------------- |
 | `archive/current.json`                      | 読み込み、snapshot投影                        | 読み込み、mergeの入力                   | 検証してETag条件付き更新          | 検証してETag条件付き更新          | applyで条件付き置換     |
 | `archive/official-fetch-state.json`         | 触れない                                      | 変更しない                              | 条件付き取得の結果を保存          | 条件付き取得の結果を保存          | 変更しない              |
+| `archive/official-check-state.json`         | 読み込み、公式確認時刻を投影                  | 公式確認成功時に更新                    | 公式確認成功時に更新              | 公式確認成功時に更新              | 変更しない              |
 | `daily/...`                                 | 触れない                                      | 触れない                                | current更新直前の元バイト列を保存 | current更新直前の元バイト列を保存 | 読み込みのみ            |
 | `monthly/...`                               | 触れない                                      | 触れない                                | 月最初の正常状態を保存            | 月最初の正常状態を保存            | 読み込みのみ            |
 | `KF3_NOTIF_CACHE/kf3-news`                  | merged snapshotを最優先で読む                 | 成功結果を保存                          | refresh由来のsnapshotを維持       | current更新成功後に削除           | current更新成功後に削除 |
@@ -72,6 +73,7 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分
 | 公式お知らせ配信 | `docs/official-news-spec.md`                       | 公式データ形式、HTTP応答、ETagの契約                                          |
 | 本番R2           | `KF3_NOTIF_DATA/archive/current.json`              | 通常使用する累積アーカイブ                                                    |
 | 本番R2           | `KF3_NOTIF_DATA/archive/official-fetch-state.json` | Queue consumerとscheduledの公式ETag、current R2 ETagの対応状態                |
+| 本番R2           | `KF3_NOTIF_DATA/archive/official-check-state.json` | 公式サイトを最後に正常確認した時刻                                            |
 | 本番R2           | `KF3_NOTIF_DATA/entries_merged_20241107.json`      | 初回移行と互換配信用のlegacyデータ                                            |
 | バックアップR2   | `KF3_NOTIF_BACKUP/daily/...`                       | current更新直前の累積アーカイブ                                               |
 | バックアップR2   | `KF3_NOTIF_BACKUP/monthly/...`                     | 各月最初の正常実行時点の本番反映済みアーカイブ                                |
@@ -114,7 +116,7 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分
 
 ## 公式データとETag
 
-公式サーバーのお知らせデータ形式とHTTP ETagの契約は [公式お知らせ配信仕様](./official-news-spec.md) にまとめる。Queue consumerとscheduled fallbackはこの外部契約を使って条件付き取得を行い、公式ETag stateを更新する。refreshは公式データを取得して表示用データを作り、条件付き取得を利用できる場合もあるが、公式ETag stateを更新しない。ETag stateの保存と条件付き取得は [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
+公式サーバーのお知らせデータ形式とHTTP ETagの契約は [公式お知らせ配信仕様](./official-news-spec.md) にまとめる。Queue consumerとscheduled fallbackはこの外部契約を使って条件付き取得を行い、公式ETag stateと公式確認時刻stateを更新する。refreshは公式データを取得して表示用データを作り、条件付き取得を利用できる場合もあるが、公式ETag stateは更新せず、公式確認時刻stateだけを更新する。ETag stateの保存と条件付き取得は [お知らせアーカイブETag条件付き取得の実装仕様](./news-archive-etag-optimization.md) を参照する。
 
 ## 公式データ利用時の安全性検証
 

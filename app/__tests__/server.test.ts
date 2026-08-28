@@ -11,6 +11,7 @@ import type {
 import {
   CURRENT_ARCHIVE_KEY,
   LEGACY_ARCHIVE_KEY,
+  OFFICIAL_CHECK_STATE_KEY,
   OFFICIAL_FETCH_STATE_KEY,
   type NewsArchiveUpdateDependencies,
 } from "../news-archive";
@@ -79,6 +80,8 @@ type BindingOptions = {
   legacyMissing?: boolean;
   stateText?: string;
   stateEtag?: string;
+  checkStateText?: string;
+  checkStateEtag?: string;
   conditionalCurrentMismatch?: boolean;
   conditionalCurrentReadMismatch?: boolean;
   currentChangesOnCachePut?: boolean;
@@ -95,6 +98,8 @@ const createBindings = (
   let currentEtag = "current-etag";
   let controlText: string | null = null;
   let controlEtag = "control-etag-0";
+  let checkStateText = options.checkStateText ?? null;
+  let checkStateEtag = options.checkStateEtag ?? "check-state-etag-0";
   const cacheValues = new Map<string, string>();
   const cacheMetadata = new Map<string, unknown>();
   const cachePuts: Array<{
@@ -124,6 +129,8 @@ const createBindings = (
         return createR2Object(legacyText, "legacy-etag");
       if (key === OFFICIAL_FETCH_STATE_KEY && options.stateText !== undefined)
         return createR2Object(options.stateText, options.stateEtag ?? "state-etag");
+      if (key === OFFICIAL_CHECK_STATE_KEY && checkStateText !== null)
+        return createR2Object(checkStateText, checkStateEtag);
       return null;
     },
     head: async (key: string) => {
@@ -136,6 +143,11 @@ const createBindings = (
       return null;
     },
     put: async (key: string, value: string) => {
+      if (key === OFFICIAL_CHECK_STATE_KEY) {
+        checkStateText = value;
+        checkStateEtag = `check-state-etag-${checkStateText.length}`;
+        return { etag: checkStateEtag } as R2Object;
+      }
       if (key !== "control/news-refresh.json") return null;
       controlText = value;
       controlEtag = `control-etag-${controlText.length}`;
@@ -306,7 +318,7 @@ describe("Worker API handler", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(cached);
     expect(response.headers.get("X-KF3-News-Source")).toBe("archive-fallback");
-    expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe("2026-08-09T12:34:56.789Z");
     expect(setup.dataGets).toEqual([]);
     expect(fetchCalls).toBe(0);
     expect(clockCalls).toBe(0);
@@ -330,21 +342,22 @@ describe("Worker API handler", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("not-json");
     expect(response.headers.get("X-KF3-News-Source")).toBe("unknown");
-    expect(response.headers.get("X-KF3-News-Fetched-At")).toBeNull();
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBeNull();
     expect(fetchCalls).toBe(0);
     expect(setup.dataGets).toEqual([]);
     expect(setup.cacheDeletes).toEqual([]);
     expect(setup.cachePuts).toEqual([]);
   });
 
-  it("cache missでは公式取得せずarchive snapshotをwrite-throughする", async () => {
-    const setup = createBindings(JSON.stringify(createDocument(2)));
-    const fetchedAt = Date.parse("2026-08-09T12:34:56.789Z");
+  it("cache missでは保存済み公式確認時刻でarchive snapshotをwrite-throughする", async () => {
+    const officialCheckedAt = "2026-08-09T12:34:56.789Z";
+    const setup = createBindings(JSON.stringify(createDocument(2)), undefined, {
+      checkStateText: JSON.stringify({ version: 1, checkedAt: officialCheckedAt }),
+    });
     const handler = createWorkerHandler({
       fetcher: async () => {
         throw new Error("unexpected fetch");
       },
-      clock: () => fetchedAt,
     });
     const pending: Promise<unknown>[] = [];
     const response = await callFetch(
@@ -362,7 +375,7 @@ describe("Worker API handler", () => {
     expect(body[1].targetUrl).toBe("/info/2");
     expect(body).toHaveLength(2);
     expect(response.headers.get("X-KF3-News-Source")).toBe("archive-snapshot");
-    expect(response.headers.get("X-KF3-News-Fetched-At")).toBe("2026-08-09T12:34:56.789Z");
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe("2026-08-09T12:34:56.789Z");
     expect(response.headers.get("X-KF3-News-Data-Version")).toBe("current-etag");
     expect(setup.cachePuts).toHaveLength(1);
     expect(setup.cachePuts[0]).toMatchObject({
@@ -372,7 +385,7 @@ describe("Worker API handler", () => {
       metadata: {
         version: 2,
         source: "archive-snapshot",
-        fetchedAt: "2026-08-09T12:34:56.789Z",
+        officialCheckedAt: "2026-08-09T12:34:56.789Z",
         baseArchiveEtag: "current-etag",
         newsCount: 2,
       },
@@ -652,13 +665,26 @@ describe("Worker API handler", () => {
     expect(controlPuts).toBe(2);
     expect(payload.news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
     expect(payload.news[0].category).toBe("refresh");
-    expect(payload.metadata).toEqual(
-      createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z", null, MIN_OFFICIAL_ENTRY_COUNT),
-    );
+    expect(payload.metadata).toEqual({
+      ...createNewsCacheMetadata(
+        "merged",
+        "2026-08-09T12:34:56.789Z",
+        null,
+        MIN_OFFICIAL_ENTRY_COUNT,
+      ),
+      fetchedAt: "2026-08-09T12:34:56.789Z",
+      refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+    });
     expect(response.headers.get("X-KF3-News-Source")).toBe("merged");
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe("2026-08-09T12:34:56.789Z");
+    expect(response.headers.get("X-KF3-News-Refresh-Available-At")).toBe(
+      "2026-08-09T12:39:56.789Z",
+    );
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(setup.cachePuts[0].expirationTtl).toBe(300);
-    expect(setup.cachePuts[0].metadata).toEqual(payload.metadata);
+    expect(setup.cachePuts[0].metadata).toEqual(
+      createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z", null, MIN_OFFICIAL_ENTRY_COUNT),
+    );
     expect(JSON.parse(setup.cacheValues.get("kf3-news") ?? "null")).toEqual(payload.news);
     expect(setup.cacheValues.get("kf3-news")).toBe(JSON.stringify(payload.news));
     expect(setup.queueMessages).toEqual([
@@ -697,6 +723,66 @@ describe("Worker API handler", () => {
         refreshTotalDurationMs: expect.any(Number),
       }),
     );
+  });
+
+  it("refresh処理が遅延しても公式確認日時を応答時刻で上書きしない", async () => {
+    const baseTime = Date.parse("2026-08-09T12:00:00.000Z");
+    const officialCheckedAt = new Date(baseTime + 10_000).toISOString();
+    const refreshAvailableAt = new Date(baseTime + 20_000 + 5 * 60_000).toISOString();
+    const clockValues = [baseTime, baseTime + 10_000, baseTime + 12_000, baseTime + 20_000];
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT));
+        },
+        clock: () => clockValues.shift() ?? baseTime + 20_000,
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+    const payload = (await response.json()) as {
+      metadata: Record<string, unknown>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.metadata).toMatchObject({
+      officialCheckedAt,
+      refreshAvailableAt,
+    });
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe(officialCheckedAt);
+    expect(response.headers.get("X-KF3-News-Refresh-Available-At")).toBe(refreshAvailableAt);
+    expect(setup.cachePuts[0].metadata).toMatchObject({ officialCheckedAt });
+  });
+
+  it("refresh成功後に表示KVが期限切れしても公式確認日時を維持する", async () => {
+    const officialCheckedAt = "2026-08-09T12:00:00.000Z";
+    const setup = createBindings(JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT)));
+    const handler = createWorkerHandler({
+      fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+      clock: () => Date.parse(officialCheckedAt),
+    });
+    const refreshResponse = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+    expect(refreshResponse.status).toBe(200);
+
+    setup.cacheValues.delete("kf3-news");
+    setup.cacheMetadata.delete("kf3-news");
+    setup.cacheValues.delete("kf3-news-archive-snapshot");
+    setup.cacheMetadata.delete("kf3-news-archive-snapshot");
+    const getResponse = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+
+    expect(getResponse.status).toBe(200);
+    expect(getResponse.headers.get("X-KF3-News-Official-Checked-At")).toBe(officialCheckedAt);
+    expect(setup.queueMessages).toHaveLength(0);
   });
 
   it("refreshで既存お知らせの変更だけを検出した場合はQueueへ通知する", async () => {
@@ -851,12 +937,12 @@ describe("Worker API handler", () => {
       "kf3-news",
       createNewsCacheMetadata("merged", "2026-08-09T12:00:00.000Z", "current-etag", 1),
     );
-    const fetchedAt = Date.parse("2026-08-09T12:34:56.789Z");
+    const officialCheckedAt = Date.parse("2026-08-09T12:34:56.789Z");
     const response = await callFetch(
       createWorkerHandler({
         fetcher: async () =>
           new Response(null, { status: 304, headers: { etag: '"official-etag"' } }),
-        clock: () => fetchedAt,
+        clock: () => officialCheckedAt,
       }),
       new Request("https://example.com/api/kf3-news/refresh", {
         method: "POST",
@@ -1065,6 +1151,48 @@ describe("Worker API handler", () => {
     expect(setup.cacheValues.get("kf3-news")).not.toBe("old-cache");
     expect(logs).not.toContainEqual(expect.objectContaining({ event: "news_refresh_succeeded" }));
     expect(logs).not.toContainEqual(expect.objectContaining({ event: "news_refresh_failed" }));
+  });
+
+  it("refresh完了の依存処理失敗時はKVを削除して503を返す", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    const originalData = setup.env.KF3_NOTIF_DATA;
+    let controlText: string | null = null;
+    let controlEtag = "control-0";
+    let puts = 0;
+    setup.env.KF3_NOTIF_DATA = {
+      get: async (key: string, options?: unknown) => {
+        if (key === "control/news-refresh.json") {
+          return controlText === null ? null : createR2Object(controlText, controlEtag);
+        }
+        return originalData.get(key, options as never);
+      },
+      head: originalData.head.bind(originalData),
+      put: async (key: string, value: string) => {
+        if (key !== "control/news-refresh.json") return null;
+        puts += 1;
+        if (puts > 1) throw new Error("completion failed");
+        controlText = value;
+        controlEtag = "control-etag-1";
+        return { etag: controlEtag } as R2Object;
+      },
+    } as unknown as R2Bucket;
+    const logs: Record<string, unknown>[] = [];
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+        logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(503);
+    expect(setup.cacheDeletes).toContain("kf3-news");
+    expect(setup.queueMessages).toHaveLength(0);
+    expect(logs).toContainEqual(
+      expect.objectContaining({ event: "news_refresh_control_completion_failed" }),
+    );
+    expect(logs).toContainEqual(expect.objectContaining({ event: "news_refresh_failed" }));
   });
 
   it("refresh leaseの延長CAS競合時はKVを更新せず202にする", async () => {
@@ -1301,9 +1429,11 @@ describe("scheduled handler", () => {
   it("scheduledTimeと全bindingを渡し、完了までawaitする", async () => {
     const setup = createBindings(null);
     const scheduledTime = Date.parse("2026-08-01T03:00:00Z");
+    const clock = () => scheduledTime + 1_000;
     let resolveUpdate: (() => void) | undefined;
     let received: NewsArchiveUpdateDependencies | undefined;
     const handler = createWorkerHandler({
+      clock,
       updater: async (dependencies) => {
         received = dependencies;
         await new Promise<void>((resolve) => {
@@ -1314,6 +1444,7 @@ describe("scheduled handler", () => {
     const pending = callScheduled(handler, setup.env, scheduledTime);
     await Promise.resolve();
     expect(received?.nowMs).toBe(scheduledTime);
+    expect(received?.clock).toBe(clock);
     expect(received?.dataBucket).toBe(setup.env.KF3_NOTIF_DATA);
     expect(received?.backupBucket).toBe(setup.env.KF3_NOTIF_BACKUP);
     expect(received?.cache).toBe(setup.env.KF3_NOTIF_CACHE);

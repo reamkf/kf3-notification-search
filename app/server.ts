@@ -8,9 +8,11 @@ import {
   fetchOfficialNews,
   readArchiveDocument,
   readCurrentArchiveDocumentIfEtag,
+  readOfficialCheckState,
   readOfficialFetchEligibility,
   serializeArchiveErrorForLog,
   updateNewsArchive,
+  updateOfficialCheckState,
   type ArchiveLogger,
   type NewsArchiveUpdateDependencies,
   type NewsFetcher,
@@ -27,6 +29,7 @@ import {
   type ValidatedNewsMergeResult,
 } from "./news-data";
 import {
+  NEWS_REFRESH_COOLDOWN_MS,
   NEWS_REFRESH_FINALIZATION_LEASE_MS,
   acquireNewsRefreshLease,
   completeNewsRefreshLease,
@@ -40,6 +43,7 @@ import {
   createNewsResponseHeaders,
   isReusableNewsCacheMetadata,
   type NewsCacheMetadata,
+  type NewsCacheMetadataV2,
 } from "./news-response-metadata";
 import { NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, NEWS_CACHE_KEY } from "./news-cache-keys";
 
@@ -101,17 +105,20 @@ const createJsonResponse = (json: string, metadata?: NewsCacheMetadata) => {
 
 const createRefreshResponse = (
   clientJson: string,
-  metadata: NewsCacheMetadata,
+  metadata: NewsCacheMetadataV2,
   clientDataVersion: string | null,
+  refreshAvailableAt: string | null,
 ) => {
   const dataUnchanged =
     isReusableNewsCacheMetadata(metadata) &&
     clientDataVersion !== null &&
     metadata.baseArchiveEtag === clientDataVersion;
+  const responseMetadata = { ...metadata, refreshAvailableAt };
+  const bodyMetadata = { ...responseMetadata, fetchedAt: metadata.officialCheckedAt };
   const body = dataUnchanged
-    ? `{"changed":false,"metadata":${JSON.stringify(metadata)}}`
-    : `{"news":${clientJson},"metadata":${JSON.stringify(metadata)}}`;
-  const response = createJsonResponse(body, metadata);
+    ? `{"changed":false,"metadata":${JSON.stringify(bodyMetadata)}}`
+    : `{"news":${clientJson},"metadata":${JSON.stringify(bodyMetadata)}}`;
+  const response = createJsonResponse(body, responseMetadata);
   response.headers.set("vary", NEWS_DATA_VERSION_HEADER);
   return response;
 };
@@ -177,6 +184,7 @@ type RefreshNewsResult = RefreshDurations & {
   newsCount: number;
   currentEtag: string | null;
   currentExists: boolean;
+  officialCheckedAt: string;
   addedCount: number;
   updatedCount: number;
   officialFetchStatus: "modified" | "not-modified";
@@ -216,7 +224,9 @@ const getRefreshNewsUnconditionally = async (
     measureRefreshOperation(measurements, "archiveReadDurationMs", () =>
       readArchiveDocument(env.KF3_NOTIF_DATA),
     ),
-    measureOfficialFetch(measurements, dependencies.fetcher ?? fetch),
+    measureOfficialFetch(measurements, dependencies.fetcher ?? fetch, {
+      clock: dependencies.clock,
+    }),
   ]);
   if (archiveResult.status === "rejected") throw archiveResult.reason;
   if (officialResult.status === "rejected") throw officialResult.reason;
@@ -237,6 +247,7 @@ const getRefreshNewsUnconditionally = async (
     ...serializeClientNews(projectValidatedClientNews(merged.document)),
     currentEtag: archiveResult.value.etag,
     currentExists: archiveResult.value.currentExists,
+    officialCheckedAt: officialResult.value.checkedAt,
     addedCount: merged.stats.addedCount,
     updatedCount: merged.stats.updatedCount,
     officialFetchStatus: "modified",
@@ -267,6 +278,7 @@ const getRefreshNews = async (
 
   const official = await measureOfficialFetch(measurements, dependencies.fetcher ?? fetch, {
     ifNoneMatch: eligibility.ifNoneMatch!,
+    clock: dependencies.clock,
   });
   measurements.officialFetchStatus = official.status;
   if (official.status === "not-modified") {
@@ -284,6 +296,7 @@ const getRefreshNews = async (
         newsCount: cached.metadata.newsCount,
         currentEtag: eligibility.currentEtag,
         currentExists: true,
+        officialCheckedAt: official.checkedAt,
         addedCount: 0,
         updatedCount: 0,
         officialFetchStatus: "not-modified",
@@ -300,6 +313,7 @@ const getRefreshNews = async (
         ...serializeClientNews(projectValidatedClientNews(current.document)),
         currentEtag: current.etag,
         currentExists: true,
+        officialCheckedAt: official.checkedAt,
         addedCount: 0,
         updatedCount: 0,
         officialFetchStatus: "not-modified",
@@ -324,6 +338,7 @@ const getRefreshNews = async (
     ...serializeClientNews(projectValidatedClientNews(merged.document)),
     currentEtag: archive.etag,
     currentExists: archive.currentExists,
+    officialCheckedAt: official.checkedAt,
     addedCount: merged.stats.addedCount,
     updatedCount: merged.stats.updatedCount,
     officialFetchStatus: "modified",
@@ -394,13 +409,16 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           cachedArchiveSnapshot.metadata ?? undefined,
         );
 
-      const snapshot = await readArchiveSnapshot(context.env);
+      const [snapshot, checkState] = await Promise.all([
+        readArchiveSnapshot(context.env),
+        readOfficialCheckState(context.env.KF3_NOTIF_DATA),
+      ]);
       archiveCount = snapshot.clientNews.length;
-      const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
       const responseJson = JSON.stringify(snapshot.clientNews);
+      const officialCheckedAt = checkState.state?.checkedAt ?? null;
       const metadata = createNewsCacheMetadata(
         "archive-snapshot",
-        fetchedAt,
+        officialCheckedAt,
         snapshot.archive.etag,
         archiveCount,
       );
@@ -502,14 +520,13 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         lease = leaseRenewal;
       }
 
-      const fetchedAt = new Date(dependencies.clock?.() ?? Date.now()).toISOString();
       const reusableArchiveEtag =
         result.currentExists && result.addedCount === 0 && result.updatedCount === 0
           ? result.currentEtag
           : null;
       const metadata = createNewsCacheMetadata(
         "merged",
-        fetchedAt,
+        result.officialCheckedAt,
         reusableArchiveEtag,
         result.newsCount,
       );
@@ -549,26 +566,38 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         throw error;
       }
       let leaseCompletion: string;
+      let refreshAvailableAt: string | null = null;
+      const leaseCompletionNowMs = dependencies.clock?.() ?? Date.now();
       const leaseCompletionStartedAt = performance.now();
       try {
         leaseCompletion = await completeNewsRefreshLease(
           context.env.KF3_NOTIF_DATA,
           lease,
           "success",
-          dependencies.clock?.() ?? Date.now(),
+          leaseCompletionNowMs,
         );
+        if (leaseCompletion === "updated") {
+          refreshAvailableAt = new Date(
+            leaseCompletionNowMs + NEWS_REFRESH_COOLDOWN_MS,
+          ).toISOString();
+        }
       } catch (error) {
-        leaseCompletion = "error";
         logger.error({
           event: "news_refresh_control_completion_failed",
           originalError: serializeArchiveErrorForLog(error),
         });
+        await deleteWrittenCache();
+        throw error;
       } finally {
         leaseCompletionDurationMs = performance.now() - leaseCompletionStartedAt;
       }
       if (leaseCompletion === "lease-mismatch") {
         return createRefreshLeaseExpiredResponse();
       }
+      const officialCheckStateStatus = await updateOfficialCheckState(
+        context.env.KF3_NOTIF_DATA,
+        result.officialCheckedAt,
+      );
       const requiresInitialization = !result.currentExists;
       const archiveChanged = result.addedCount > 0 || result.updatedCount > 0;
       const archiveUpdateNeeded = requiresInitialization || archiveChanged;
@@ -577,7 +606,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         const message: NewsArchiveUpdateMessage = {
           version: NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
           reason: requiresInitialization ? "refresh-current-missing" : "refresh-detected-change",
-          detectedAt: fetchedAt,
+          detectedAt: result.officialCheckedAt,
           addedCount: result.addedCount,
           updatedCount: result.updatedCount,
           requiresInitialization,
@@ -619,6 +648,8 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         leaseCompletion,
         officialFetchCount: result.officialFetchCount,
         officialFetchStatus: result.officialFetchStatus,
+        officialCheckedAt: result.officialCheckedAt,
+        officialCheckStateStatus,
         refreshDataSource: result.refreshDataSource,
         refreshLeaseAcquireDurationMs,
         refreshEligibilityDurationMs: result.refreshEligibilityDurationMs,
@@ -632,7 +663,12 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         refreshFinalizationDurationMs: performance.now() - refreshFinalizationStartedAt,
         refreshTotalDurationMs: performance.now() - refreshStartedAt,
       });
-      return createRefreshResponse(result.clientJson, metadata, clientDataVersion);
+      return createRefreshResponse(
+        result.clientJson,
+        metadata,
+        clientDataVersion,
+        refreshAvailableAt,
+      );
     } catch (error) {
       logger.error(createRefreshErrorLog(error, archiveCount));
       if (lease !== null) {
@@ -673,6 +709,7 @@ const runArchiveUpdate = (
     cache: env.KF3_NOTIF_CACHE,
     fetcher: dependencies.fetcher ?? fetch,
     nowMs,
+    clock: dependencies.clock,
     logger: dependencies.logger ?? defaultLogger,
     trigger,
     invalidateDisplayCache: trigger !== "queue",

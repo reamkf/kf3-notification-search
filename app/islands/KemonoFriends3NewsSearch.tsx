@@ -76,20 +76,41 @@ type RefreshState =
 
 type RefreshMetadata = {
   source: "merged";
-  fetchedAt: string;
+  officialCheckedAt?: string;
+  fetchedAt?: string;
+  refreshAvailableAt?: string | null;
 };
 
 type RefreshResponse =
   | { news: Array<News>; metadata: RefreshMetadata }
   | { changed: false; metadata: RefreshMetadata };
 
-const refreshMetadataSchema = v.object({
-  source: v.literal("merged"),
-  fetchedAt: v.pipe(
-    v.string(),
-    v.check((value) => Number.isFinite(Date.parse(value)), "fetchedAt must be a timestamp"),
+const isValidTimestamp = (value: string) => {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+};
+
+const refreshTimestampSchema = v.pipe(
+  v.string(),
+  v.check(isValidTimestamp, "timestamp must be a canonical UTC timestamp"),
+);
+const legacyRefreshTimestampSchema = v.pipe(
+  v.string(),
+  v.check((value) => Number.isFinite(Date.parse(value)), "fetchedAt must be a timestamp"),
+);
+
+const refreshMetadataSchema = v.pipe(
+  v.object({
+    source: v.literal("merged"),
+    officialCheckedAt: v.optional(refreshTimestampSchema),
+    fetchedAt: v.optional(legacyRefreshTimestampSchema),
+    refreshAvailableAt: v.optional(v.nullable(refreshTimestampSchema)),
+  }),
+  v.check(
+    (value) => value.officialCheckedAt !== undefined || value.fetchedAt !== undefined,
+    "officialCheckedAt or fetchedAt is required",
   ),
-});
+);
 
 const refreshResponseSchema = v.union([
   v.object({ news: newsArraySchema, metadata: refreshMetadataSchema }),
@@ -181,11 +202,11 @@ const getNewsTimestamp = (news: News) => {
   return timestamp;
 };
 
-const formatRelativeFetchedAt = (fetchedAt: string | null, now = Date.now()) => {
-  const fetchedAtMs = fetchedAt ? Date.parse(fetchedAt) : Number.NaN;
-  if (!Number.isFinite(fetchedAtMs)) return "不明";
+const formatRelativeCheckedAt = (officialCheckedAt: string | null, now = Date.now()) => {
+  const checkedAtMs = officialCheckedAt ? Date.parse(officialCheckedAt) : Number.NaN;
+  if (!Number.isFinite(checkedAtMs)) return "不明";
 
-  const elapsedMs = Math.max(0, now - fetchedAtMs);
+  const elapsedMs = Math.max(0, now - checkedAtMs);
   const elapsedSeconds = Math.floor(elapsedMs / 1000);
   if (elapsedSeconds < 60) return `${elapsedSeconds}秒前`;
 
@@ -204,18 +225,18 @@ const formatRelativeFetchedAt = (fetchedAt: string | null, now = Date.now()) => 
   return `${Math.floor(elapsedMonths / 12)}年前`;
 };
 
-const getRefreshCooldownUntil = (fetchedAt: string | null, now = Date.now()) => {
-  const fetchedAtMs = fetchedAt ? Date.parse(fetchedAt) : Number.NaN;
-  return Number.isFinite(fetchedAtMs)
-    ? fetchedAtMs + REFRESH_COOLDOWN_MS
-    : now + REFRESH_COOLDOWN_MS;
+const getRefreshCooldownUntil = (refreshAvailableAt: string | null, now = Date.now()) => {
+  const availableAtMs = refreshAvailableAt ? Date.parse(refreshAvailableAt) : Number.NaN;
+  return Number.isFinite(availableAtMs) ? availableAtMs : now + REFRESH_COOLDOWN_MS;
 };
 
 const isRefreshNeeded = (metadata: NewsResponseMetadata) => {
   if (metadata.source === "archive-snapshot" || metadata.source === "archive-fallback") return true;
-  const fetchedAtMs = metadata.fetchedAt ? Date.parse(metadata.fetchedAt) : Number.NaN;
-  if (!Number.isFinite(fetchedAtMs)) return true;
-  return Date.now() - fetchedAtMs >= REFRESH_STALE_AFTER_MS;
+  const checkedAtMs = metadata.officialCheckedAt
+    ? Date.parse(metadata.officialCheckedAt)
+    : Number.NaN;
+  if (!Number.isFinite(checkedAtMs)) return true;
+  return Date.now() - checkedAtMs >= REFRESH_STALE_AFTER_MS;
 };
 
 const parseRetryAfterMs = (value: string | null, now = Date.now()) => {
@@ -416,9 +437,16 @@ const KemonoFriends3NewsSearch = () => {
         }
 
         const validated: RefreshResponse = result.output;
+        const officialCheckedAt =
+          validated.metadata.officialCheckedAt ?? validated.metadata.fetchedAt;
+        if (!officialCheckedAt) {
+          finishWithError();
+          return;
+        }
         const metadata: NewsResponseMetadata = {
           source: validated.metadata.source,
-          fetchedAt: validated.metadata.fetchedAt,
+          officialCheckedAt,
+          refreshAvailableAt: validated.metadata.refreshAvailableAt ?? null,
           dataVersion: parseNewsResponseHeaders(response.headers).dataVersion,
         };
         if ("changed" in validated) {
@@ -426,10 +454,12 @@ const KemonoFriends3NewsSearch = () => {
         } else {
           setNewsPayload({ data: validated.news, metadata });
         }
+        const refreshedAt = Date.now();
+        setRelativeNow(refreshedAt);
         refreshInFlightRef.current = false;
         updateRefreshState({
           status: "cooldown",
-          retryAt: getRefreshCooldownUntil(validated.metadata.fetchedAt),
+          retryAt: getRefreshCooldownUntil(metadata.refreshAvailableAt, refreshedAt),
         });
       } catch (error) {
         if (!mountedRef.current) return;
@@ -480,10 +510,14 @@ const KemonoFriends3NewsSearch = () => {
         setNewsPayload({ data: result.output, metadata });
         setInitialErrorMessage(null);
         setInitialLoadStatus("success");
-        updateRefreshState({
-          status: "cooldown",
-          retryAt: getRefreshCooldownUntil(metadata.fetchedAt),
-        });
+        if (metadata.refreshAvailableAt) {
+          updateRefreshState({
+            status: "cooldown",
+            retryAt: getRefreshCooldownUntil(metadata.refreshAvailableAt),
+          });
+        } else {
+          updateRefreshState({ status: "idle" });
+        }
 
         if (isRefreshNeeded(metadata)) {
           autoRefreshTimerRef.current = setTimeout(() => {
@@ -526,7 +560,7 @@ const KemonoFriends3NewsSearch = () => {
   }, [isSearchVisible, isSearchOptionsRendered]);
 
   useEffect(() => {
-    if (!newsPayload?.metadata.fetchedAt && refreshState.status !== "cooldown") return;
+    if (!newsPayload?.metadata.officialCheckedAt && refreshState.status !== "cooldown") return;
     let interval: ReturnType<typeof setInterval> | null = null;
     const stop = () => {
       if (interval === null) return;
@@ -550,7 +584,7 @@ const KemonoFriends3NewsSearch = () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       stop();
     };
-  }, [newsPayload?.metadata.fetchedAt, refreshState.status]);
+  }, [newsPayload?.metadata.officialCheckedAt, refreshState.status]);
 
   useEffect(() => {
     if (refreshState.status !== "cooldown" || refreshState.retryAt > relativeNow) return;
@@ -646,7 +680,7 @@ const KemonoFriends3NewsSearch = () => {
   }, [hasMoreNews, numberOfNews, visibleNewsCount]);
 
   const metadata = newsPayload?.metadata ?? null;
-  const lastFetchedText = formatRelativeFetchedAt(metadata?.fetchedAt ?? null, relativeNow);
+  const lastCheckedText = formatRelativeCheckedAt(metadata?.officialCheckedAt ?? null, relativeNow);
   const refreshStatusMessage =
     refreshState.status === "refreshing"
       ? "お知らせを再取得しています"
@@ -829,10 +863,10 @@ const KemonoFriends3NewsSearch = () => {
                 <RefreshStatusIcon status={refreshState.status} />
                 <span class={METADATA_TEXT_CLASS}>
                   最終取得:{" "}
-                  {metadata.fetchedAt ? (
-                    <time dateTime={metadata.fetchedAt}>{lastFetchedText}</time>
+                  {metadata.officialCheckedAt ? (
+                    <time dateTime={metadata.officialCheckedAt}>{lastCheckedText}</time>
                   ) : (
-                    lastFetchedText
+                    lastCheckedText
                   )}
                   {" ･ "}
                   {totalNewsCount}件

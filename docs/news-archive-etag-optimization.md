@@ -2,7 +2,7 @@
 
 ## 状態
 
-本書は、Queue consumerとscheduled fallbackが実行する`updateNewsArchive`、および表示用refreshで公式ETagを利用する現行実装の仕様を示す。表示用APIの`GET /api/kf3-news`は公式取得やETag条件付き取得を行わず、KV snapshotまたはR2 snapshotを返す。`POST /api/kf3-news/refresh`は保存済みstateとcurrent ETagが対応する場合だけ条件付き取得を利用するが、公式ETag stateを書き換えず、Queue consumerとscheduled fallbackの最適化状態へ影響を与えない。公式レスポンスのデータ形式とHTTP ETagの契約は [公式お知らせ配信仕様](./official-news-spec.md) を参照する。
+本書は、Queue consumerとscheduled fallbackが実行する`updateNewsArchive`、および表示用refreshで公式ETagを利用する現行実装の仕様を示す。表示用APIの`GET /api/kf3-news`は公式取得やETag条件付き取得を行わず、KV snapshotまたはR2 snapshotを返す。`POST /api/kf3-news/refresh`は保存済みstateとcurrent ETagが対応する場合だけ条件付き取得を利用するが、公式ETag stateを書き換えず、公式確認時刻stateだけを更新する。公式レスポンスのデータ形式とHTTP ETagの契約は [公式お知らせ配信仕様](./official-news-spec.md) を参照する。
 
 ## 目的
 
@@ -17,7 +17,7 @@ Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 - 統合結果のソートとJSONシリアライズ
 - 日次backup、current更新、KV削除
 
-表示用GETの両KV missでは公式取得を行わず、R2 snapshotを投影する。投影したJSONをGET専用KV `kf3-news-archive-snapshot`へTTL付きでbest-effort保存し、同じ本文を直接返す。merged結果用KVを最優先し、GET専用KVの保存がmerged結果用KVを上書きすることはない。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KVとrefresh制御metadataだけを更新し、ETag state、current、daily、monthlyを更新しない。merge差分がある場合またはcurrentが未作成の場合のQueue publishは表示用refreshの委譲であり、ETag stateや永続archiveの書き込みではない。
+表示用GETの両KV missでは公式取得を行わず、R2 snapshotを投影する。投影したJSONをGET専用KV `kf3-news-archive-snapshot`へTTL付きでbest-effort保存し、同じ本文を直接返す。merged結果用KVを最優先し、GET専用KVの保存がmerged結果用KVを上書きすることはない。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KV、公式確認時刻state、refresh制御metadataを更新し、公式ETag state、current、daily、monthlyを更新しない。merge差分がある場合またはcurrentが未作成の場合のQueue publishは表示用refreshの委譲であり、公式ETag stateや永続archiveの書き込みではない。
 
 ### refreshの304 fast path
 
@@ -25,7 +25,7 @@ Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 2. 公式が304を返したら、表示用KV `kf3-news`をmetadata付きで読む。
 3. metadataがv2で、`baseArchiveEtag`が現在のcurrent ETagと一致し、valueが存在する場合はvalueをclient JSONとして再利用する。変更を含むmerge結果やcurrent未作成の結果は`baseArchiveEtag`が`null`となるため再利用しない。
 4. 一致しない場合、v1、metadata欠落、value欠落の場合は`readCurrentArchiveDocumentIfEtag`へfallbackし、従来どおりR2本文を検証して投影する。
-5. 再利用したJSONも通常のrefresh finalizationでTTL 300秒、`fetchedAt`、`newsCount`を更新保存する。クライアントの`X-KF3-News-Data-Version`が一致する場合はHTTP本文からJSON配列を省略し`{changed:false, metadata}`を返し、それ以外は同じJSONを`{news, metadata}`へ埋め込む。
+5. 再利用したJSONも通常のrefresh finalizationでTTL 300秒、`officialCheckedAt`、`newsCount`を更新保存する。クライアントの`X-KF3-News-Data-Version`が一致する場合はHTTP本文からJSON配列を省略し`{changed:false, metadata}`を返し、それ以外は同じJSONを`{news, metadata}`へ埋め込む。
 
 ## 設計方針
 
@@ -50,9 +50,10 @@ KF3_NOTIF_DATA/archive/official-fetch-state.json
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "officialEtag": "\"source-etag\"",
-  "currentEtag": "r2-current-etag"
+  "currentEtag": "r2-current-etag",
+  "checkedAt": "2026-08-12T12:34:56.789Z"
 }
 ```
 
@@ -60,11 +61,27 @@ KF3_NOTIF_DATA/archive/official-fetch-state.json
 
 | フィールド     | 条件                                                                                                                                            |
 | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `version`      | 整数`1`                                                                                                                                         |
+| `version`      | 新規保存は整数`2`。整数`1`も読み込みだけ互換する                                                                                                |
 | `officialEtag` | 公式レスポンスから取得したRFC準拠の単一entity-tagである強いETag。空のopaque-tagを含む。引用符を含むヘッダー値を保存し、長さは1024文字以下とする |
 | `currentEtag`  | 検証済み`archive/current.json`の引用符を含まないR2のETag                                                                                        |
+| `checkedAt`    | 公式レスポンスを正常に確認した時刻。v2ではRFC3339形式のUTC timestampを必須とする                                                                |
 
-ETagが欠落している場合、弱いETagである場合、長さや文字がヘッダー値として不正な場合はstateを更新せず、次回も完全処理を行う。
+ETagが欠落している場合、弱いETagである場合、長さや文字がヘッダー値として不正な場合はETag stateを更新せず、次回も完全処理を行う。
+
+表示用の公式確認時刻は、ETag対応関係から独立した次のR2 stateへ保存する。
+
+```text
+KF3_NOTIF_DATA/archive/official-check-state.json
+```
+
+```json
+{
+  "version": 1,
+  "checkedAt": "2026-08-12T12:34:56.789Z"
+}
+```
+
+このstateはrefresh、Queue consumer、scheduled fallbackの公式確認成功時に更新する。保存時は既存の`checkedAt`より新しい時刻だけをCASで反映し、確認時刻が巻き戻らないようにする。GETのR2 snapshot経路はこのstateを読み、表示用metadataの`officialCheckedAt`へ投影する。
 
 stateの保存先にはWorkers KVを使用しない。KVは結果整合性であり、本処理はcurrentとの対応関係を確認する必要がある。R2の`head()`、強整合な読み書き、ETag条件付きPUTを使用する。
 
@@ -84,14 +101,14 @@ flowchart TD
     ConditionalFetch -->|304| CheckMonthly[当月monthlyをHEADする]
     ConditionalFetch -->|その他| Fail[公式取得失敗]
     FullFetch --> FullProcess
-    CheckMonthly -->|存在する| Skip[本文処理を省略して正常終了]
+    CheckMonthly -->|存在する| SaveCheckedAt[公式確認時刻をstateへ保存]
     CheckMonthly -->|存在しない| StreamCurrent[current本文を条件付き取得]
     StreamCurrent -->|ETag一致| Monthly[current本文を解析せずmonthlyへ保存]
     StreamCurrent -->|nullまたは不一致| FullFetch
-    Monthly --> Skip
+    Monthly --> SaveCheckedAt
     FullProcess --> SaveState[全必須処理の後にstateを保存]
     SaveState --> Done[正常終了]
-    Skip --> Done
+    SaveCheckedAt --> Done
 ```
 
 ### 条件付き取得の利用条件
@@ -109,7 +126,7 @@ currentが存在せずlegacyデータを使用する初回移行では、必ず�
 
 304を受け取った場合、保存済みstateによって公式データとcurrentの双方が前回の検証済み状態から変わっていないと判断する。currentと公式の本文は取得または解析しない。
 
-月次backupの補完を維持するため、当月の`monthly/YYYY-MM.json`を`head()`する。存在する場合はR2とKVを変更せず正常終了する。存在しない場合は次の順で作成する。
+月次backupの補完を維持するため、当月の`monthly/YYYY-MM.json`を`head()`する。存在する場合も、公式確認時刻をETag stateと独立したofficial-check-stateへ保存して正常終了する。archive本体と表示用KVは変更しない。存在しない場合は次の順で作成する。
 
 1. stateの`currentEtag`を条件に`archive/current.json`を取得する。
 2. 条件不一致の場合は月次backupを作成せず、公式データを条件なしで再取得して完全処理へ切り替える。
@@ -126,27 +143,27 @@ currentが存在せずlegacyデータを使用する初回移行では、必ず�
 4. 表示KV invalidationが有効な場合のKV削除
 5. 当月monthlyの作成または存在確認
 
-統合結果に変更がない場合も、公式レスポンスのETagと読み込み済みcurrentのETagをstateへ保存する。公式のキー順や未知フィールド表現だけが変わり、統合結果が同一だった場合も、次回から新しいETagで条件付き取得できるようにする。
+統合結果に変更がない場合も、公式レスポンスのETagと読み込み済みcurrentのETagをETag stateへ保存し、公式確認時刻を独立したofficial-check-stateへ保存する。公式のキー順や未知フィールド表現だけが変わり、統合結果が同一だった場合も、次回から新しいETagで条件付き取得できるようにする。304の場合も、公式レスポンスが正常に確認できた時刻で両stateを更新する。
 
 state PUTには、読み込み時のstate object ETagを使用する。stateが未作成の場合は存在しないことを条件にする。競合または保存失敗はarchiveの正しさへ影響しないため、archiveを巻き戻さず、成功ログの`etagStateStatus`へ反映して次回の完全処理へ委ねる。state保存専用のwarningログは出さない。
 
-refresh成功後に公式ETag stateを保存してはならない。refreshは表示用KVと制御metadataだけを変更し、次回のQueue consumerまたはscheduled fallbackがstateとcurrentの対応を検証できる状態を維持する。
+refresh成功後に公式ETag stateを保存してはならない。refreshは表示用KV、公式確認時刻state、制御metadataを変更し、次回のQueue consumerまたはscheduled fallbackが公式ETag stateとcurrentの対応を検証できる状態を維持する。
 
 ## 失敗時の扱い
 
-| 状況                                 | 扱い                                                                     |
-| ------------------------------------ | ------------------------------------------------------------------------ |
-| stateが欠落または不正                | Queue consumerとscheduled fallbackは条件なしの完全処理へ切り替える       |
-| currentのETagがstateと不一致         | Queue consumerとscheduled fallbackは条件なしの完全処理へ切り替える       |
-| 公式レスポンスに強いETagがない       | 200本文を通常処理し、最適化stateは更新しない                             |
-| 条件付きGETが304                     | 公式本文とcurrent本文の処理を省略し、monthlyだけ確認する                 |
-| 条件付きGETが200                     | 現行の完全処理を行う                                                     |
-| 条件付きGETが304と200以外            | 公式取得失敗としてR2とKVを変更しない                                     |
-| current更新前に処理が失敗            | stateを更新しない                                                        |
-| current更新後にKVまたはmonthlyが失敗 | stateを更新しない。次回は完全処理またはcurrentのETag不一致から再確認する |
-| stateの保存が失敗または競合          | currentを巻き戻さず`etagStateStatus`へ記録し、次回の完全処理へ委ねる     |
-| refreshの公式取得またはmergeが失敗   | 表示用KV、archive、ETag stateを変更せず503を返す                         |
-| Queue送信だけが失敗                  | refreshのKV保存と200を維持し、Queue送信失敗をログへ記録する              |
+| 状況                                 | 扱い                                                                        |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| stateが欠落または不正                | Queue consumerとscheduled fallbackは条件なしの完全処理へ切り替える          |
+| currentのETagがstateと不一致         | Queue consumerとscheduled fallbackは条件なしの完全処理へ切り替える          |
+| 公式レスポンスに強いETagがない       | 200本文を通常処理し、最適化stateは更新しない                                |
+| 条件付きGETが304                     | 公式本文とcurrent本文の処理を省略し、monthlyを確認して`checkedAt`を更新する |
+| 条件付きGETが200                     | 現行の完全処理を行う                                                        |
+| 条件付きGETが304と200以外            | 公式取得失敗としてR2とKVを変更しない                                        |
+| current更新前に処理が失敗            | stateを更新しない                                                           |
+| current更新後にKVまたはmonthlyが失敗 | stateを更新しない。次回は完全処理またはcurrentのETag不一致から再確認する    |
+| stateの保存が失敗または競合          | currentを巻き戻さず`etagStateStatus`へ記録し、次回の完全処理へ委ねる        |
+| refreshの公式取得またはmergeが失敗   | 表示用KV、archive、ETag stateを変更せず503を返す                            |
+| Queue送信だけが失敗                  | refreshのKV保存と200を維持し、Queue送信失敗をログへ記録する                 |
 
 stateをcurrent更新より先に保存してはならない。先に保存すると、currentへ反映されなかった公式ETagに対して翌日の取得が304となり、未反映の変更を省略する可能性がある。
 
@@ -160,14 +177,15 @@ stateをcurrent更新より先に保存してはならない。先に保存す�
 
 更新成功ログには次を含める。ETag値自体は、調査に不要なため通常ログへ出力しない。
 
-| フィールド                | 値                                                |
-| ------------------------- | ------------------------------------------------- |
-| `officialFetchStatus`     | `modified`または`not-modified`                    |
-| `conditionalRequestUsed`  | 条件付きGETを送ったか                             |
-| `currentEtagMatchedState` | stateとcurrentのETagが一致したか                  |
-| `officialBodyProcessed`   | 公式本文を読み込み、解析したか                    |
-| `monthlyBackupStatus`     | `created`または`existing`                         |
-| `etagStateStatus`         | `saved`、`unchanged`、`unavailable`、`conflicted` |
+| フィールド                 | 値                                                |
+| -------------------------- | ------------------------------------------------- |
+| `officialFetchStatus`      | `modified`または`not-modified`                    |
+| `conditionalRequestUsed`   | 条件付きGETを送ったか                             |
+| `currentEtagMatchedState`  | stateとcurrentのETagが一致したか                  |
+| `officialBodyProcessed`    | 公式本文を読み込み、解析したか                    |
+| `monthlyBackupStatus`      | `created`または`existing`                         |
+| `etagStateStatus`          | `saved`、`unchanged`、`unavailable`、`conflicted` |
+| `officialCheckStateStatus` | `saved`、`unchanged`、`unavailable`、`conflicted` |
 
 Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集計する。導入前後の比較では経過時間ではなくCPU時間を使用する。refresh、Queue consumer、scheduled fallbackのCPU時間は別invocationとして集計する。
 
@@ -177,17 +195,17 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 
 - stateとcurrentのETagが一致するとQueue consumerまたはscheduled fallbackから`If-None-Match`が送られる。
 - Queue consumerまたはscheduled fallbackの304では公式本文とcurrent本文を読み込まず、統合、日次保存、current PUT、KV削除を行わない。
-- 304でも当月monthlyが欠けていればcurrentの元バイト列から作成する。
+- 304でも公式確認時刻をETag stateと独立したofficial-check-stateへ保存し、当月monthlyが欠けていればcurrentの元バイト列から作成する。
 - 304のmonthly作成中にcurrentのETagが変わった場合は、古い本文を保存しない。
 - state欠落、不正、currentのETag不一致では条件なしGETを行う。
 - 200で変更がある場合は、state PUTが日次、current、必要なKV invalidation、monthlyより後になる。
-- 200で変更がない場合も、新しい公式ETagと現在のcurrentのETagを保存する。
+- 200で変更がない場合も、新しい公式ETagと現在のcurrentのETagをETag stateへ保存し、公式確認時刻をofficial-check-stateへ保存する。
 - current PUT、表示KV invalidationが有効な場合のKV削除、monthly PUTの失敗時はstateを更新しない。
 - state PUTの失敗または競合で、確定済みcurrentを巻き戻さない。
 - 304を公式取得エラーとして扱わない。
 - GETのKV hitではR2、公式サーバー、stateへアクセスしない。
-- GETのKV missでは公式サーバーへアクセスせず、R2 snapshotを投影して同じJSONを表示用KVへbest-effort保存する。
-- refreshは公式取得、検証、merge、KV保存を行い、成功本文はdata version一致時の`{changed:false, metadata}`または通常の`{news, metadata}`とするが、current、daily、monthly、公式ETag stateを変更しない。304かつKV v2/current ETag一致時は、KV JSONを再利用してR2 current本文を読まない。
+- GETのKV missでは公式サーバーへアクセスせず、R2 snapshotを投影し、official-check-stateの`checkedAt`を同じJSONのmetadataへ反映して表示用KVへbest-effort保存する。
+- refreshは公式取得、検証、merge、KV保存、official-check-state更新を行い、成功本文はdata version一致時の`{changed:false, metadata}`または通常の`{news, metadata}`とするが、current、daily、monthly、公式ETag stateを変更しない。304かつKV v2/current ETag一致時は、KV JSONを再利用してR2 current本文を読まない。
 - 別refreshの実行中は公式取得前に202、5分cooldown中は429を返す。
 - refresh成功時は200と、data versionの一致に応じたレスポンス本文を返す。
 - refreshの依存処理失敗時は503を返し、表示用KVを置き換えない。
@@ -200,7 +218,7 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - Queue consumerまたはscheduled fallbackの304経路でも月次backupの欠落を補完できる。
 - Queue consumerとscheduled fallbackの200経路で安全性検証、日次backup、ETag条件付きcurrent更新、月次backup、state保存の順序を維持する。scheduled fallbackではcurrent更新後にKVも削除し、Queue consumerではrefresh由来のKVを維持する。
 - stateとcurrentの不一致時に、公式変更を取り逃がさず完全処理へ戻る。
-- refreshが表示用KVだけを更新し、永続archiveと公式ETag stateへ影響を与えない。
+- refreshが表示用KVとofficial-check-stateを更新し、永続archiveと公式ETag stateへ影響を与えない。
 - 別refreshの実行中とlease失効は202、cooldownは429、依存処理の失敗は503へ変換する。
 - `GET /`のStatic Assets応答が公式サーバー、R2、KVへのお知らせ取得を開始せず、Workerを起動しない。
 - GETのKV write-through後にcurrent ETagを再確認し、古いsnapshotを削除できる。writeまたは確認失敗でもHTTP 200を維持し、`news_api_cache_write_failed`を記録できる。
