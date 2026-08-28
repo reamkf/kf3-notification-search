@@ -23,7 +23,7 @@ export const OFFICIAL_FETCH_STATE_KEY = "archive/official-fetch-state.json";
 export const LEGACY_ARCHIVE_KEY = "entries_merged_20241107.json";
 export { MAX_OFFICIAL_RESPONSE_BYTES } from "./news-data";
 
-const OFFICIAL_FETCH_STATE_VERSION = 1;
+const OFFICIAL_FETCH_STATE_VERSION = 2;
 const MAX_OFFICIAL_ETAG_LENGTH = 1024;
 
 export type NewsFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -55,20 +55,30 @@ export type ArchiveDocumentReadResult = {
   currentExists: boolean;
 };
 
-export type OfficialFetchState = {
+type LegacyOfficialFetchState = {
   version: 1;
   officialEtag: string;
   currentEtag: string;
 };
 
+export type OfficialFetchState = {
+  version: 2;
+  officialEtag: string;
+  currentEtag: string;
+  checkedAt: string;
+};
+
+type ReadableOfficialFetchState = LegacyOfficialFetchState | OfficialFetchState;
+
 type OfficialFetchStateRead = {
-  state: OfficialFetchState | null;
+  state: ReadableOfficialFetchState | null;
   objectEtag: string | null;
   status: "valid" | "missing" | "invalid" | "unavailable";
 };
 
 export type OfficialFetchEligibility = {
-  state: OfficialFetchState | null;
+  state: ReadableOfficialFetchState | null;
+  officialCheckedAt: string | null;
   stateObjectEtag: string | null;
   stateStatus: OfficialFetchStateRead["status"];
   currentEtag: string | null;
@@ -105,6 +115,12 @@ const isStrongOfficialEtag = (value: unknown): value is string => {
 
 const isValidCurrentEtag = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
+
+const isValidTimestamp = (value: unknown): value is string => {
+  if (typeof value !== "string") return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+};
 
 const ORIGINAL_ERROR_NAME_MAX_LENGTH = 100;
 const ORIGINAL_ERROR_MESSAGE_MAX_LENGTH = 500;
@@ -288,17 +304,37 @@ const readOfficialFetchState = async (bucket: R2Bucket): Promise<OfficialFetchSt
   } catch {
     return { state: null, objectEtag: object.etag, status: "invalid" };
   }
+  if (typeof parsed !== "object" || parsed === null) {
+    return { state: null, objectEtag: object.etag, status: "invalid" };
+  }
+  const candidate = parsed as Record<string, unknown>;
+  if (!isStrongOfficialEtag(candidate.officialEtag) || !isValidCurrentEtag(candidate.currentEtag)) {
+    return { state: null, objectEtag: object.etag, status: "invalid" };
+  }
+  if (candidate.version === 1) {
+    return {
+      state: {
+        version: 1,
+        officialEtag: candidate.officialEtag,
+        currentEtag: candidate.currentEtag,
+      },
+      objectEtag: object.etag,
+      status: "valid",
+    };
+  }
   if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    (parsed as { version?: unknown }).version !== OFFICIAL_FETCH_STATE_VERSION ||
-    !isStrongOfficialEtag((parsed as { officialEtag?: unknown }).officialEtag) ||
-    !isValidCurrentEtag((parsed as { currentEtag?: unknown }).currentEtag)
+    candidate.version !== OFFICIAL_FETCH_STATE_VERSION ||
+    !isValidTimestamp(candidate.checkedAt)
   ) {
     return { state: null, objectEtag: object.etag, status: "invalid" };
   }
   return {
-    state: parsed as OfficialFetchState,
+    state: {
+      version: OFFICIAL_FETCH_STATE_VERSION,
+      officialEtag: candidate.officialEtag,
+      currentEtag: candidate.currentEtag,
+      checkedAt: candidate.checkedAt,
+    },
     objectEtag: object.etag,
     status: "valid",
   };
@@ -323,6 +359,10 @@ export const readOfficialFetchEligibility = async (
     stateRead.state.currentEtag === currentEtag;
   return {
     state: stateRead.state,
+    officialCheckedAt:
+      currentEtagMatchedState && stateRead.state?.version === OFFICIAL_FETCH_STATE_VERSION
+        ? stateRead.state.checkedAt
+        : null,
     stateObjectEtag: stateRead.objectEtag,
     stateStatus: stateRead.status,
     currentEtag,
@@ -393,16 +433,27 @@ export type OfficialFetchResult =
       byteLength: number;
       officialEtag: string | null;
       conditionalRequestUsed: boolean;
+      checkedAt: string;
     }
   | {
       status: "not-modified";
       byteLength: 0;
       officialEtag: string;
       conditionalRequestUsed: true;
+      checkedAt: string;
     };
 
 export type OfficialFetchOptions = {
   ifNoneMatch?: string;
+  clock?: () => number;
+};
+
+const getOfficialCheckedAt = (clock?: () => number) => {
+  const date = new Date(clock?.() ?? Date.now());
+  if (!Number.isFinite(date.getTime())) {
+    throw new NewsArchiveError("official-fetch", "公式確認日時が不正です");
+  }
+  return date.toISOString();
 };
 
 const readResponseBody = async (
@@ -488,6 +539,7 @@ export const fetchOfficialNews = async (
         byteLength: 0,
         officialEtag,
         conditionalRequestUsed: true,
+        checkedAt: getOfficialCheckedAt(options.clock),
       };
     }
     if (response.status !== 200) {
@@ -534,6 +586,7 @@ export const fetchOfficialNews = async (
       byteLength,
       officialEtag: response.headers.get("etag"),
       conditionalRequestUsed,
+      checkedAt: getOfficialCheckedAt(options.clock),
     };
   } finally {
     clearTimeout(timeout);
@@ -611,6 +664,7 @@ export type NewsArchiveUpdateResult = {
   monthlyBackupKey: string;
   monthlyBackupStatus: MonthlyBackupStatus;
   officialFetchStatus: "modified" | "not-modified";
+  officialCheckedAt: string;
   conditionalRequestUsed: boolean;
   currentEtagMatchedState: boolean;
   officialBodyProcessed: boolean;
@@ -729,10 +783,22 @@ const saveOfficialFetchState = async (
   bucket: R2Bucket,
   officialEtag: string | null,
   currentEtag: string | null,
+  checkedAt: string,
   previous: OfficialFetchStateRead,
 ): Promise<EtagStateStatus> => {
-  if (!isStrongOfficialEtag(officialEtag) || !isValidCurrentEtag(currentEtag)) return "unavailable";
-  if (previous.state?.officialEtag === officialEtag && previous.state.currentEtag === currentEtag) {
+  if (
+    !isStrongOfficialEtag(officialEtag) ||
+    !isValidCurrentEtag(currentEtag) ||
+    !isValidTimestamp(checkedAt)
+  ) {
+    return "unavailable";
+  }
+  if (
+    previous.state?.version === OFFICIAL_FETCH_STATE_VERSION &&
+    previous.state.officialEtag === officialEtag &&
+    previous.state.currentEtag === currentEtag &&
+    previous.state.checkedAt === checkedAt
+  ) {
     return "unchanged";
   }
   if (previous.status === "unavailable" && previous.objectEtag === null) return "unavailable";
@@ -741,6 +807,7 @@ const saveOfficialFetchState = async (
     version: OFFICIAL_FETCH_STATE_VERSION,
     officialEtag,
     currentEtag,
+    checkedAt,
   };
   const onlyIf = previous.objectEtag
     ? { etagMatches: previous.objectEtag }
@@ -765,10 +832,18 @@ export const updateNewsArchive = async (
   const backupKeys = buildBackupKeys(dependencies.nowMs);
   let archive: ArchiveReadResult | undefined;
   const eligibility = await readOfficialFetchEligibility(dependencies.dataBucket);
-  const previousState: OfficialFetchStateRead = {
+  let previousState: OfficialFetchStateRead = {
     state: eligibility.state,
     objectEtag: eligibility.stateObjectEtag,
     status: eligibility.stateStatus,
+  };
+  const refreshPreviousState = async () => {
+    const latest = await readOfficialFetchEligibility(dependencies.dataBucket);
+    previousState = {
+      state: latest.state,
+      objectEtag: latest.stateObjectEtag,
+      status: latest.stateStatus,
+    };
   };
 
   const logResult = (result: NewsArchiveUpdateResult) => {
@@ -789,6 +864,7 @@ export const updateNewsArchive = async (
       monthlyBackupKey: result.monthlyBackupKey,
       monthlyBackupStatus: result.monthlyBackupStatus,
       officialFetchStatus: result.officialFetchStatus,
+      officialCheckedAt: result.officialCheckedAt,
       conditionalRequestUsed: result.conditionalRequestUsed,
       currentEtagMatchedState: result.currentEtagMatchedState,
       officialBodyProcessed: result.officialBodyProcessed,
@@ -801,8 +877,37 @@ export const updateNewsArchive = async (
     official: Extract<OfficialFetchResult, { status: "not-modified" }>,
   ): Promise<NewsArchiveUpdateResult | null> => {
     if (!eligibility.state || !eligibility.currentEtagMatchedState) return null;
+    const currentStillMatches = async () => {
+      try {
+        return (
+          ((await dependencies.dataBucket.head(CURRENT_ARCHIVE_KEY))?.etag ?? null) ===
+          eligibility.currentEtag
+        );
+      } catch {
+        return false;
+      }
+    };
+    const deleteCreatedMonthly = async (status: MonthlyBackupStatus) => {
+      if (status !== "created") return;
+      try {
+        await dependencies.backupBucket.delete(backupKeys.monthlyKey);
+      } catch (error) {
+        throw asArchiveError(error, "monthly-backup", "月次バックアップの削除に失敗しました", {
+          key: backupKeys.monthlyKey,
+        });
+      }
+    };
     const monthlyExists = await hasMonthlyBackup(dependencies.backupBucket, backupKeys.monthlyKey);
     if (monthlyExists) {
+      if (!(await currentStillMatches())) return null;
+      const etagStateStatus = await saveOfficialFetchState(
+        dependencies.dataBucket,
+        official.officialEtag,
+        eligibility.currentEtag,
+        official.checkedAt,
+        previousState,
+      );
+      if (!(await currentStillMatches())) return null;
       const processingMs = Math.max(0, (dependencies.clock?.() ?? Date.now()) - startedAt);
       const result: NewsArchiveUpdateResult = {
         updated: false,
@@ -817,10 +922,11 @@ export const updateNewsArchive = async (
         monthlyBackupKey: backupKeys.monthlyKey,
         monthlyBackupStatus: "existing",
         officialFetchStatus: "not-modified",
+        officialCheckedAt: official.checkedAt,
         conditionalRequestUsed: true,
         currentEtagMatchedState: true,
         officialBodyProcessed: false,
-        etagStateStatus: "unchanged",
+        etagStateStatus,
         readEtag: eligibility.currentEtag,
         updatedEtag: eligibility.currentEtag,
         processingMs,
@@ -833,13 +939,28 @@ export const updateNewsArchive = async (
       dependencies.dataBucket,
       eligibility.state.currentEtag,
     );
-    if (!currentObject) return null;
+    if (!currentObject || !(await currentStillMatches())) return null;
     const monthlyBackupStatus = await putMonthlyBackup(
       dependencies.backupBucket,
       backupKeys.monthlyKey,
       currentObject.body,
       { monthlyMissingChecked: true },
     );
+    if (!(await currentStillMatches())) {
+      await deleteCreatedMonthly(monthlyBackupStatus);
+      return null;
+    }
+    const etagStateStatus = await saveOfficialFetchState(
+      dependencies.dataBucket,
+      official.officialEtag,
+      eligibility.currentEtag,
+      official.checkedAt,
+      previousState,
+    );
+    if (!(await currentStillMatches())) {
+      await deleteCreatedMonthly(monthlyBackupStatus);
+      return null;
+    }
     const processingMs = Math.max(0, (dependencies.clock?.() ?? Date.now()) - startedAt);
     const result: NewsArchiveUpdateResult = {
       updated: false,
@@ -854,10 +975,11 @@ export const updateNewsArchive = async (
       monthlyBackupKey: backupKeys.monthlyKey,
       monthlyBackupStatus,
       officialFetchStatus: "not-modified",
+      officialCheckedAt: official.checkedAt,
       conditionalRequestUsed: true,
       currentEtagMatchedState: true,
       officialBodyProcessed: false,
-      etagStateStatus: "unchanged",
+      etagStateStatus,
       readEtag: eligibility.currentEtag,
       updatedEtag: eligibility.currentEtag,
       processingMs,
@@ -916,6 +1038,7 @@ export const updateNewsArchive = async (
       dependencies.dataBucket,
       official.officialEtag,
       updatedEtag,
+      official.checkedAt,
       previousState,
     );
     const processingMs = Math.max(0, (dependencies.clock?.() ?? Date.now()) - startedAt);
@@ -932,6 +1055,7 @@ export const updateNewsArchive = async (
       monthlyBackupKey: backupKeys.monthlyKey,
       monthlyBackupStatus,
       officialFetchStatus: "modified",
+      officialCheckedAt: official.checkedAt,
       conditionalRequestUsed: official.conditionalRequestUsed,
       currentEtagMatchedState: eligibility.currentEtagMatchedState,
       officialBodyProcessed: true,
@@ -947,13 +1071,17 @@ export const updateNewsArchive = async (
   try {
     let official: OfficialFetchResult;
     if (eligibility.ifNoneMatch) {
-      official = await fetchOfficialNews(fetcher, { ifNoneMatch: eligibility.ifNoneMatch });
+      official = await fetchOfficialNews(fetcher, {
+        ifNoneMatch: eligibility.ifNoneMatch,
+        clock: dependencies.clock,
+      });
       if (official.status === "not-modified") {
         const result = await completeNotModified(official);
         if (result) return result;
+        await refreshPreviousState();
         const fullResults = await Promise.allSettled([
           readArchive(dependencies.dataBucket),
-          fetchOfficialNews(fetcher),
+          fetchOfficialNews(fetcher, { clock: dependencies.clock }),
         ]);
         if (fullResults[0].status === "rejected") throw fullResults[0].reason;
         if (fullResults[1].status === "rejected") throw fullResults[1].reason;
@@ -967,7 +1095,7 @@ export const updateNewsArchive = async (
 
     const [archiveResult, officialResult] = await Promise.allSettled([
       readArchive(dependencies.dataBucket),
-      fetchOfficialNews(fetcher),
+      fetchOfficialNews(fetcher, { clock: dependencies.clock }),
     ]);
     if (archiveResult.status === "rejected") throw archiveResult.reason;
     if (officialResult.status === "rejected") throw officialResult.reason;

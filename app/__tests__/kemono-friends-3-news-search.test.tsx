@@ -54,7 +54,7 @@ const mockNewsApi = ({
   news,
   headers = {
     "X-KF3-News-Source": "merged",
-    "X-KF3-News-Fetched-At": new Date().toISOString(),
+    "X-KF3-News-Official-Checked-At": new Date().toISOString(),
   },
   refreshResponses = [],
   getStatus = 200,
@@ -224,13 +224,15 @@ describe("KemonoFriends3NewsSearch", () => {
     expect(new Set(Array.from(categories, (category) => category.className)).size).toBe(3);
   });
 
-  it("取得日時を含む状態アイコン付き更新ボタンを提供する", async () => {
-    const fetchedAt = new Date(Date.now() - 2 * 60 * 1000 - 500).toISOString();
+  it("公式確認日時とrefresh cooldownを別々に表示制御する", async () => {
+    const officialCheckedAt = new Date(Date.now() - 2 * 60 * 1000 - 500).toISOString();
+    const refreshAvailableAt = new Date(Date.now() + 3 * 60_000 - 500).toISOString();
     mockNewsApi({
       news: [createNews(1)],
       headers: {
         "X-KF3-News-Source": "merged",
-        "X-KF3-News-Fetched-At": fetchedAt,
+        "X-KF3-News-Official-Checked-At": officialCheckedAt,
+        "X-KF3-News-Refresh-Available-At": refreshAvailableAt,
       },
     });
 
@@ -250,7 +252,7 @@ describe("KemonoFriends3NewsSearch", () => {
     expect(refreshIndicator?.querySelector("svg")?.getAttribute("class")).toContain(
       "text-green-600",
     );
-    expect(refreshIndicator?.querySelector(`time[datetime="${fetchedAt}"]`)).not.toBeNull();
+    expect(refreshIndicator?.querySelector(`time[datetime="${officialCheckedAt}"]`)).not.toBeNull();
     expect(refreshButton?.querySelector("time")).toBeNull();
 
     await advanceRefreshCooldown(3 * 60_000);
@@ -262,17 +264,17 @@ describe("KemonoFriends3NewsSearch", () => {
   it("古いGETデータを表示してからrefreshを自動実行する", async () => {
     const oldNews = [createNews(1, "前回のお知らせ")];
     const refreshedNews = [createNews(1, "更新されたお知らせ")];
-    const fetchedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const officialCheckedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     const refreshedAt = new Date().toISOString();
     const refreshResponse = jsonResponse({
       news: refreshedNews,
-      metadata: { source: "merged", fetchedAt: refreshedAt },
+      metadata: { source: "merged", officialCheckedAt: refreshedAt },
     });
     mockNewsApi({
       news: oldNews,
       headers: {
         "X-KF3-News-Source": "merged",
-        "X-KF3-News-Fetched-At": fetchedAt,
+        "X-KF3-News-Official-Checked-At": officialCheckedAt,
       },
       refreshResponses: [refreshResponse],
     });
@@ -289,18 +291,18 @@ describe("KemonoFriends3NewsSearch", () => {
   });
 
   it("archive-snapshotを受け取った場合もrefreshする", async () => {
-    const fetchedAt = new Date().toISOString();
+    const officialCheckedAt = new Date().toISOString();
     const refreshedAt = new Date().toISOString();
     mockNewsApi({
       news: [createNews(1, "スナップショット")],
       headers: {
         "X-KF3-News-Source": "archive-snapshot",
-        "X-KF3-News-Fetched-At": fetchedAt,
+        "X-KF3-News-Official-Checked-At": officialCheckedAt,
       },
       refreshResponses: [
         jsonResponse({
           news: [createNews(1, "再取得済み")],
-          metadata: { source: "merged", fetchedAt: refreshedAt },
+          metadata: { source: "merged", officialCheckedAt: refreshedAt },
         }),
       ],
     });
@@ -312,25 +314,25 @@ describe("KemonoFriends3NewsSearch", () => {
 
   it("data version一致時の変更なしrefreshは一覧を維持してmetadataだけ更新する", async () => {
     const dataVersion = "current-etag";
-    const fetchedAt = new Date().toISOString();
+    const officialCheckedAt = new Date().toISOString();
     const refreshedAt = new Date(Date.now() + 1_000).toISOString();
     mockNewsApi({
       news: [createNews(1, "保持する一覧")],
       headers: {
         "X-KF3-News-Source": "merged",
-        "X-KF3-News-Fetched-At": fetchedAt,
+        "X-KF3-News-Official-Checked-At": officialCheckedAt,
         "X-KF3-News-Data-Version": dataVersion,
       },
       refreshResponses: [
         jsonResponse(
           {
             changed: false,
-            metadata: { source: "merged", fetchedAt: refreshedAt },
+            metadata: { source: "merged", officialCheckedAt: refreshedAt },
           },
           200,
           {
             "X-KF3-News-Source": "merged",
-            "X-KF3-News-Fetched-At": refreshedAt,
+            "X-KF3-News-Official-Checked-At": refreshedAt,
             "X-KF3-News-Data-Version": dataVersion,
           },
         ),
@@ -363,12 +365,12 @@ describe("KemonoFriends3NewsSearch", () => {
       news: [createNews(1, "前回一覧")],
       headers: {
         "X-KF3-News-Source": "merged",
-        "X-KF3-News-Fetched-At": new Date().toISOString(),
+        "X-KF3-News-Official-Checked-At": new Date().toISOString(),
       },
       refreshResponses: [
         jsonResponse({
           news: [createNews(1, "不正な更新一覧")],
-          metadata: { source: "archive-snapshot", fetchedAt: new Date().toISOString() },
+          metadata: { source: "archive-snapshot", officialCheckedAt: new Date().toISOString() },
         }),
       ],
     });
@@ -400,11 +402,14 @@ describe("KemonoFriends3NewsSearch", () => {
     const refreshedNews = oldNews.map((news) => ({ ...news, title: `${news.title}更新` }));
     mockNewsApi({
       news: oldNews,
-      headers: { "X-KF3-News-Source": "merged", "X-KF3-News-Fetched-At": new Date().toISOString() },
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Official-Checked-At": new Date().toISOString(),
+      },
       refreshResponses: [
         jsonResponse({
           news: refreshedNews,
-          metadata: { source: "merged", fetchedAt: new Date().toISOString() },
+          metadata: { source: "merged", officialCheckedAt: new Date().toISOString() },
         }),
       ],
     });
@@ -430,21 +435,26 @@ describe("KemonoFriends3NewsSearch", () => {
     expect((container.querySelector("#news-keyword") as HTMLInputElement).value).toBe("対象");
   });
 
-  it("refresh成功後のcooldownをレスポンス受信時刻から計算する", async () => {
+  it("refresh成功時は公式確認日時とcooldown期限を別々に扱う", async () => {
     const baseTime = Date.parse("2026-08-27T12:00:00.000Z");
-    const initialFetchedAt = new Date(baseTime).toISOString();
-    const refreshFetchedAt = new Date(baseTime + 5 * 60_000 - 1_000).toISOString();
+    const initialCheckedAt = new Date(baseTime).toISOString();
+    const refreshCheckedAt = new Date(baseTime + 5 * 60_000 - 1_000).toISOString();
+    const refreshAvailableAt = new Date(baseTime + 10 * 60_000).toISOString();
     vi.spyOn(Date, "now").mockReturnValue(baseTime);
     mockNewsApi({
       news: [createNews(1, "更新前")],
       headers: {
         "X-KF3-News-Source": "merged",
-        "X-KF3-News-Fetched-At": initialFetchedAt,
+        "X-KF3-News-Official-Checked-At": initialCheckedAt,
       },
       refreshResponses: [
         jsonResponse({
           news: [createNews(1, "更新後")],
-          metadata: { source: "merged", fetchedAt: refreshFetchedAt },
+          metadata: {
+            source: "merged",
+            officialCheckedAt: refreshCheckedAt,
+            refreshAvailableAt,
+          },
         }),
       ],
     });
@@ -454,7 +464,7 @@ describe("KemonoFriends3NewsSearch", () => {
     await advanceRefreshCooldown();
     getRefreshButton()?.click();
     await waitForText("更新後");
-    expect(container.querySelector(`time[datetime="${refreshFetchedAt}"]`)).not.toBeNull();
+    expect(container.querySelector(`time[datetime="${refreshCheckedAt}"]`)).not.toBeNull();
 
     await advanceRefreshCooldown(5 * 60_000 - 500);
     expect(getRefreshButton()?.disabled).toBe(true);
@@ -485,15 +495,18 @@ describe("KemonoFriends3NewsSearch", () => {
   });
 
   it("refreshの202をRetry-Afterで有限回再試行する", async () => {
-    const fetchedAt = new Date().toISOString();
+    const officialCheckedAt = new Date().toISOString();
     mockNewsApi({
       news: [createNews(1, "再試行前")],
-      headers: { "X-KF3-News-Source": "merged", "X-KF3-News-Fetched-At": fetchedAt },
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Official-Checked-At": officialCheckedAt,
+      },
       refreshResponses: [
         new Response(null, { status: 202, headers: { "Retry-After": "0.05" } }),
         jsonResponse({
           news: [createNews(1, "再試行後")],
-          metadata: { source: "merged", fetchedAt: new Date().toISOString() },
+          metadata: { source: "merged", officialCheckedAt: new Date().toISOString() },
         }),
       ],
     });
@@ -540,17 +553,20 @@ describe("KemonoFriends3NewsSearch", () => {
     resolveRefresh?.(
       jsonResponse({
         news: [createNews(1, "更新後")],
-        metadata: { source: "merged", fetchedAt: new Date().toISOString() },
+        metadata: { source: "merged", officialCheckedAt: new Date().toISOString() },
       }),
     );
     await waitForText("更新後");
   });
 
   it("202の連続応答は上限回数で再試行を終了する", async () => {
-    const fetchedAt = new Date().toISOString();
+    const officialCheckedAt = new Date().toISOString();
     mockNewsApi({
       news: [createNews(1, "再試行上限")],
-      headers: { "X-KF3-News-Source": "merged", "X-KF3-News-Fetched-At": fetchedAt },
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Official-Checked-At": officialCheckedAt,
+      },
       refreshResponses: [
         new Response(null, { status: 202, headers: { "Retry-After": "0.01" } }),
         new Response(null, { status: 202, headers: { "Retry-After": "0.01" } }),
@@ -569,17 +585,17 @@ describe("KemonoFriends3NewsSearch", () => {
   });
 
   it("自動refreshの待機中にunmountするとPOSTしない", async () => {
-    const fetchedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const officialCheckedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       if (String(input).endsWith("/refresh")) {
         return jsonResponse({
           news: [createNews(1, "不要なrefresh")],
-          metadata: { source: "merged", fetchedAt: new Date().toISOString() },
+          metadata: { source: "merged", officialCheckedAt: new Date().toISOString() },
         });
       }
       return jsonResponse([createNews(1, "unmount対象")], 200, {
         "X-KF3-News-Source": "merged",
-        "X-KF3-News-Fetched-At": fetchedAt,
+        "X-KF3-News-Official-Checked-At": officialCheckedAt,
       });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -599,7 +615,7 @@ describe("KemonoFriends3NewsSearch", () => {
       news: [createNews(1, "維持するお知らせ")],
       headers: {
         "X-KF3-News-Source": "merged",
-        "X-KF3-News-Fetched-At": new Date().toISOString(),
+        "X-KF3-News-Official-Checked-At": new Date().toISOString(),
       },
       refreshResponses: [jsonResponse({ error: "failed" }, 503)],
     });
@@ -614,10 +630,13 @@ describe("KemonoFriends3NewsSearch", () => {
   });
 
   it("refreshの429では前回一覧を維持する", async () => {
-    const fetchedAt = new Date().toISOString();
+    const officialCheckedAt = new Date().toISOString();
     mockNewsApi({
       news: [createNews(1, "維持するお知らせ")],
-      headers: { "X-KF3-News-Source": "merged", "X-KF3-News-Fetched-At": fetchedAt },
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Official-Checked-At": officialCheckedAt,
+      },
       refreshResponses: [
         new Response(JSON.stringify({ cooldownSeconds: 30 }), {
           status: 429,

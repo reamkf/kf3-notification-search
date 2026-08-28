@@ -52,10 +52,11 @@ flowchart TD
     ConditionalFetch -->|200| Read[累積archiveを読む]
     FullFetch --> Read
     ConditionalFetch -->|304| MonthlyCheck[当月monthlyをHEADする]
-    MonthlyCheck -->|存在| Log304[304結果を記録]
+    MonthlyCheck -->|存在| StateSave[公式確認時刻をstateへ保存]
     MonthlyCheck -->|欠落| CurrentIfEtag[currentをETag条件付き取得]
     CurrentIfEtag -->|ETag一致| MonthlyCreate[currentのraw bodyをmonthlyへ保存]
     CurrentIfEtag -->|nullまたは不一致| FullFetch
+    MonthlyCreate --> StateSave
     Read --> Validate[構造検証してIDで統合する]
     Validate --> Changed{currentがない、または内容変更あり}
     Changed -->|はい| Daily[更新前データをdailyへ保存]
@@ -67,7 +68,6 @@ flowchart TD
     Changed -->|いいえ| Monthly
     Monthly --> StateSave[公式ETag stateを保存]
     StateSave --> Log[結果を構造化ログへ記録]
-    MonthlyCreate --> Log304
 ```
 
 ## 更新処理（scheduledとqueueの共通処理）
@@ -77,7 +77,7 @@ flowchart TD
 1. 公式ETag stateと`archive/current.json`のR2 ETagを並行して確認する。公式ETagとR2 ETagを比較するのではなく、stateに保存したcurrent ETagと現在のcurrent ETagが一致する場合だけ、stateの公式ETagを`If-None-Match`へ使用する。
 2. 条件付き取得を使えない場合は、`archive/current.json`を読み、存在しない場合だけlegacyデータを読む。archive読み込みと公式取得は並行して行う。
 3. 条件付き取得が200の場合は公式本文を検証した後にcurrentを読み、条件なし取得と同じ統合処理を行う。304の場合は公式本文とcurrent本文の解析、検証、統合、ソート、シリアライズ、daily保存、current更新、KV削除を省略する。
-4. 304では当月monthlyを`head()`する。存在すればR2とKVを変更せず正常終了する。欠落していればcurrentをstateのETagで条件付き取得し、取得objectのETagが一致した場合だけraw bodyをJSON解析せずmonthlyへ保存する。条件不一致なら条件なしの完全処理へ戻る。
+4. 304では当月monthlyを`head()`する。存在すればarchive本体と表示用KVを変更せず、公式確認時刻をstateへ保存して正常終了する。欠落していればcurrentをstateのETagで条件付き取得し、取得objectのETagが一致した場合だけraw bodyをJSON解析せずmonthlyへ保存する。条件不一致なら条件なしの完全処理へ戻る。
 5. 200経路ではarchiveと公式データの基本構造、必須フィールドの型、ID一意性を検証し、IDをキーに統合する。公式データの新規または変更項目だけURLと日時を厳密に検証する。同じIDには公式データを採用し、archiveにだけ存在するIDは残す。
 6. 未知フィールドを含むJSON値のdeep equalityで既存項目と公式項目を比較し、追加件数または変更件数から内容変更の有無を判定する。オブジェクトのキー順だけの違いは変更扱いにしない。
 7. 内容変更がある場合だけ、統合結果を`newsDate`の降順、同時刻の場合は`id`の降順で決定的にソートし、JSONを1回だけシリアライズする。オブジェクトのキーは再帰的に並べ替えず、SHA-256 digestも計算しない。
@@ -85,7 +85,7 @@ flowchart TD
 9. 読み込み時のETagを条件に`archive/current.json`を更新する。初回作成時は、currentが存在しないことを条件にする。
 10. current更新成功後はGET専用snapshot KVを削除する。`invalidateDisplayCache`が有効なscheduledまたはmanual更新ではKVの`kf3-news`も削除し、Queue consumerはrefresh由来のmerged KVを維持する。
 11. 当月の月次backupを条件付きで新規作成する。すでに存在する場合は内容を再取得しない。条件不一致の場合は既存として扱い、本文を取得しない。
-12. 200経路ではmonthly完了後に、公式strong ETagと確定済みcurrentのR2 raw ETagをstateへCAS保存する。state保存の失敗・競合でarchiveを巻き戻さず、結果の`etagStateStatus`へ反映して処理結果を構造化ログへ記録する。
+12. 200経路ではmonthly完了後に、公式strong ETag、確定済みcurrentのR2 raw ETag、公式確認時刻をstateへCAS保存する。304経路でもmonthly確認後に公式確認時刻をstateへCAS保存する。state保存の失敗・競合でarchiveを巻き戻さず、結果の`etagStateStatus`へ反映して処理結果を構造化ログへ記録する。
 
 currentがまだなく、legacyデータから移行する初回実行では、統合結果がlegacyと同じでも更新ありとして扱う。これにより、更新前legacyの日次backupと`archive/current.json`を作成する。
 
@@ -240,7 +240,7 @@ Healthchecks.ioはCron失敗やCron欠落の通知に使用し、Workers Logsは
 4. 表示KV invalidationが有効な場合のKV削除
 5. 当月monthlyの作成または存在確認
 
-統合結果に変更がない場合も、公式レスポンスのETagと読み込み済みcurrentのETagをstateへ保存する。公式のキー順や未知フィールド表現だけが変わり、統合結果が同一だった場合も、次回から新しいETagで条件付き取得できるようにする。
+統合結果に変更がない場合も、公式レスポンスのETag、読み込み済みcurrentのETag、公式確認時刻をstateへ保存する。公式のキー順や未知フィールド表現だけが変わり、統合結果が同一だった場合も、次回から新しいETagで条件付き取得できるようにする。304の場合も、公式レスポンスが正常に確認できた時刻でstateの`checkedAt`を更新する。
 
 state PUTには、読み込み時のstate object ETagを使用する。stateが未作成の場合は存在しないことを条件にする。競合または保存失敗はarchiveの正しさへ影響しないため、archiveを巻き戻さず、成功ログの`etagStateStatus`へ反映して次回の完全処理へ委ねる。refreshは条件付き取得の判定にstateを読み取れるが、refresh成功後に公式ETag stateを更新してはならない。Queue consumerとscheduled fallbackは、同じETag/CAS/304の境界を共有するため、重複messageや近接実行でも無条件上書きを行わない。
 

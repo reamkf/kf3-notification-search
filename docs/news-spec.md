@@ -26,7 +26,7 @@
 
 ### 表示データと永続アーカイブの違い
 
-表示用KV `kf3-news`は、refreshが正常完了した表示用配列のsnapshotを保持する。`GET /api/kf3-news`はこのsnapshotを最優先で読み、値がない場合はGET専用KV `kf3-news-archive-snapshot`を読む。両方にない場合だけ`archive/current.json`またはlegacy objectを読み込んでクライアント用配列へ投影し、GET専用KVへTTL 300秒でbest-effort保存する。GETは公式サーバーからの取得やアーカイブとのmergeを行わない。
+表示用KV `kf3-news`は、refreshが正常完了した表示用配列のsnapshotを保持する。`GET /api/kf3-news`はこのsnapshotを最優先で読み、値がない場合はGET専用KV `kf3-news-archive-snapshot`を読む。両方にない場合だけ`archive/current.json`またはlegacy objectを読み込んでクライアント用配列へ投影し、GET専用KVへTTL 300秒でbest-effort保存する。このR2 snapshot経路では、currentのETagと公式ETag stateを突合し、一致する場合だけstateの`checkedAt`をレスポンスmetadataへ投影する。GETは公式サーバーからの取得やアーカイブとのmergeを行わない。
 
 `POST /api/kf3-news/refresh`は表示用データを最新化する公開操作である。R2のCAS leaseと5分cooldownで同時実行と連続実行を制限し、leaseを取得した要求だけが公式データの取得、検証、mergeを行う。KV finalization前にleaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長し、成功した結果を表示用KVへ保存する。`X-KF3-News-Data-Version`が今回の表示データと一致する場合は`{changed:false, metadata}`を返して表示用配列を省略し、それ以外は`{news, metadata}`形式で返す。
 
@@ -37,7 +37,7 @@ refreshは表示用KVとrefresh制御metadataだけを変更する。merge差分
 | データ                                      | GET `/api/kf3-news`                           | POST `/api/kf3-news/refresh`            | Queue consumer                    | scheduled fallback                | restore                 |
 | ------------------------------------------- | --------------------------------------------- | --------------------------------------- | --------------------------------- | --------------------------------- | ----------------------- |
 | `archive/current.json`                      | 読み込み、snapshot投影                        | 読み込み、mergeの入力                   | 検証してETag条件付き更新          | 検証してETag条件付き更新          | applyで条件付き置換     |
-| `archive/official-fetch-state.json`         | 触れない                                      | 変更しない                              | 条件付き取得の結果を保存          | 条件付き取得の結果を保存          | 変更しない              |
+| `archive/official-fetch-state.json`         | 読み込み、currentと一致時に`checkedAt`を投影  | 変更しない                              | 条件付き取得の結果を保存          | 条件付き取得の結果を保存          | 変更しない              |
 | `daily/...`                                 | 触れない                                      | 触れない                                | current更新直前の元バイト列を保存 | current更新直前の元バイト列を保存 | 読み込みのみ            |
 | `monthly/...`                               | 触れない                                      | 触れない                                | 月最初の正常状態を保存            | 月最初の正常状態を保存            | 読み込みのみ            |
 | `KF3_NOTIF_CACHE/kf3-news`                  | merged snapshotを最優先で読む                 | 成功結果を保存                          | refresh由来のsnapshotを維持       | current更新成功後に削除           | current更新成功後に削除 |

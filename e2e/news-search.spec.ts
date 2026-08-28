@@ -32,7 +32,7 @@ const mockNewsApi = async (
   page: Page,
   options: {
     source?: string;
-    fetchedAt?: string;
+    officialCheckedAt?: string;
     refreshBody?: unknown;
     refreshStatus?: number;
     refreshHeaders?: Record<string, string>;
@@ -46,7 +46,7 @@ const mockNewsApi = async (
       contentType: "application/json",
       headers: {
         "X-KF3-News-Source": options.source ?? "merged",
-        "X-KF3-News-Fetched-At": options.fetchedAt ?? new Date().toISOString(),
+        "X-KF3-News-Official-Checked-At": options.officialCheckedAt ?? new Date().toISOString(),
       },
       body: JSON.stringify(news),
     });
@@ -63,7 +63,7 @@ const mockNewsApi = async (
       body: JSON.stringify(
         options.refreshBody ?? {
           news: refreshNews,
-          metadata: { source: "merged", fetchedAt: new Date().toISOString() },
+          metadata: { source: "merged", officialCheckedAt: new Date().toISOString() },
         },
       ),
     });
@@ -105,7 +105,7 @@ test("公式分類ラベルを値があるお知らせにだけ表示する", as
   await expect(items.filter({ hasNot: categories })).toHaveCount(2);
 });
 
-test("データ取得日時を相対表示し、取得直後は再取得ボタンを無効化する", async ({ page }) => {
+test("公式確認日時を相対表示し、GET後は再取得できる", async ({ page }) => {
   await page.clock.install();
   await openNewsSearch(page, { refreshDelayMs: 200 });
 
@@ -114,18 +114,12 @@ test("データ取得日時を相対表示し、取得直後は再取得ボタ�
   await expect(metadata.getByText(/最終取得:/)).toBeVisible();
   await expect(reloadButton).toHaveAttribute("aria-label", "お知らせを再取得");
   await expect(metadata).toHaveAttribute("aria-busy", "false");
-  await expect(metadata).toHaveAttribute("data-refresh-status", "cooldown");
-  await expect(reloadButton).toBeDisabled();
-  await expect(reloadButton).toHaveClass(/text-gray-400/);
-  await expect(reloadButton).not.toHaveClass(/bg-|border-/);
-  await expect(metadata.locator("svg")).toHaveClass(/text-green-600/);
-  await expect(reloadButton.locator("time")).toHaveCount(0);
-
-  await page.clock.fastForward("05:00");
   await expect(metadata).toHaveAttribute("data-refresh-status", "idle");
   await expect(reloadButton).toBeEnabled();
   await expect(reloadButton).toHaveClass(/text-gray-700/);
   await expect(reloadButton).not.toHaveClass(/bg-|border-/);
+  await expect(metadata.locator("svg")).toHaveClass(/text-green-600/);
+  await expect(reloadButton.locator("time")).toHaveCount(0);
 
   const refreshRequest = page.waitForRequest("**/api/kf3-news/refresh");
   await reloadButton.click();
@@ -143,7 +137,7 @@ test("データ取得日時を相対表示し、取得直後は再取得ボタ�
 
 test("古いGETデータを表示後に自動再取得する", async ({ page }) => {
   await openNewsSearch(page, {
-    fetchedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    officialCheckedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
     refreshDelayMs: 200,
   });
   await expect(page.getByText("測定イベント開催のお知らせ")).toBeVisible();
@@ -163,7 +157,7 @@ test("閉じた検索パネルのcontrolsはfocus対象から外れる", async (
 test("archive-fallback表示後に自動再取得する", async ({ page }) => {
   await openNewsSearch(page, {
     source: "archive-fallback",
-    fetchedAt: new Date().toISOString(),
+    officialCheckedAt: new Date().toISOString(),
     refreshDelayMs: 200,
   });
 
@@ -176,7 +170,7 @@ test("archive-fallback表示後に自動再取得する", async ({ page }) => {
 test("archive-snapshot表示後に自動再取得する", async ({ page }) => {
   await openNewsSearch(page, {
     source: "archive-snapshot",
-    fetchedAt: new Date().toISOString(),
+    officialCheckedAt: new Date().toISOString(),
   });
 
   await expect(page.getByText("測定イベント更新のお知らせ")).toBeVisible();
@@ -230,10 +224,10 @@ test("APIエラー時にエラーを表示し、お知らせ一覧を表示し�
   await expect(page.locator("ul > li")).toHaveCount(0);
 });
 
-test("refreshの429では前回一覧を維持し、再取得ボタンを無効化する", async ({ page }) => {
+test("refreshの429では前回一覧を維持し、再取得後にcooldownを表示する", async ({ page }) => {
   await page.clock.install();
   await openNewsSearch(page, {
-    fetchedAt: new Date().toISOString(),
+    officialCheckedAt: new Date().toISOString(),
     refreshStatus: 429,
     refreshBody: { cooldownSeconds: 30 },
     refreshHeaders: { "Retry-After": "30" },
@@ -241,8 +235,6 @@ test("refreshの429では前回一覧を維持し、再取得ボタンを無効�
 
   const metadata = page.getByTestId("news-metadata");
   const reloadButton = page.getByTestId("news-refresh-button");
-  await expect(reloadButton).toBeDisabled();
-  await page.clock.fastForward("05:00");
   await expect(reloadButton).toBeEnabled();
   await reloadButton.click();
   await expect(metadata).toHaveAttribute("data-refresh-status", "cooldown");
@@ -271,7 +263,7 @@ test("20件を超えるお知らせをスクロールに応じて追加表示す
       contentType: "application/json",
       body: JSON.stringify({
         news: manyNews,
-        metadata: { source: "merged", fetchedAt: new Date().toISOString() },
+        metadata: { source: "merged", officialCheckedAt: new Date().toISOString() },
       }),
     }),
   );
