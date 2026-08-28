@@ -10,6 +10,7 @@ import type {
 import {
   CURRENT_ARCHIVE_KEY,
   LEGACY_ARCHIVE_KEY,
+  OFFICIAL_CHECK_STATE_KEY,
   OFFICIAL_FETCH_STATE_KEY,
   MAX_OFFICIAL_RESPONSE_BYTES,
   OFFICIAL_FETCH_TIMEOUT_MS,
@@ -20,6 +21,7 @@ import {
   readArchive,
   readArchiveDocument,
   updateNewsArchive,
+  updateOfficialCheckState,
 } from "../news-archive";
 import { parseJapaneseNewsDate, MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 
@@ -101,6 +103,7 @@ const createMutableBucket = (
     putErrorsAfterConcurrentPutObjects?: Map<string, unknown>;
     nullPutKeys?: Set<string>;
     putCalls?: PutCall[];
+    checkStatePutCalls?: PutCall[];
     headCalls?: string[];
   } = {},
 ) => {
@@ -116,7 +119,9 @@ const createMutableBucket = (
     }) as unknown as R2ObjectBody;
   const bucket = {
     get: async (key: string, getOptions?: { onlyIf?: Record<string, string> }) => {
-      if (key !== OFFICIAL_FETCH_STATE_KEY) timeline.push(`${label}:get:${key}`);
+      if (key !== OFFICIAL_FETCH_STATE_KEY && key !== OFFICIAL_CHECK_STATE_KEY) {
+        timeline.push(`${label}:get:${key}`);
+      }
       const object = objects.get(key);
       if (!object) return null;
       const onlyIf = getOptions?.onlyIf;
@@ -131,13 +136,18 @@ const createMutableBucket = (
       return object ? ({ etag: object.etag } as unknown as R2Object) : null;
     },
     put: async (key: string, value: unknown, putOptions?: PutOptions) => {
-      timeline.push(`${label}:put:${key}`);
-      options.putCalls?.push({ key, value, options: putOptions });
+      if (key !== OFFICIAL_CHECK_STATE_KEY) timeline.push(`${label}:put:${key}`);
+      const putCall = { key, value, options: putOptions };
+      if (key === OFFICIAL_CHECK_STATE_KEY) options.checkStatePutCalls?.push(putCall);
+      else options.putCalls?.push(putCall);
       if (options.putErrors?.has(key)) throw options.putErrors.get(key);
       if (options.failPutKeys?.has(key)) throw new Error(`put failed: ${key}`);
       if (options.nullPutKeys?.has(key)) return null;
       const concurrentObject = options.concurrentPutObjects?.get(key);
-      if (concurrentObject) objects.set(key, concurrentObject);
+      if (concurrentObject) {
+        objects.set(key, concurrentObject);
+        options.concurrentPutObjects?.delete(key);
+      }
       if (options.putErrorsAfterConcurrentPutObjects?.has(key)) {
         throw options.putErrorsAfterConcurrentPutObjects.get(key);
       }
@@ -571,6 +581,98 @@ describe("バックアップキー", () => {
   });
 });
 
+describe("公式確認時刻state", () => {
+  it("既存より古い確認時刻でstateを巻き戻さない", async () => {
+    const previousCheckedAt = "2026-08-09T12:00:00.000Z";
+    const newerCheckedAt = "2026-08-09T12:34:56.789Z";
+    const checkStatePutCalls: PutCall[] = [];
+    const bucket = createMutableBucket(
+      "data",
+      {
+        [OFFICIAL_CHECK_STATE_KEY]: asStoredObject(
+          { version: 1, checkedAt: previousCheckedAt },
+          "check-state-etag",
+        ),
+      },
+      [],
+      { checkStatePutCalls },
+    );
+
+    expect(await updateOfficialCheckState(bucket, previousCheckedAt)).toBe("unchanged");
+    expect(await updateOfficialCheckState(bucket, newerCheckedAt)).toBe("saved");
+    expect(checkStatePutCalls).toHaveLength(1);
+    expect(JSON.parse(String(checkStatePutCalls[0].value))).toEqual({
+      version: 1,
+      checkedAt: newerCheckedAt,
+    });
+  });
+
+  it("CAS競合で新しい時刻を確認した場合は巻き戻さない", async () => {
+    const initialCheckedAt = "2026-08-09T12:00:00.000Z";
+    const concurrentCheckedAt = "2026-08-09T12:02:00.000Z";
+    const checkedAt = "2026-08-09T12:01:00.000Z";
+    const checkStatePutCalls: PutCall[] = [];
+    const bucket = createMutableBucket(
+      "data",
+      {
+        [OFFICIAL_CHECK_STATE_KEY]: asStoredObject(
+          { version: 1, checkedAt: initialCheckedAt },
+          "check-state-etag",
+        ),
+      },
+      [],
+      {
+        checkStatePutCalls,
+        concurrentPutObjects: new Map([
+          [
+            OFFICIAL_CHECK_STATE_KEY,
+            asStoredObject({ version: 1, checkedAt: concurrentCheckedAt }, "concurrent-etag"),
+          ],
+        ]),
+      },
+    );
+
+    expect(await updateOfficialCheckState(bucket, checkedAt)).toBe("unchanged");
+    expect(checkStatePutCalls).toHaveLength(1);
+    const state = await bucket.get(OFFICIAL_CHECK_STATE_KEY);
+    expect(JSON.parse((await state?.text()) ?? "null")).toEqual({
+      version: 1,
+      checkedAt: concurrentCheckedAt,
+    });
+  });
+
+  it("CAS競合後は再読込して最新確認時刻を保存する", async () => {
+    const initialCheckedAt = "2026-08-09T12:00:00.000Z";
+    const concurrentCheckedAt = "2026-08-09T12:00:30.000Z";
+    const checkedAt = "2026-08-09T12:01:00.000Z";
+    const checkStatePutCalls: PutCall[] = [];
+    const bucket = createMutableBucket(
+      "data",
+      {
+        [OFFICIAL_CHECK_STATE_KEY]: asStoredObject(
+          { version: 1, checkedAt: initialCheckedAt },
+          "check-state-etag",
+        ),
+      },
+      [],
+      {
+        checkStatePutCalls,
+        concurrentPutObjects: new Map([
+          [
+            OFFICIAL_CHECK_STATE_KEY,
+            asStoredObject({ version: 1, checkedAt: concurrentCheckedAt }, "concurrent-etag"),
+          ],
+        ]),
+      },
+    );
+
+    expect(await updateOfficialCheckState(bucket, checkedAt)).toBe("saved");
+    expect(checkStatePutCalls).toHaveLength(2);
+    const state = await bucket.get(OFFICIAL_CHECK_STATE_KEY);
+    expect(JSON.parse((await state?.text()) ?? "null")).toEqual({ version: 1, checkedAt });
+  });
+});
+
 describe("アーカイブ更新トランザクション", () => {
   const createDependencies = (
     current: FakeStoredObject | null,
@@ -591,6 +693,7 @@ describe("アーカイブ更新トランザクション", () => {
       putErrors?: Map<string, unknown>;
       nullPutKeys?: Set<string>;
       putCalls?: PutCall[];
+      checkStatePutCalls?: PutCall[];
       initial?: Record<string, FakeStoredObject>;
     } = {},
   ) => {
@@ -748,6 +851,7 @@ describe("アーカイブ更新トランザクション", () => {
     const checkedAt = "2026-08-09T12:34:56.789Z";
     const monthlyKey = buildBackupKeys(transactionNowMs).monthlyKey;
     const dataPuts: PutCall[] = [];
+    const checkStatePuts: PutCall[] = [];
     const setup = createDependencies(
       asStoredObject(createSortedDocument(MIN_OFFICIAL_ENTRY_COUNT), "current-etag"),
       createDocument(MIN_OFFICIAL_ENTRY_COUNT),
@@ -755,6 +859,7 @@ describe("アーカイブ更新トランザクション", () => {
       false,
       {
         putCalls: dataPuts,
+        checkStatePutCalls: checkStatePuts,
         initial: {
           [OFFICIAL_FETCH_STATE_KEY]: asStoredObject(
             {
@@ -775,12 +880,18 @@ describe("アーカイブ更新トランザクション", () => {
     });
 
     expect(result.officialCheckedAt).toBe(checkedAt);
+    expect(result.officialCheckStateStatus).toBe("saved");
     expect(result.etagStateStatus).toBe("saved");
     expect(dataPuts).toHaveLength(1);
     expect(JSON.parse(String(dataPuts[0].value))).toEqual({
       version: 2,
       officialEtag: '"official-etag"',
       currentEtag: "current-etag",
+      checkedAt,
+    });
+    expect(checkStatePuts).toHaveLength(1);
+    expect(JSON.parse(String(checkStatePuts[0].value))).toEqual({
+      version: 1,
       checkedAt,
     });
   });
@@ -872,14 +983,15 @@ describe("アーカイブ更新トランザクション", () => {
     expect(requestHeaders[0].get("If-None-Match")).toBeNull();
   });
 
-  it("200経路ではmonthly完了後に公式ETag stateを保存する", async () => {
+  it("200経路ではmonthly完了後に公式ETagと確認時刻stateを保存する", async () => {
     const dataPuts: PutCall[] = [];
+    const checkStatePuts: PutCall[] = [];
     const setup = createDependencies(
       asStoredObject(createDocument(1), "current-etag"),
       createDocument(MIN_OFFICIAL_ENTRY_COUNT),
       {},
       false,
-      { putCalls: dataPuts },
+      { putCalls: dataPuts, checkStatePutCalls: checkStatePuts },
     );
     const result = await updateNewsArchive({
       ...setup.dependencies,
@@ -892,6 +1004,12 @@ describe("アーカイブ更新トランザクション", () => {
         ),
     });
     expect(result.etagStateStatus).toBe("saved");
+    expect(result.officialCheckStateStatus).toBe("saved");
+    expect(checkStatePuts).toHaveLength(1);
+    expect(JSON.parse(String(checkStatePuts[0].value))).toMatchObject({
+      version: 1,
+      checkedAt: expect.any(String),
+    });
     expect(dataPuts.map((call) => call.key)).toEqual([
       CURRENT_ARCHIVE_KEY,
       OFFICIAL_FETCH_STATE_KEY,

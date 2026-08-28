@@ -2,9 +2,9 @@
 
 ## この文書の責務
 
-本書は、`updateNewsArchive`を実行するQueue consumerとscheduled handlerの共通仕様を定義する。Queue consumerはrefreshが検出したmerge差分またはcurrent未作成を契機に別invocationで実行し、scheduled handlerはQueueが届かない場合にも更新を実行できる03:15 JSTのfallbackである。どちらも公式データを検証して累積archiveの正しさを確定し、必要なbackupと公式ETag stateを保存する。
+本書は、`updateNewsArchive`を実行するQueue consumerとscheduled handlerの共通仕様を定義する。Queue consumerはrefreshが検出したmerge差分またはcurrent未作成を契機に別invocationで実行し、scheduled handlerはQueueが届かない場合にも更新を実行できる03:15 JSTのfallbackである。どちらも公式データを検証して累積archiveの正しさを確定し、必要なbackup、公式ETag state、公式確認時刻stateを保存する。
 
-`GET /`はStatic AssetsからSSG済みshellを返し、`GET /api/kf3-news`はmerged結果用KV、GET専用snapshot KV、またはR2 snapshotを返す。GETのR2投影結果はGET専用KVへbest-effortで書き戻す。`POST /api/kf3-news/refresh`は表示用KVを更新し、merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知するが、archive、backup、公式ETag stateを変更しない。refresh、Queue consumer、scheduled handlerは別invocationとして扱う。refresh本体はリクエスト内で完了させ、Queue送信だけは`waitUntil`へ登録してレスポンス経路から分離する。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [お知らせ機能共通仕様](./news-spec.md)、表示APIは [お知らせページリクエスト仕様](./news-page-request-spec.md) を参照する。
+`GET /`はStatic AssetsからSSG済みshellを返し、`GET /api/kf3-news`はmerged結果用KV、GET専用snapshot KV、またはR2 snapshotを返す。GETのR2投影結果はGET専用KVへbest-effortで書き戻す。`POST /api/kf3-news/refresh`は表示用KVと公式確認時刻stateを更新し、merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知するが、archive、backup、公式ETag stateを変更しない。refresh、Queue consumer、scheduled handlerは別invocationとして扱う。refresh本体はリクエスト内で完了させ、Queue送信だけは`waitUntil`へ登録してレスポンス経路から分離する。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [お知らせ機能共通仕様](./news-spec.md)、表示APIは [お知らせページリクエスト仕様](./news-page-request-spec.md) を参照する。
 
 ## 実行時刻と更新対象
 
@@ -14,11 +14,12 @@ Queue consumerまたはscheduled handlerが更新または削除できる対象�
 
 - `KF3_NOTIF_DATA/archive/current.json`
 - `KF3_NOTIF_DATA/archive/official-fetch-state.json`
+- `KF3_NOTIF_DATA/archive/official-check-state.json`
 - `KF3_NOTIF_BACKUP/daily/...`
 - `KF3_NOTIF_BACKUP/monthly/...`
 - current更新成功後のGET専用snapshot KV `kf3-news-archive-snapshot`の削除。scheduledまたはmanual更新ではWorkers KV `kf3-news`も削除し、Queue consumerは表示KVを維持する
 
-refreshはこれらを書き込まず、表示用KVとrefresh制御metadataを更新する。merge差分がある場合またはcurrentが未作成の場合はQueueへ更新messageを送るが、Queue送信はbest-effortであり、`waitUntil`へ登録してレスポンス経路から分離する。送信失敗でもrefreshの200応答と表示用KVの保存を維持する。公式データの取得または検証が失敗した場合、Queue consumerまたはscheduled handlerはarchive、backup、公式ETag state、KVを変更せず失敗する。
+refreshは公式確認時刻stateを更新し、表示用KVとrefresh制御metadataも更新する。merge差分がある場合またはcurrentが未作成の場合はQueueへ更新messageを送るが、Queue送信はbest-effortであり、`waitUntil`へ登録してレスポンス経路から分離する。送信失敗でもrefreshの200応答と表示用KVの保存を維持する。公式データの取得または検証が失敗した場合、Queue consumerまたはscheduled handlerはarchive、backup、公式ETag state、KVを変更せず失敗する。
 
 ## refreshからQueueへの委譲
 
@@ -85,7 +86,7 @@ flowchart TD
 9. 読み込み時のETagを条件に`archive/current.json`を更新する。初回作成時は、currentが存在しないことを条件にする。
 10. current更新成功後はGET専用snapshot KVを削除する。`invalidateDisplayCache`が有効なscheduledまたはmanual更新ではKVの`kf3-news`も削除し、Queue consumerはrefresh由来のmerged KVを維持する。
 11. 当月の月次backupを条件付きで新規作成する。すでに存在する場合は内容を再取得しない。条件不一致の場合は既存として扱い、本文を取得しない。
-12. 200経路ではmonthly完了後に、公式strong ETag、確定済みcurrentのR2 raw ETag、公式確認時刻をstateへCAS保存する。304経路でもmonthly確認後に公式確認時刻をstateへCAS保存する。state保存の失敗・競合でarchiveを巻き戻さず、結果の`etagStateStatus`へ反映して処理結果を構造化ログへ記録する。
+12. 200経路ではmonthly完了後に、公式strong ETag、確定済みcurrentのR2 raw ETag、公式確認時刻をETag stateへCAS保存する。304経路でもmonthly確認後に公式確認時刻をETag stateへCAS保存する。200/304の両経路で公式確認時刻を独立したofficial-check-stateへCAS保存する。state保存の失敗・競合でarchiveを巻き戻さず、結果のstatusへ反映して処理結果を構造化ログへ記録する。
 
 currentがまだなく、legacyデータから移行する初回実行では、統合結果がlegacyと同じでも更新ありとして扱う。これにより、更新前legacyの日次backupと`archive/current.json`を作成する。
 
@@ -102,7 +103,7 @@ currentがまだなく、legacyデータから移行する初回実行では、�
 - 統合結果のソートとJSONシリアライズ
 - 日次backup、current更新、KV削除
 
-月次backupの補完のため、当月の`monthly/YYYY-MM.json`を`head()`する。存在する場合はR2とKVを変更せず正常終了する。存在しない場合は次の順で作成する。
+月次backupの補完のため、当月の`monthly/YYYY-MM.json`を`head()`する。存在する場合も、archive本体と表示用KVを変更せず、公式確認時刻stateを更新して正常終了する。存在しない場合は次の順で作成する。
 
 1. stateの`currentEtag`を条件に`archive/current.json`を取得する。
 2. 条件不一致の場合は月次backupを作成せず、公式データを条件なしで再取得して完全処理へ切り替える。

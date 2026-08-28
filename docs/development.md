@@ -78,7 +78,7 @@ bunx wrangler r2 object put kf3-notif-data/entries_merged_20241107.json --file="
 
 通常の累積archiveは`KF3_NOTIF_DATA/archive/current.json`である。これがない初回だけ`entries_merged_20241107.json`を読み込み、Queue consumerまたは03:15 JSTのscheduled fallbackの初回更新で`archive/current.json`を作成する。backupは`KF3_NOTIF_BACKUP/daily/YYYY/MM/DD/`と`KF3_NOTIF_BACKUP/monthly/YYYY-MM.json`へ保存する。
 
-refresh制御metadataは表示用KVやarchiveとは別にR2へ保存し、R2 CAS leaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。KV finalization前にはleaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長する。refreshはcurrent、daily、monthly、公式ETag stateを変更せず、merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知する。Queue送信に失敗してもrefreshは200を返す。
+refresh制御metadataは表示用KVやarchiveとは別にR2へ保存し、R2 CAS leaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。KV finalization前にはleaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長する。refreshはcurrent、daily、monthly、公式ETag stateを変更せず、公式確認時刻stateを更新する。merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知する。Queue送信に失敗してもrefreshは200を返す。
 
 ## ローカルで実行
 
@@ -123,8 +123,8 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
 - refreshの公式304かつKV v2/current ETag一致時にR2 current本文を読まずKV JSONを再利用し、data version一致時はレスポンスのnews配列を省略する
 - KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す
-- refresh invocation自身は表示用KVとrefresh制御metadataだけを更新し、archiveを書き込まず、merge差分またはcurrent初期化をQueueへbest-effortで通知する
-- Queue consumer完了後にcurrent、daily、monthly、公式ETag stateが更新され、refresh由来の表示KVが維持される
+- refresh invocation自身は表示用KV、公式確認時刻state、refresh制御metadataを更新し、archiveを書き込まず、merge差分またはcurrent初期化をQueueへbest-effortで通知する
+- Queue consumer完了後にcurrent、daily、monthly、公式ETag state、公式確認時刻stateが更新され、refresh由来の表示KVが維持される
 - Queue送信失敗でもrefreshが200を返し、`news_archive_update_enqueue_failed`を記録する
 - refresh本体、scheduled、Queue invocationの処理はリクエスト内で完了し、refreshのQueue送信だけを`waitUntil`へ登録している
 - Workers LogsとTracingが有効で、refreshの公式fetch、KV、R2のI/O spanをWorkers Observabilityで確認できる
@@ -195,9 +195,9 @@ curl -i -X POST "https://<worker-host>/api/kf3-news/refresh"
 
 `GET /`がshellだけを返し、GETがKV snapshotまたはR2 snapshotを返し、refreshが実行中202、成功200、cooldown429、依存障害503の契約に従うことを確認する。archive更新経路は次の順で確認する。
 
-1. refreshの構造化ログと契約テストで、refresh invocation自身がcurrent、daily、monthly、公式ETag stateを書き込まないことを確認する。
+1. refreshの構造化ログと契約テストで、refresh invocation自身がcurrent、daily、monthly、公式ETag stateを書き込まず、公式確認時刻stateを更新することを確認する。
 2. merge差分がある場合またはcurrentが未作成の場合に`news_archive_update_queued`が記録され、Queue送信失敗でもrefreshが200を返すことを確認する。
-3. `news_archive_queue_succeeded`の後にcurrent、daily、monthly、公式ETag stateが更新され、refresh由来の表示KVが維持されることを確認する。
+3. `news_archive_queue_succeeded`の後にcurrent、daily、monthly、公式ETag state、公式確認時刻stateが更新され、refresh由来の表示KVが維持されることを確認する。
 
 refresh response直後のR2状態だけでrefresh自身の書き込み有無を判定しない。確認前にQueue consumerがarchiveを更新する可能性がある。お知らせの仕様は [お知らせ機能共通仕様](./news-spec.md)、ページ取得は [お知らせページリクエスト仕様](./news-page-request-spec.md)、archive更新は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md) を参照する。
 

@@ -11,6 +11,7 @@ import type {
 import {
   CURRENT_ARCHIVE_KEY,
   LEGACY_ARCHIVE_KEY,
+  OFFICIAL_CHECK_STATE_KEY,
   OFFICIAL_FETCH_STATE_KEY,
   type NewsArchiveUpdateDependencies,
 } from "../news-archive";
@@ -79,6 +80,8 @@ type BindingOptions = {
   legacyMissing?: boolean;
   stateText?: string;
   stateEtag?: string;
+  checkStateText?: string;
+  checkStateEtag?: string;
   conditionalCurrentMismatch?: boolean;
   conditionalCurrentReadMismatch?: boolean;
   currentChangesOnCachePut?: boolean;
@@ -95,6 +98,8 @@ const createBindings = (
   let currentEtag = "current-etag";
   let controlText: string | null = null;
   let controlEtag = "control-etag-0";
+  let checkStateText = options.checkStateText ?? null;
+  let checkStateEtag = options.checkStateEtag ?? "check-state-etag-0";
   const cacheValues = new Map<string, string>();
   const cacheMetadata = new Map<string, unknown>();
   const cachePuts: Array<{
@@ -124,6 +129,8 @@ const createBindings = (
         return createR2Object(legacyText, "legacy-etag");
       if (key === OFFICIAL_FETCH_STATE_KEY && options.stateText !== undefined)
         return createR2Object(options.stateText, options.stateEtag ?? "state-etag");
+      if (key === OFFICIAL_CHECK_STATE_KEY && checkStateText !== null)
+        return createR2Object(checkStateText, checkStateEtag);
       return null;
     },
     head: async (key: string) => {
@@ -136,6 +143,11 @@ const createBindings = (
       return null;
     },
     put: async (key: string, value: string) => {
+      if (key === OFFICIAL_CHECK_STATE_KEY) {
+        checkStateText = value;
+        checkStateEtag = `check-state-etag-${checkStateText.length}`;
+        return { etag: checkStateEtag } as R2Object;
+      }
       if (key !== "control/news-refresh.json") return null;
       controlText = value;
       controlEtag = `control-etag-${controlText.length}`;
@@ -340,12 +352,7 @@ describe("Worker API handler", () => {
   it("cache missでは保存済み公式確認時刻でarchive snapshotをwrite-throughする", async () => {
     const officialCheckedAt = "2026-08-09T12:34:56.789Z";
     const setup = createBindings(JSON.stringify(createDocument(2)), undefined, {
-      stateText: JSON.stringify({
-        version: 2,
-        officialEtag: '"official-etag"',
-        currentEtag: "current-etag",
-        checkedAt: officialCheckedAt,
-      }),
+      checkStateText: JSON.stringify({ version: 1, checkedAt: officialCheckedAt }),
     });
     const handler = createWorkerHandler({
       fetcher: async () => {
@@ -747,6 +754,35 @@ describe("Worker API handler", () => {
     expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe(officialCheckedAt);
     expect(response.headers.get("X-KF3-News-Refresh-Available-At")).toBe(refreshAvailableAt);
     expect(setup.cachePuts[0].metadata).toMatchObject({ officialCheckedAt });
+  });
+
+  it("refresh成功後に表示KVが期限切れしても公式確認日時を維持する", async () => {
+    const officialCheckedAt = "2026-08-09T12:00:00.000Z";
+    const setup = createBindings(JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT)));
+    const handler = createWorkerHandler({
+      fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+      clock: () => Date.parse(officialCheckedAt),
+    });
+    const refreshResponse = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+    expect(refreshResponse.status).toBe(200);
+
+    setup.cacheValues.delete("kf3-news");
+    setup.cacheMetadata.delete("kf3-news");
+    setup.cacheValues.delete("kf3-news-archive-snapshot");
+    setup.cacheMetadata.delete("kf3-news-archive-snapshot");
+    const getResponse = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+
+    expect(getResponse.status).toBe(200);
+    expect(getResponse.headers.get("X-KF3-News-Official-Checked-At")).toBe(officialCheckedAt);
+    expect(setup.queueMessages).toHaveLength(0);
   });
 
   it("refreshで既存お知らせの変更だけを検出した場合はQueueへ通知する", async () => {

@@ -8,9 +8,11 @@ import {
   fetchOfficialNews,
   readArchiveDocument,
   readCurrentArchiveDocumentIfEtag,
+  readOfficialCheckState,
   readOfficialFetchEligibility,
   serializeArchiveErrorForLog,
   updateNewsArchive,
+  updateOfficialCheckState,
   type ArchiveLogger,
   type NewsArchiveUpdateDependencies,
   type NewsFetcher,
@@ -407,16 +409,13 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           cachedArchiveSnapshot.metadata ?? undefined,
         );
 
-      const [snapshot, eligibility] = await Promise.all([
+      const [snapshot, checkState] = await Promise.all([
         readArchiveSnapshot(context.env),
-        readOfficialFetchEligibility(context.env.KF3_NOTIF_DATA),
+        readOfficialCheckState(context.env.KF3_NOTIF_DATA),
       ]);
       archiveCount = snapshot.clientNews.length;
       const responseJson = JSON.stringify(snapshot.clientNews);
-      const officialCheckedAt =
-        (snapshot.archive.etag ?? null) === (eligibility.currentEtag ?? null)
-          ? eligibility.officialCheckedAt
-          : null;
+      const officialCheckedAt = checkState.state?.checkedAt ?? null;
       const metadata = createNewsCacheMetadata(
         "archive-snapshot",
         officialCheckedAt,
@@ -595,6 +594,10 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       if (leaseCompletion === "lease-mismatch") {
         return createRefreshLeaseExpiredResponse();
       }
+      const officialCheckStateStatus = await updateOfficialCheckState(
+        context.env.KF3_NOTIF_DATA,
+        result.officialCheckedAt,
+      );
       const requiresInitialization = !result.currentExists;
       const archiveChanged = result.addedCount > 0 || result.updatedCount > 0;
       const archiveUpdateNeeded = requiresInitialization || archiveChanged;
@@ -646,6 +649,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         officialFetchCount: result.officialFetchCount,
         officialFetchStatus: result.officialFetchStatus,
         officialCheckedAt: result.officialCheckedAt,
+        officialCheckStateStatus,
         refreshDataSource: result.refreshDataSource,
         refreshLeaseAcquireDurationMs,
         refreshEligibilityDurationMs: result.refreshEligibilityDurationMs,
