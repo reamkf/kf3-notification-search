@@ -873,7 +873,7 @@ const saveOfficialFetchState = async (
   }
 };
 
-const saveOfficialCheckState = async (
+const trySaveOfficialCheckState = async (
   bucket: R2Bucket,
   checkedAt: string,
   previous: OfficialCheckStateRead,
@@ -899,6 +899,24 @@ const saveOfficialCheckState = async (
   } catch {
     return "unavailable";
   }
+};
+
+const OFFICIAL_CHECK_STATE_SAVE_ATTEMPTS = 3;
+
+const saveOfficialCheckState = async (
+  bucket: R2Bucket,
+  checkedAt: string,
+  previous: OfficialCheckStateRead,
+): Promise<OfficialCheckStateStatus> => {
+  let current = previous;
+  for (let attempt = 0; attempt < OFFICIAL_CHECK_STATE_SAVE_ATTEMPTS; attempt += 1) {
+    const result = await trySaveOfficialCheckState(bucket, checkedAt, current);
+    if (result !== "conflicted" || attempt + 1 === OFFICIAL_CHECK_STATE_SAVE_ATTEMPTS) {
+      return result;
+    }
+    current = await readOfficialCheckState(bucket);
+  }
+  return "conflicted";
 };
 
 export const updateOfficialCheckState = async (

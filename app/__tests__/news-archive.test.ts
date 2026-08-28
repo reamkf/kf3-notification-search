@@ -144,7 +144,10 @@ const createMutableBucket = (
       if (options.failPutKeys?.has(key)) throw new Error(`put failed: ${key}`);
       if (options.nullPutKeys?.has(key)) return null;
       const concurrentObject = options.concurrentPutObjects?.get(key);
-      if (concurrentObject) objects.set(key, concurrentObject);
+      if (concurrentObject) {
+        objects.set(key, concurrentObject);
+        options.concurrentPutObjects?.delete(key);
+      }
       if (options.putErrorsAfterConcurrentPutObjects?.has(key)) {
         throw options.putErrorsAfterConcurrentPutObjects.get(key);
       }
@@ -602,6 +605,71 @@ describe("公式確認時刻state", () => {
       version: 1,
       checkedAt: newerCheckedAt,
     });
+  });
+
+  it("CAS競合で新しい時刻を確認した場合は巻き戻さない", async () => {
+    const initialCheckedAt = "2026-08-09T12:00:00.000Z";
+    const concurrentCheckedAt = "2026-08-09T12:02:00.000Z";
+    const checkedAt = "2026-08-09T12:01:00.000Z";
+    const checkStatePutCalls: PutCall[] = [];
+    const bucket = createMutableBucket(
+      "data",
+      {
+        [OFFICIAL_CHECK_STATE_KEY]: asStoredObject(
+          { version: 1, checkedAt: initialCheckedAt },
+          "check-state-etag",
+        ),
+      },
+      [],
+      {
+        checkStatePutCalls,
+        concurrentPutObjects: new Map([
+          [
+            OFFICIAL_CHECK_STATE_KEY,
+            asStoredObject({ version: 1, checkedAt: concurrentCheckedAt }, "concurrent-etag"),
+          ],
+        ]),
+      },
+    );
+
+    expect(await updateOfficialCheckState(bucket, checkedAt)).toBe("unchanged");
+    expect(checkStatePutCalls).toHaveLength(1);
+    const state = await bucket.get(OFFICIAL_CHECK_STATE_KEY);
+    expect(JSON.parse((await state?.text()) ?? "null")).toEqual({
+      version: 1,
+      checkedAt: concurrentCheckedAt,
+    });
+  });
+
+  it("CAS競合後は再読込して最新確認時刻を保存する", async () => {
+    const initialCheckedAt = "2026-08-09T12:00:00.000Z";
+    const concurrentCheckedAt = "2026-08-09T12:00:30.000Z";
+    const checkedAt = "2026-08-09T12:01:00.000Z";
+    const checkStatePutCalls: PutCall[] = [];
+    const bucket = createMutableBucket(
+      "data",
+      {
+        [OFFICIAL_CHECK_STATE_KEY]: asStoredObject(
+          { version: 1, checkedAt: initialCheckedAt },
+          "check-state-etag",
+        ),
+      },
+      [],
+      {
+        checkStatePutCalls,
+        concurrentPutObjects: new Map([
+          [
+            OFFICIAL_CHECK_STATE_KEY,
+            asStoredObject({ version: 1, checkedAt: concurrentCheckedAt }, "concurrent-etag"),
+          ],
+        ]),
+      },
+    );
+
+    expect(await updateOfficialCheckState(bucket, checkedAt)).toBe("saved");
+    expect(checkStatePutCalls).toHaveLength(2);
+    const state = await bucket.get(OFFICIAL_CHECK_STATE_KEY);
+    expect(JSON.parse((await state?.text()) ?? "null")).toEqual({ version: 1, checkedAt });
   });
 });
 
