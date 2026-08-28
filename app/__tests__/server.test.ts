@@ -682,8 +682,22 @@ describe("Worker API handler", () => {
     );
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(setup.cachePuts[0].expirationTtl).toBe(300);
-    expect(setup.cachePuts[0].metadata).toEqual(
-      createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z", null, MIN_OFFICIAL_ENTRY_COUNT),
+    expect(setup.cachePuts[0].metadata).toEqual({
+      ...createNewsCacheMetadata(
+        "merged",
+        "2026-08-09T12:34:56.789Z",
+        null,
+        MIN_OFFICIAL_ENTRY_COUNT,
+      ),
+      refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+    });
+    const cachedGetResponse = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+    expect(cachedGetResponse.headers.get("X-KF3-News-Refresh-Available-At")).toBe(
+      "2026-08-09T12:39:56.789Z",
     );
     expect(JSON.parse(setup.cacheValues.get("kf3-news") ?? "null")).toEqual(payload.news);
     expect(setup.cacheValues.get("kf3-news")).toBe(JSON.stringify(payload.news));
@@ -962,9 +976,10 @@ describe("Worker API handler", () => {
     expect(setup.dataGets).not.toContain(CURRENT_ARCHIVE_KEY);
     expect(setup.cachePuts).toHaveLength(1);
     expect(setup.cachePuts[0].value).toBe(clientJson);
-    expect(setup.cachePuts[0].metadata).toEqual(
-      createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z", "current-etag", 1),
-    );
+    expect(setup.cachePuts[0].metadata).toEqual({
+      ...createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z", "current-etag", 1),
+      refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+    });
     expect(setup.queueMessages).toHaveLength(0);
   });
 

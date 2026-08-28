@@ -524,12 +524,16 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         result.currentExists && result.addedCount === 0 && result.updatedCount === 0
           ? result.currentEtag
           : null;
-      const metadata = createNewsCacheMetadata(
-        "merged",
-        result.officialCheckedAt,
-        reusableArchiveEtag,
-        result.newsCount,
-      );
+      const cacheRefreshAvailableAt = new Date(nowMs + NEWS_REFRESH_COOLDOWN_MS).toISOString();
+      const metadata = {
+        ...createNewsCacheMetadata(
+          "merged",
+          result.officialCheckedAt,
+          reusableArchiveEtag,
+          result.newsCount,
+        ),
+        refreshAvailableAt: cacheRefreshAvailableAt,
+      };
       const responseJson = result.clientJson;
       const cachePutStartedAt = performance.now();
       try {

@@ -28,6 +28,7 @@ export type NewsCacheMetadataV2 = {
   officialCheckedAt: string | null;
   baseArchiveEtag: string | null;
   newsCount: number;
+  refreshAvailableAt?: string | null;
 };
 
 export type NewsCacheMetadata =
