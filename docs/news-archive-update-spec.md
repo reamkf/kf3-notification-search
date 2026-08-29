@@ -163,7 +163,7 @@ Queue consumerは次の設定と動作で運用する。
 - 更新成功時はmessageをackする。message形式が不正な場合も更新を行わずackし、`news_archive_queue_invalid_message`へ記録する。
 - `updateNewsArchive`が失敗した場合はackせず、60秒後にretryする。Wrangler設定の最大retry回数は3とする。
 - Queue consumerはheartbeatを送信しない。`HEALTHCHECKS_PING_URL`はscheduled handlerの開始、成功、失敗通知に使用する。
-- Queue consumerは`invalidateDisplayCache=false`で実行し、refreshが保存した表示KVをTTL満了まで維持する。Queue consumerがさらに新しい公式データをcurrentへ反映した場合、表示KVは最大5分だけ一世代古い可能性がある。
+- Queue consumerは`invalidateDisplayCache=false`で実行し、refreshが保存した表示KVをexpirationTtl満了まで維持する。クライアントは`officialCheckedAt`が5分以上古い表示を受け取るとrefreshを試みるため、表示用KVの保持時間と公式確認の更新間隔は別に管理する。
 - 同じmessageが重複配送されても、既存のETag条件付き取得、R2 CAS、304経路で同じ更新結果を安全に再確認できる。無条件上書きは行わず、競合時はQueueのretryへ委ねる。
 
 ## 監視とログ
@@ -191,19 +191,20 @@ heartbeatはHTTP POSTで送信する。ping URLの末尾の`/`は取り除いて
 | `news_archive_queue_invalid_message` | 不正なQueue messageを更新せずackした                           |
 | `news_archive_heartbeat_failed`      | scheduledのheartbeat送信に失敗した                             |
 | `news_api_error`                     | GETがレスポンスを構築できなかった                              |
+| `news_api_succeeded`                 | GETが成功し、経路とcritical pathの処理時間を記録した           |
 | `news_api_cache_write_failed`        | GETのwrite-throughまたは競合確認に失敗したがHTTP 200を維持した |
 | `news_api_cache_cleanup_failed`      | GETの競合後snapshot削除に失敗した                              |
 | `news_refresh_failed`                | refreshの依存処理または検証に失敗した                          |
 | `news_refresh_cache_cleanup_failed`  | current競合後の表示用KV削除に失敗した                          |
 | `news_refresh_succeeded`             | refreshが表示用KVを更新した                                    |
 
-GETのKV missはarchive snapshotを投影してwrite-throughするが、公式取得失敗によるfallbackログを記録しない。write-throughだけに失敗した場合は`news_api_cache_write_failed`を記録してHTTP 200を維持する。refreshの公式取得失敗、leaseまたはcooldownによる拒否は`news_refresh_failed`として記録し、scheduledまたはqueueのarchive更新失敗と区別する。Queue送信失敗は`news_archive_update_enqueue_failed`として記録するが、refresh成功を失敗へ変換しない。refresh成功は`news_refresh_succeeded`として記録する。
+GETのKV missはarchive snapshotを投影してwrite-throughするが、公式取得失敗によるfallbackログを記録しない。GET成功時は`news_api_succeeded`へ`dataSource`（`merged-kv`、`snapshot-kv`、`r2`）、`primaryCacheReadDurationMs`、`snapshotCacheReadDurationMs`、`archiveReadDurationMs`、`officialCheckStateReadDurationMs`、`totalDurationMs`、`workerVersionId`を記録する。write-throughだけに失敗した場合は`news_api_cache_write_failed`を記録してHTTP 200を維持する。refreshの公式取得失敗、leaseまたはcooldownによる拒否は`news_refresh_failed`として記録し、scheduledまたはqueueのarchive更新失敗と区別する。Queue送信失敗は`news_archive_update_enqueue_failed`として記録するが、refresh成功を失敗へ変換しない。refresh成功は`news_refresh_succeeded`として記録する。
 
 更新成功ログには更新有無、実行時刻、各件数、公式レスポンスのバイト数、backup key、`officialFetchStatus`、`conditionalRequestUsed`、`currentEtagMatchedState`、`officialBodyProcessed`、`monthlyBackupStatus`、`etagStateStatus`、処理時間を含める。公式ETagとR2 ETagの値自体はログへ出さない。処理時間は外部I/O待ちを含む経過時間であり、WorkersのCPU時間判定には使用しない。
 
-refresh成功ログにはarchive件数、merge後件数、追加件数、変更件数、current初期化の要否、archive更新の要否、Queue送信状態、lease完了状態、`officialFetchCount`、`officialFetchStatus`、`refreshDataSource`、`refreshEligibilityDurationMs`、`officialFetchDurationMs`、`refreshCacheReadDurationMs`、`archiveReadDurationMs`、`cachePutDurationMs`、`currentEtagCheckDurationMs`、`leaseCompletionDurationMs`を含める。各durationは外部I/O待ちを含む経過時間であり、制御metadataの内容、ETag値、公式本文、secretは記録しない。
+refresh成功ログには`workerVersionId`、archive件数、merge後件数、追加件数、変更件数、current初期化の要否、archive更新の要否、Queue送信状態、lease完了状態、`officialFetchCount`、`officialFetchStatus`、`refreshDataSource`、`refreshEligibilityDurationMs`、`officialFetchDurationMs`、`refreshCacheReadDurationMs`、`archiveReadDurationMs`、`cachePutDurationMs`、`currentEtagCheckDurationMs`、`leaseCompletionDurationMs`を含める。各durationは外部I/O待ちを含む経過時間であり、制御metadataの内容、ETag値、公式本文、secretは記録しない。
 
-失敗ログには処理段階とエラー詳細を含めるが、公式レスポンス本文やheartbeat URL、ETag値、refresh制御metadataの秘密値は含めない。汎用エラーの詳細には`originalError`としてnameとmessageだけを含める。制御文字と改行を空白へ正規化し、URL、Authorization、Bearer、一般的なtoken・secret・password形式、JWTと既知のtoken prefixをredactした後、nameを100文字、messageを500文字までに制限する。stack、cause、独自プロパティは含めず、非`Error`値は任意に文字列化せず固定値で記録する。
+失敗ログには処理段階とエラー詳細を含め、refreshの失敗ログには`workerVersionId`も含めるが、公式レスポンス本文やheartbeat URL、ETag値、refresh制御metadataの秘密値は含めない。汎用エラーの詳細には`originalError`としてnameとmessageだけを含める。制御文字と改行を空白へ正規化し、URL、Authorization、Bearer、一般的なtoken・secret・password形式、JWTと既知のtoken prefixをredactした後、nameを100文字、messageを500文字までに制限する。stack、cause、独自プロパティは含めず、非`Error`値は任意に文字列化せず固定値で記録する。
 
 ## 公式データの閾値と障害調査
 

@@ -26,7 +26,7 @@
 
 ### 表示データと永続アーカイブの違い
 
-表示用KV `kf3-news`は、refreshが正常完了した表示用配列のsnapshotを保持する。`GET /api/kf3-news`はこのsnapshotを最優先で読み、値がない場合はGET専用KV `kf3-news-archive-snapshot`を読む。両方にない場合だけ`archive/current.json`またはlegacy objectを読み込んでクライアント用配列へ投影し、GET専用KVへTTL 300秒でbest-effort保存する。このR2 snapshot経路では、独立した公式確認時刻stateの`checkedAt`をレスポンスmetadataへ投影する。GETは公式サーバーからの取得やアーカイブとのmergeを行わない。
+表示用KV `kf3-news`は、refreshが正常完了した表示用配列のsnapshotを保持し、GET専用KV `kf3-news-archive-snapshot`とともにキーのexpirationTtlを24時間とする。KV読み込み時の`cacheTtl`は変更しない。`GET /api/kf3-news`はこのsnapshotを最優先で読み、値がない場合はGET専用KV `kf3-news-archive-snapshot`を読む。両方にない場合だけ`archive/current.json`またはlegacy objectを読み込んでクライアント用配列へ投影し、GET専用KVへTTL 86400秒でbest-effort保存する。このR2 snapshot経路では、独立した公式確認時刻stateの`checkedAt`をレスポンスmetadataへ投影する。GETは公式サーバーからの取得やアーカイブとのmergeを行わない。
 
 `POST /api/kf3-news/refresh`は表示用データを最新化する公開操作である。R2のCAS leaseと5分cooldownで同時実行と連続実行を制限し、leaseを取得した要求だけが公式データの取得、検証、mergeを行う。KV finalization前にleaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長し、成功した結果を表示用KVへ保存する。`X-KF3-News-Data-Version`が今回の表示データと一致する場合は`{changed:false, metadata}`を返して表示用配列を省略し、それ以外は`{news, metadata}`形式で返す。
 
@@ -59,7 +59,7 @@ refreshは表示用KV、公式確認時刻state、refresh制御metadataを変更
 
 - `GET /`はStatic Assetsからお知らせデータを含まないSSG済みshellを返す。
 - `GET /api/kf3-news`はKV snapshotを即時返却する。
-- GETの両KV missでは、currentまたはlegacyのsnapshotをクライアント用配列へ投影し、同じJSONをHTTP 200で返す。レスポンス返却後に`kf3-news-archive-snapshot`へTTL 300秒でbest-effort保存し、ETag fenceを行う。公式取得とmergeは行わず、KV write-throughが失敗してもHTTP 200を維持する。
+- GETの両KV missでは、currentまたはlegacyのsnapshotをクライアント用配列へ投影し、同じJSONをHTTP 200で返す。レスポンス返却後に`kf3-news-archive-snapshot`へTTL 86400秒でbest-effort保存し、ETag fenceを行う。公式取得とmergeは行わず、KV write-throughが失敗してもHTTP 200を維持する。
 - `POST /api/kf3-news/refresh`の成功時は、公式側の更新を反映したJSONとversion 2の表示用metadataをKVへ保存する。`X-KF3-News-Data-Version`が今回の表示データと一致する場合は`{changed:false, metadata}`を返してJSON配列を省略し、それ以外は`{news, metadata}`形式で返す。304でcurrent ETagとKV metadataが一致する場合は、保存済みJSONを再利用する。
 - 公式サイトからお知らせが削除されても、Queue consumerまたはscheduled fallbackでcurrentへ保存済みの項目は残る。
 - 同じIDのお知らせが公式側で更新された場合、Queue consumer、scheduled fallback、またはrefreshのmergeでは公式側の内容を優先する。

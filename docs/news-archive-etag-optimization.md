@@ -25,7 +25,7 @@ Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 2. 公式が304を返したら、表示用KV `kf3-news`をmetadata付きで読む。
 3. metadataがv2で、`baseArchiveEtag`が現在のcurrent ETagと一致し、valueが存在する場合はvalueをclient JSONとして再利用する。変更を含むmerge結果やcurrent未作成の結果は`baseArchiveEtag`が`null`となるため再利用しない。
 4. 一致しない場合、v1、metadata欠落、value欠落の場合は`readCurrentArchiveDocumentIfEtag`へfallbackし、従来どおりR2本文を検証して投影する。
-5. 再利用したJSONも通常のrefresh finalizationでTTL 300秒、`officialCheckedAt`、`newsCount`を更新保存する。クライアントの`X-KF3-News-Data-Version`が一致する場合はHTTP本文からJSON配列を省略し`{changed:false, metadata}`を返し、それ以外は同じJSONを`{news, metadata}`へ埋め込む。
+5. 再利用したJSONも通常のrefresh finalizationでTTL 86400秒、`officialCheckedAt`、`newsCount`を更新保存する。クライアントの`X-KF3-News-Data-Version`が一致する場合はHTTP本文からJSON配列を省略し`{changed:false, metadata}`を返し、それ以外は同じJSONを`{news, metadata}`へ埋め込む。
 
 ## 設計方針
 
