@@ -20,6 +20,7 @@ type LegacyNewsCacheMetadataV2 = {
   fetchedAt: string;
   baseArchiveEtag: string | null;
   newsCount: number;
+  refreshAvailableAt?: string | null;
 };
 
 export type NewsCacheMetadataV2 = {
@@ -41,6 +42,13 @@ export type NewsResponseMetadata = {
   officialCheckedAt: string | null;
   refreshAvailableAt: string | null;
   dataVersion: string | null;
+};
+
+export type NewsRefreshState = {
+  version: 1;
+  baseArchiveEtag: string | null;
+  officialCheckedAt: string;
+  refreshAvailableAt: string;
 };
 
 const isValidTimestamp = (value: unknown): value is string => {
@@ -133,10 +141,68 @@ export const isReusableNewsCacheMetadata = (value: unknown): value is NewsCacheM
   return metadata !== null && isCurrentNewsCacheMetadata(metadata);
 };
 
+export const createNewsRefreshState = (
+  baseArchiveEtag: string | null,
+  officialCheckedAt: string,
+  refreshAvailableAt: string,
+): NewsRefreshState => ({
+  version: 1,
+  baseArchiveEtag,
+  officialCheckedAt,
+  refreshAvailableAt,
+});
+
 const getRefreshAvailableAt = (value: unknown) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const refreshAvailableAt = (value as Record<string, unknown>).refreshAvailableAt;
   return isValidTimestamp(refreshAvailableAt) ? refreshAvailableAt : null;
+};
+
+export const parseNewsRefreshState = (value: string | null): NewsRefreshState | null => {
+  if (value === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const candidate = parsed as Record<string, unknown>;
+  if (
+    candidate.version !== 1 ||
+    !isValidArchiveEtag(candidate.baseArchiveEtag) ||
+    !isValidTimestamp(candidate.officialCheckedAt) ||
+    !isValidTimestamp(candidate.refreshAvailableAt)
+  ) {
+    return null;
+  }
+  return {
+    version: 1,
+    baseArchiveEtag: candidate.baseArchiveEtag,
+    officialCheckedAt: candidate.officialCheckedAt,
+    refreshAvailableAt: candidate.refreshAvailableAt,
+  };
+};
+
+export const applyNewsRefreshState = (
+  metadata: unknown,
+  state: NewsRefreshState | null,
+): NewsCacheMetadata | undefined => {
+  const parsedMetadata = parseNewsCacheMetadata(metadata);
+  if (!parsedMetadata) return undefined;
+  const refreshAvailableAt = getRefreshAvailableAt(metadata);
+  const metadataWithRefreshAvailableAt =
+    refreshAvailableAt === null ? parsedMetadata : { ...parsedMetadata, refreshAvailableAt };
+  if (!state || !isCurrentNewsCacheMetadata(parsedMetadata)) {
+    return metadataWithRefreshAvailableAt;
+  }
+  if (parsedMetadata.baseArchiveEtag !== state.baseArchiveEtag)
+    return metadataWithRefreshAvailableAt;
+  return {
+    ...parsedMetadata,
+    officialCheckedAt: state.officialCheckedAt,
+    refreshAvailableAt: state.refreshAvailableAt,
+  };
 };
 
 export const toNewsResponseMetadata = (value: unknown): NewsResponseMetadata => {

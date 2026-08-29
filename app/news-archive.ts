@@ -14,7 +14,11 @@ import {
   validateParsedStoredNewsDocumentShape,
 } from "./news-data";
 import type { StoredNewsDocument } from "./schema";
-import { NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, NEWS_CACHE_KEY } from "./news-cache-keys";
+import {
+  NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY,
+  NEWS_CACHE_KEY,
+  NEWS_REFRESH_STATE_KEY,
+} from "./news-cache-keys";
 
 export const OFFICIAL_NEWS_URL = `${OFFICIAL_NEWS_ORIGIN}/info/all/entries.txt`;
 export const OFFICIAL_FETCH_TIMEOUT_MS = 10_000;
@@ -1137,6 +1141,7 @@ export const updateNewsArchive = async (
       if (dependencies.invalidateDisplayCache !== false) {
         cacheDeletions.push(
           Promise.resolve().then(() => dependencies.cache.delete(NEWS_CACHE_KEY)),
+          Promise.resolve().then(() => dependencies.cache.delete(NEWS_REFRESH_STATE_KEY)),
         );
       }
       const deletionResults = await Promise.allSettled(cacheDeletions);

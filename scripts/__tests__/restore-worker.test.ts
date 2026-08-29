@@ -6,7 +6,11 @@ import type {
   R2ObjectBody,
 } from "@cloudflare/workers-types/experimental";
 import { CURRENT_ARCHIVE_KEY } from "../../app/news-archive";
-import { NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, NEWS_CACHE_KEY } from "../../app/news-cache-keys";
+import {
+  NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY,
+  NEWS_CACHE_KEY,
+  NEWS_REFRESH_STATE_KEY,
+} from "../../app/news-cache-keys";
 import { canonicalizeNewsDocument } from "../../app/news-data";
 import { handleRestoreRequest, type RestoreBindings } from "../restore-worker";
 
@@ -358,7 +362,7 @@ describe("operator-only復元tool", () => {
       mode: "apply",
       previousCurrentEtag: "current-etag",
       updatedCurrentEtag: "updated-etag",
-      writes: { r2Puts: 1, kvDeletes: 2 },
+      writes: { r2Puts: 1, kvDeletes: 3 },
     });
     expect(setup.puts).toEqual([
       {
@@ -376,6 +380,7 @@ describe("operator-only復元tool", () => {
       `data:put:${CURRENT_ARCHIVE_KEY}`,
       `cache:delete:${NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY}`,
       `cache:delete:${NEWS_CACHE_KEY}`,
+      `cache:delete:${NEWS_REFRESH_STATE_KEY}`,
     ]);
   });
 
@@ -399,6 +404,7 @@ describe("operator-only復元tool", () => {
       `data:put:${CURRENT_ARCHIVE_KEY}`,
       `cache:delete:${NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY}`,
       `cache:delete:${NEWS_CACHE_KEY}`,
+      `cache:delete:${NEWS_REFRESH_STATE_KEY}`,
     ]);
   });
 });

@@ -4,7 +4,7 @@
 
 本書は、`updateNewsArchive`を実行するQueue consumerとscheduled handlerの共通仕様を定義する。Queue consumerはrefreshが検出したmerge差分またはcurrent未作成を契機に別invocationで実行し、scheduled handlerはQueueが届かない場合にも更新を実行できる03:15 JSTのfallbackである。どちらも公式データを検証して累積archiveの正しさを確定し、必要なbackup、公式ETag state、公式確認時刻stateを保存する。
 
-`GET /`はStatic AssetsからSSG済みshellを返し、`GET /api/kf3-news`はmerged結果用KV、GET専用snapshot KV、またはR2 snapshotを返す。GETのR2投影結果はGET専用KVへbest-effortで書き戻す。`POST /api/kf3-news/refresh`は表示用KVと公式確認時刻stateを更新し、merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知するが、archive、backup、公式ETag stateを変更しない。refresh、Queue consumer、scheduled handlerは別invocationとして扱う。refresh本体はリクエスト内で完了させ、Queue送信だけは`waitUntil`へ登録してレスポンス経路から分離する。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [お知らせ機能共通仕様](./news-spec.md)、表示APIは [お知らせページリクエスト仕様](./news-page-request-spec.md) を参照する。
+`GET /`はStatic AssetsからSSG済みshellを返し、`GET /api/kf3-news`はmerged本文KVと可変state KV、GET専用snapshot KV、またはR2 snapshotを返す。GETのR2投影結果はGET専用KVへbest-effortで書き戻す。`POST /api/kf3-news/refresh`は表示用本文KVと可変state KVを更新し、merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知するが、archive、backup、公式ETag stateを変更しない。refresh、Queue consumer、scheduled handlerは別invocationとして扱う。refresh本体はリクエスト内で完了させ、Queue送信とR2公式確認時刻state更新だけは`waitUntil()`へ登録してレスポンス経路から分離する。共通の保存形式、R2とKVの役割、公式ETag stateの契約は [お知らせ機能共通仕様](./news-spec.md)、表示APIは [お知らせページリクエスト仕様](./news-page-request-spec.md) を参照する。
 
 ## 実行時刻と更新対象
 
@@ -17,20 +17,20 @@ Queue consumerまたはscheduled handlerが更新または削除できる対象�
 - `KF3_NOTIF_DATA/archive/official-check-state.json`
 - `KF3_NOTIF_BACKUP/daily/...`
 - `KF3_NOTIF_BACKUP/monthly/...`
-- current更新成功後のGET専用snapshot KV `kf3-news-archive-snapshot`の削除。scheduledまたはmanual更新ではWorkers KV `kf3-news`も削除し、Queue consumerは表示KVを維持する
+- current更新成功後のGET専用snapshot KV `kf3-news-archive-snapshot`の削除。scheduledまたはmanual更新ではWorkers KV `kf3-news`と`kf3-news-refresh-state`も削除し、Queue consumerは表示KVを維持する
 
-refreshは公式確認時刻stateとDurable Objectのrefresh制御stateを更新し、表示用KVも更新する。merge差分がある場合またはcurrentが未作成の場合はQueueへ更新messageを送るが、Queue送信はbest-effortであり、`waitUntil`へ登録してレスポンス経路から分離する。送信失敗でもrefreshの200応答と表示用KVの保存を維持する。公式データの取得または検証が失敗した場合、Queue consumerまたはscheduled handlerはarchive、backup、公式ETag state、KVを変更せず失敗する。
+refreshは表示用本文KV、可変state KV、Durable Objectのrefresh制御stateを同期更新する。R2公式確認時刻state更新と、merge差分がある場合またはcurrentが未作成の場合のQueue送信はbest-effortであり、`waitUntil()`へ登録してレスポンス経路から分離する。background処理の失敗でもrefreshの200応答と表示用KVの保存を維持する。公式データの取得または検証が失敗した場合、Queue consumerまたはscheduled handlerはarchive、backup、公式ETag state、KVを変更せず失敗する。
 
 ## refreshからQueueへの委譲
 
-refreshは公式データとcurrentまたはlegacyをmergeし、表示用配列をKVへ保存した後、merge差分がある場合またはcurrentが未作成の場合にQueueへ更新messageをpublishする。Queue送信は`waitUntil`へ登録し、refreshのレスポンスを待たせない。
+refreshは公式データとcurrentまたはlegacyをmergeし、必要な表示用本文と可変stateをKVへ保存した後、merge差分がある場合またはcurrentが未作成の場合にQueueへ更新messageをpublishする。Queue送信は`waitUntil()`へ登録し、refreshのレスポンスを待たせない。
 
 - Queue名は`kf3-notif-archive-update`とする。
 - message versionは`2`とし、`reason`、`detectedAt`、`addedCount`、`updatedCount`、`requiresInitialization`を含める。
 - merge差分では`reason=refresh-detected-change`、current未作成では`reason=refresh-current-missing`と`requiresInitialization=true`を使用する。current未作成messageは追加・変更件数が0でも有効とする。
-- Queue送信はbest-effortで行い、`waitUntil`へ登録する。送信失敗は`news_archive_update_enqueue_failed`へ記録するが、refreshの表示用KV保存を取り消さず、HTTP 200を返す。
+- Queue送信とR2公式確認時刻state更新はbest-effortで行い、`waitUntil()`へ登録する。失敗をログへ記録するが、refreshの表示用KV保存を取り消さず、HTTP 200を返す。
 - KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、Coordinatorの`renew` RPCでleaseを5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
-- KV保存後にcurrent ETagを確認し、競合時は保存したKVを削除して503を返す。currentが一致した場合はCoordinatorの`complete` RPCでtokenとlease期限を検証し、成功時はcooldownへ遷移する。不一致または期限切れの場合は他refreshのKVを削除せず202を返し、Queueへ通知しない。
+- 新しい本文KVを保存した場合だけcurrent ETagを確認し、競合時は保存した本文KVを削除して503を返す。304で既存本文を再利用した場合は本文保存とこのHEADを省略する。可変state KV保存後にCoordinatorの`complete` RPCでtokenとlease期限を検証し、成功時はcooldownへ遷移する。不一致または期限切れの場合は他refreshのKVを削除せず202を返し、Queueへ通知しない。
 - Queue consumerはmessageを検証し、別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行する。`requiresInitialization=true`の場合も公式データを再取得し、currentがなければ既存の初回作成経路を使用する。
 - Queue consumerが成功したmessageはackし、更新処理が失敗したmessageはackせず60秒後にretryする。
 - scheduled handlerはQueue送信またはconsumer実行に依存せず、毎日03:15 JSTに`trigger=scheduled`で同じ更新処理を実行する。

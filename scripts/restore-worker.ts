@@ -1,6 +1,10 @@
 import type { KVNamespace, R2Bucket } from "@cloudflare/workers-types/experimental";
 import { CURRENT_ARCHIVE_KEY } from "../app/news-archive";
-import { NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, NEWS_CACHE_KEY } from "../app/news-cache-keys";
+import {
+  NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY,
+  NEWS_CACHE_KEY,
+  NEWS_REFRESH_STATE_KEY,
+} from "../app/news-cache-keys";
 import { canonicalizeNewsDocument, parseJapaneseNewsDate } from "../app/news-data";
 
 const cacheKey = NEWS_CACHE_KEY;
@@ -182,7 +186,7 @@ const restore = async (input: RestoreInput, env: RestoreBindings) => {
       current: { key: CURRENT_ARCHIVE_KEY, etag: latestCurrentEtag },
       plannedOperations: [
         "conditionally replace archive/current.json",
-        "delete KV kf3-news after a successful replacement",
+        "delete display KV entries after a successful replacement",
       ],
       writes: { r2Puts: 0, kvDeletes: 0 },
     };
@@ -222,6 +226,7 @@ const restore = async (input: RestoreInput, env: RestoreBindings) => {
   const cacheDeletions = await Promise.allSettled([
     Promise.resolve().then(() => env.KF3_NOTIF_CACHE.delete(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY)),
     Promise.resolve().then(() => env.KF3_NOTIF_CACHE.delete(cacheKey)),
+    Promise.resolve().then(() => env.KF3_NOTIF_CACHE.delete(NEWS_REFRESH_STATE_KEY)),
   ]);
   if (cacheDeletions.some((result) => result.status === "rejected")) {
     throw new RestoreError(
@@ -239,7 +244,7 @@ const restore = async (input: RestoreInput, env: RestoreBindings) => {
     snapshot: publicSnapshotSummary(snapshot),
     previousCurrentEtag: latestCurrentEtag,
     updatedCurrentEtag: updated.etag,
-    writes: { r2Puts: 1, kvDeletes: 2 },
+    writes: { r2Puts: 1, kvDeletes: 3 },
   };
 };
 

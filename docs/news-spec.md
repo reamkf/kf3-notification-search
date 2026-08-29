@@ -4,14 +4,14 @@
 
 本書は、お知らせ表示、表示用データの更新、永続アーカイブ、復元に関する共通契約と各処理仕様への入口を定義する。実行主体ごとの処理順、書き込み責務、失敗時の扱いは次の文書に分けて記載する。
 
-| 実行主体           | 入口                                 | 主な責務                                                                    | 書き込み可能なデータ                                                                       |
-| ------------------ | ------------------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| ページ表示         | `GET /`                              | Static Assetsからお知らせ表示用のSSG済みshellを返す                         | なし                                                                                       |
-| 表示データ取得     | `GET /api/kf3-news`                  | KVの表示用snapshotを返し、KV miss時はR2 snapshotを投影してwrite-throughする | 表示用KVへのbest-effort保存                                                                |
-| 表示データrefresh  | `POST /api/kf3-news/refresh`         | 公式データを取得、検証、mergeし、成功結果をKVへ保存してQueueへ通知する      | 表示用KV、公式確認時刻state、Durable Objectのrefresh制御state、archive更新Queueへのpublish |
-| Queue consumer     | `kf3-notif-archive-update`           | messageを検証し、`updateNewsArchive(trigger=queue)`を別invocationで実行する | current、daily、monthly、公式ETag state、公式確認時刻state                                 |
-| scheduled fallback | Cronから呼ばれるscheduled handler    | 03:15 JSTに`updateNewsArchive(trigger=scheduled)`を実行するfallback         | current、daily、monthly、公式ETag state、公式確認時刻state、必要時のKV削除                 |
-| 復元操作           | localhost専用Workerの`POST /restore` | snapshotからcurrentを条件付きで復元する                                     | apply時の`archive/current.json`とKV削除                                                    |
+| 実行主体           | 入口                                 | 主な責務                                                                    | 書き込み可能なデータ                                                                           |
+| ------------------ | ------------------------------------ | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| ページ表示         | `GET /`                              | Static Assetsからお知らせ表示用のSSG済みshellを返す                         | なし                                                                                           |
+| 表示データ取得     | `GET /api/kf3-news`                  | KVの表示用snapshotを返し、KV miss時はR2 snapshotを投影してwrite-throughする | 表示用KVへのbest-effort保存                                                                    |
+| 表示データrefresh  | `POST /api/kf3-news/refresh`         | 公式データを取得、検証、mergeし、表示用KVへ保存してbackground処理を登録する | 表示用本文KV、可変state KV、公式確認時刻state、Durable Objectのrefresh制御state、Queue publish |
+| Queue consumer     | `kf3-notif-archive-update`           | messageを検証し、`updateNewsArchive(trigger=queue)`を別invocationで実行する | current、daily、monthly、公式ETag state、公式確認時刻state                                     |
+| scheduled fallback | Cronから呼ばれるscheduled handler    | 03:15 JSTに`updateNewsArchive(trigger=scheduled)`を実行するfallback         | current、daily、monthly、公式ETag state、公式確認時刻state、必要時のKV削除                     |
+| 復元操作           | localhost専用Workerの`POST /restore` | snapshotからcurrentを条件付きで復元する                                     | apply時の`archive/current.json`とKV削除                                                        |
 
 ### 実行主体ごとの詳細
 
@@ -26,11 +26,11 @@
 
 ### 表示データと永続アーカイブの違い
 
-表示用KV `kf3-news`は、refreshが正常完了した表示用配列のsnapshotを保持し、GET専用KV `kf3-news-archive-snapshot`とともにキーのexpirationTtlを24時間とする。KV読み込み時の`cacheTtl`は変更しない。`GET /api/kf3-news`はこのsnapshotを最優先で読み、値がない場合はGET専用KV `kf3-news-archive-snapshot`を読む。両方にない場合だけ`archive/current.json`またはlegacy objectを読み込んでクライアント用配列へ投影し、GET専用KVへTTL 86400秒でbest-effort保存する。このR2 snapshot経路では、独立した公式確認時刻stateの`checkedAt`をレスポンスmetadataへ投影する。GETは公式サーバーからの取得やアーカイブとのmergeを行わない。
+表示用KV `kf3-news`はrefreshが正常完了した表示用配列のsnapshotを保持し、可変metadataは`kf3-news-refresh-state`へ分離する。両キーとGET専用KV `kf3-news-archive-snapshot`のexpirationTtlは24時間とし、KV読み込み時の`cacheTtl`は変更しない。`GET /api/kf3-news`は本文と可変stateを並列に読み、`baseArchiveEtag`が一致する場合だけstateを採用する。本文がない場合はGET専用KV `kf3-news-archive-snapshot`を読み、どちらの本文もない場合だけ`archive/current.json`またはlegacy objectをクライアント用配列へ投影してGET専用KVへTTL 86400秒でbest-effort保存する。このR2 snapshot経路では、独立した公式確認時刻stateの`checkedAt`をレスポンスmetadataへ投影する。GETは公式サーバーからの取得やアーカイブとのmergeを行わない。
 
-`POST /api/kf3-news/refresh`は表示用データを最新化する公開操作である。`KF3_REFRESH_COORDINATOR` Durable ObjectのSQLite stateと5分cooldownで同時実行と連続実行を制限し、leaseを取得した要求だけが公式データの取得、検証、mergeを行う。Coordinatorは`kf3-news`という固定名で参照し、初回bootstrap後はR2のcontrol objectを読み書きしない。KV finalization前にleaseの残り時間が20秒未満の場合だけ、`renew` RPCでleaseを5分間へ延長し、成功した結果を表示用KVへ保存する。`X-KF3-News-Data-Version`が今回の表示データと一致する場合は`{changed:false, metadata}`を返して表示用配列を省略し、それ以外は`{news, metadata}`形式で返す。
+`POST /api/kf3-news/refresh`は表示用データを最新化する公開操作である。`KF3_REFRESH_COORDINATOR` Durable ObjectのSQLite stateと5分cooldownで同時実行と連続実行を制限し、leaseを取得した要求だけが公式データの取得、検証、mergeを行う。Coordinatorは`kf3-news`という固定名で参照し、初回bootstrap後はR2のcontrol objectを読み書きしない。KV finalization前にleaseの残り時間が20秒未満の場合だけ、`renew` RPCでleaseを5分間へ延長する。新しい本文が必要な場合だけ`kf3-news`を保存してcurrent ETagを再確認し、304で既存本文を再利用できる場合は本文保存とpost-write HEADを省略する。可変stateは小さい`kf3-news-refresh-state`へ保存する。`X-KF3-News-Data-Version`が今回の表示データと一致する場合は`{changed:false, metadata}`を返して表示用配列を省略し、それ以外は`{news, metadata}`形式で返す。
 
-refreshは表示用KV、公式確認時刻state、Durable Objectのrefresh制御stateを変更する。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、Queue送信は`waitUntil`へ登録するが、`archive/current.json`、daily、monthly、公式ETag stateはrefreshから変更しない。Queue consumerが別invocationで`updateNewsArchive(trigger=queue)`を実行し、refresh由来の表示KVを維持する。03:15 JSTのscheduled handlerは`trigger=scheduled`でfallback更新を行い、current更新時に表示KVを削除する。Queue送信に失敗してもrefreshは200を返す。currentをsnapshotへ戻す操作はrestoreの責務である。
+refreshは表示用KVの本文と可変state、Durable Objectのrefresh制御stateを変更する。R2の公式確認時刻state更新と、merge差分がある場合またはcurrentが未作成の場合の`kf3-notif-archive-update` Queue送信は`waitUntil()`へ登録する。`archive/current.json`、daily、monthly、公式ETag stateはrefreshから変更しない。Queue consumerが別invocationで`updateNewsArchive(trigger=queue)`を実行し、refresh由来の表示KVを維持する。03:15 JSTのscheduled handlerは`trigger=scheduled`でfallback更新を行い、current更新時に表示用本文KV、可変state KV、GET専用snapshot KVを削除する。background処理に失敗してもrefreshは200を返す。currentをsnapshotへ戻す操作はrestoreの責務である。
 
 ### Durable Object refresh制御
 
@@ -40,18 +40,19 @@ Durable Objectのstateがまだ存在しない初回だけ、既存の`KF3_NOTIF
 
 ### 共有データの読み書き責務
 
-| データ                                      | GET `/api/kf3-news`                           | POST `/api/kf3-news/refresh`            | Queue consumer                    | scheduled fallback                | restore                 |
-| ------------------------------------------- | --------------------------------------------- | --------------------------------------- | --------------------------------- | --------------------------------- | ----------------------- |
-| `archive/current.json`                      | 読み込み、snapshot投影                        | 読み込み、mergeの入力                   | 検証してETag条件付き更新          | 検証してETag条件付き更新          | applyで条件付き置換     |
-| `archive/official-fetch-state.json`         | 触れない                                      | 変更しない                              | 条件付き取得の結果を保存          | 条件付き取得の結果を保存          | 変更しない              |
-| `archive/official-check-state.json`         | 読み込み、公式確認時刻を投影                  | 公式確認成功時に更新                    | 公式確認成功時に更新              | 公式確認成功時に更新              | 変更しない              |
-| `daily/...`                                 | 触れない                                      | 触れない                                | current更新直前の元バイト列を保存 | current更新直前の元バイト列を保存 | 読み込みのみ            |
-| `monthly/...`                               | 触れない                                      | 触れない                                | 月最初の正常状態を保存            | 月最初の正常状態を保存            | 読み込みのみ            |
-| `KF3_NOTIF_CACHE/kf3-news`                  | merged snapshotを最優先で読む                 | 成功結果を保存                          | refresh由来のsnapshotを維持       | current更新成功後に削除           | current更新成功後に削除 |
-| `KF3_NOTIF_CACHE/kf3-news-archive-snapshot` | GET missのsnapshotを読む、またはwrite-through | 触れない                                | current更新成功後に削除           | current更新成功後に削除           | current復元成功後に削除 |
-| Durable Object refresh制御state             | 触れない                                      | RPCでleaseとcooldownを更新              | 触れない                          | 触れない                          | 触れない                |
-| `kf3-notif-archive-update` Queue            | 触れない                                      | merge差分またはcurrent未作成時にpublish | messageをconsume                  | 触れない                          | 触れない                |
-| legacy `entries_merged_20241107.json`       | currentがない場合の読み込み元                 | currentがない場合のmerge入力            | currentがない初回移行の入力       | currentがない初回移行の入力       | 入力対象外              |
+| データ                                      | GET `/api/kf3-news`                            | POST `/api/kf3-news/refresh`            | Queue consumer                    | scheduled fallback                | restore                 |
+| ------------------------------------------- | ---------------------------------------------- | --------------------------------------- | --------------------------------- | --------------------------------- | ----------------------- |
+| `archive/current.json`                      | 読み込み、snapshot投影                         | 読み込み、mergeの入力                   | 検証してETag条件付き更新          | 検証してETag条件付き更新          | applyで条件付き置換     |
+| `archive/official-fetch-state.json`         | 触れない                                       | 変更しない                              | 条件付き取得の結果を保存          | 条件付き取得の結果を保存          | 変更しない              |
+| `archive/official-check-state.json`         | 読み込み、公式確認時刻を投影                   | 成功後に`waitUntil()`で更新             | 公式確認成功時に更新              | 公式確認成功時に更新              | 変更しない              |
+| `daily/...`                                 | 触れない                                       | 触れない                                | current更新直前の元バイト列を保存 | current更新直前の元バイト列を保存 | 読み込みのみ            |
+| `monthly/...`                               | 触れない                                       | 触れない                                | 月最初の正常状態を保存            | 月最初の正常状態を保存            | 読み込みのみ            |
+| `KF3_NOTIF_CACHE/kf3-news`                  | merged snapshotを最優先で読む                  | 新しい本文が必要な場合だけ保存          | refresh由来のsnapshotを維持       | current更新成功後に削除           | current更新成功後に削除 |
+| `KF3_NOTIF_CACHE/kf3-news-refresh-state`    | 本文と並列に読み、ETag一致時だけmetadataへ合成 | 公式確認時刻とcooldown終了時刻を保存    | refresh由来のstateを維持          | current更新成功後に削除           | current更新成功後に削除 |
+| `KF3_NOTIF_CACHE/kf3-news-archive-snapshot` | GET missのsnapshotを読む、またはwrite-through  | 触れない                                | current更新成功後に削除           | current更新成功後に削除           | current復元成功後に削除 |
+| Durable Object refresh制御state             | 触れない                                       | RPCでleaseとcooldownを更新              | 触れない                          | 触れない                          | 触れない                |
+| `kf3-notif-archive-update` Queue            | 触れない                                       | merge差分またはcurrent未作成時にpublish | messageをconsume                  | 触れない                          | 触れない                |
+| legacy `entries_merged_20241107.json`       | currentがない場合の読み込み元                  | currentがない場合のmerge入力            | currentがない初回移行の入力       | currentがない初回移行の入力       | 入力対象外              |
 
 `archive/current.json`が存在しない場合だけlegacyデータを読み込む。currentが存在するもののJSONまたは内容が不正な場合はlegacyへフォールバックせず、異常として扱う。refreshのmerge入力でもこの境界を維持する。
 
@@ -64,9 +65,9 @@ Durable Objectのstateがまだ存在しない初回だけ、既存の`KF3_NOTIF
 ## 利用者から見た共通の振る舞い
 
 - `GET /`はStatic Assetsからお知らせデータを含まないSSG済みshellを返す。
-- `GET /api/kf3-news`はKV snapshotを即時返却する。
-- GETの両KV missでは、currentまたはlegacyのsnapshotをクライアント用配列へ投影し、同じJSONをHTTP 200で返す。レスポンス返却後に`kf3-news-archive-snapshot`へTTL 86400秒でbest-effort保存し、ETag fenceを行う。公式取得とmergeは行わず、KV write-throughが失敗してもHTTP 200を維持する。
-- `POST /api/kf3-news/refresh`の成功時は、公式側の更新を反映したJSONとversion 2の表示用metadataをKVへ保存する。`X-KF3-News-Data-Version`が今回の表示データと一致する場合は`{changed:false, metadata}`を返してJSON配列を省略し、それ以外は`{news, metadata}`形式で返す。304でcurrent ETagとKV metadataが一致する場合は、保存済みJSONを再利用する。
+- `GET /api/kf3-news`は本文KVを最優先し、可変state KVが本文のETagに対応する場合だけそのmetadataを合成して即時返却する。
+- GETの両本文KV missでは、currentまたはlegacyのsnapshotをクライアント用配列へ投影し、同じJSONをHTTP 200で返す。レスポンス返却後に`kf3-news-archive-snapshot`へTTL 86400秒でbest-effort保存し、ETag fenceを行う。公式取得とmergeは行わず、KV write-throughが失敗してもHTTP 200を維持する。
+- `POST /api/kf3-news/refresh`の成功時は、公式側の更新を反映したJSONを本文KVへ保存し、version 2の本文metadataと可変refresh stateを別々に保持する。`X-KF3-News-Data-Version`が今回の表示データと一致する場合は`{changed:false, metadata}`を返してJSON配列を省略し、それ以外は`{news, metadata}`形式で返す。304でcurrent ETagと本文KV metadataが一致する場合は、保存済みJSONを再利用して本文KVを再保存しない。
 - 公式サイトからお知らせが削除されても、Queue consumerまたはscheduled fallbackでcurrentへ保存済みの項目は残る。
 - 同じIDのお知らせが公式側で更新された場合、Queue consumer、scheduled fallback、またはrefreshのmergeでは公式側の内容を優先する。
 - refreshの失敗時は、直前のKV snapshotを置き換えない。
@@ -83,7 +84,8 @@ Durable Objectのstateがまだ存在しない初回だけ、既存の`KF3_NOTIF
 | 本番R2           | `KF3_NOTIF_DATA/entries_merged_20241107.json`          | 初回移行と互換配信用のlegacyデータ                                            |
 | バックアップR2   | `KF3_NOTIF_BACKUP/daily/...`                           | current更新直前の累積アーカイブ                                               |
 | バックアップR2   | `KF3_NOTIF_BACKUP/monthly/...`                         | 各月最初の正常実行時点の本番反映済みアーカイブ                                |
-| Workers KV       | `KF3_NOTIF_CACHE`の`kf3-news`                          | APIが返す表示用snapshot                                                       |
+| Workers KV       | `KF3_NOTIF_CACHE`の`kf3-news`                          | APIが返す表示用snapshot本文                                                   |
+| Workers KV       | `KF3_NOTIF_CACHE`の`kf3-news-refresh-state`            | 公式確認時刻、cooldown終了時刻、本文との対応ETag                              |
 | Queue            | `kf3-notif-archive-update`                             | refreshのmerge差分またはcurrent初期化を別invocationのarchive更新へ委譲        |
 | refresh制御      | `KF3_REFRESH_COORDINATOR` Durable ObjectのSQLite state | refreshの同時実行と連続実行を制限                                             |
 | 監視             | `HEALTHCHECKS_PING_URL`                                | scheduledの開始、成功、失敗を通知し、Queue consumerへは通知しない任意のsecret |

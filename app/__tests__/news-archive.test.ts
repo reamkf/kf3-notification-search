@@ -23,6 +23,7 @@ import {
   updateNewsArchive,
   updateOfficialCheckState,
 } from "../news-archive";
+import { NEWS_REFRESH_STATE_KEY } from "../news-cache-keys";
 import { parseJapaneseNewsDate, MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 
 const createNews = (id: number) => ({
@@ -752,6 +753,7 @@ describe("アーカイブ更新トランザクション", () => {
       `data:put:${CURRENT_ARCHIVE_KEY}`,
       "cache:delete:kf3-news-archive-snapshot",
       "cache:delete:kf3-news",
+      `cache:delete:${NEWS_REFRESH_STATE_KEY}`,
       `backup:put:${result.monthlyBackupKey}`,
     ]);
     expect(setup.logger.logs[0]).toMatchObject({
@@ -1139,6 +1141,7 @@ describe("アーカイブ更新トランザクション", () => {
       `data:put:${CURRENT_ARCHIVE_KEY}`,
       "cache:delete:kf3-news-archive-snapshot",
       "cache:delete:kf3-news",
+      `cache:delete:${NEWS_REFRESH_STATE_KEY}`,
     ]);
     expect(setup.logger.errors[0]).toMatchObject({ stage: "cache-delete" });
   });

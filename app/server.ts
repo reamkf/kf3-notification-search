@@ -36,16 +36,24 @@ import {
 } from "./news-refresh-control";
 import {
   NEWS_DATA_VERSION_HEADER,
+  applyNewsRefreshState,
   createNewsCacheMetadata,
+  createNewsRefreshState,
   createNewsResponseHeaders,
   isReusableNewsCacheMetadata,
+  parseNewsRefreshState,
   type NewsCacheMetadata,
   type NewsCacheMetadataV2,
 } from "./news-response-metadata";
-import { NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, NEWS_CACHE_KEY } from "./news-cache-keys";
+import {
+  NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY,
+  NEWS_CACHE_KEY,
+  NEWS_REFRESH_STATE_KEY,
+} from "./news-cache-keys";
 
 const oldNewsPath = `/${LEGACY_ARCHIVE_KEY}`;
 const cacheKey = NEWS_CACHE_KEY;
+const refreshStateKey = NEWS_REFRESH_STATE_KEY;
 const archiveSnapshotCacheKey = NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY;
 const newsCacheExpirationTtl = 24 * 60 * 60;
 const heartbeatTimeoutMs = 10_000;
@@ -184,6 +192,7 @@ type RefreshMeasurements = RefreshDurations & {
 
 type NewsApiMeasurements = {
   primaryCacheReadDurationMs: number;
+  refreshStateReadDurationMs: number;
   snapshotCacheReadDurationMs: number;
   archiveReadDurationMs: number;
   officialCheckStateReadDurationMs: number;
@@ -438,18 +447,24 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
     const startedAt = performance.now();
     const measurements: NewsApiMeasurements = {
       primaryCacheReadDurationMs: 0,
+      refreshStateReadDurationMs: 0,
       snapshotCacheReadDurationMs: 0,
       archiveReadDurationMs: 0,
       officialCheckStateReadDurationMs: 0,
     };
     try {
-      const cachedNews = await measureNewsApiOperation(
-        measurements,
-        "primaryCacheReadDurationMs",
-        () => context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey),
-      );
+      const [cachedNews, refreshStateJson] = await Promise.all([
+        measureNewsApiOperation(measurements, "primaryCacheReadDurationMs", () =>
+          context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey),
+        ),
+        measureNewsApiOperation(measurements, "refreshStateReadDurationMs", () =>
+          context.env.KF3_NOTIF_CACHE.get(refreshStateKey).catch(() => null),
+        ),
+      ]);
+      const refreshState = parseNewsRefreshState(refreshStateJson);
       if (cachedNews.value !== null) {
-        const response = createJsonResponse(cachedNews.value, cachedNews.metadata ?? undefined);
+        const metadata = applyNewsRefreshState(cachedNews.metadata, refreshState);
+        const response = createJsonResponse(cachedNews.value, metadata);
         logNewsApiSuccess(logger, context.env, "merged-kv", measurements, startedAt);
         return response;
       }
@@ -461,10 +476,8 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(archiveSnapshotCacheKey),
       );
       if (cachedArchiveSnapshot.value !== null) {
-        const response = createJsonResponse(
-          cachedArchiveSnapshot.value,
-          cachedArchiveSnapshot.metadata ?? undefined,
-        );
+        const metadata = applyNewsRefreshState(cachedArchiveSnapshot.metadata, refreshState);
+        const response = createJsonResponse(cachedArchiveSnapshot.value, metadata);
         logNewsApiSuccess(logger, context.env, "snapshot-kv", measurements, startedAt);
         return response;
       }
@@ -486,14 +499,16 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         snapshot.archive.etag,
         archiveCount,
       );
-      const response = createJsonResponse(responseJson, metadata);
+      const responseMetadata =
+        applyNewsRefreshState(metadata, parseNewsRefreshState(refreshStateJson)) ?? metadata;
+      const response = createJsonResponse(responseJson, responseMetadata);
       context.executionCtx.waitUntil(
         (async () => {
           let snapshotWasWritten = false;
           try {
             await context.env.KF3_NOTIF_CACHE.put(archiveSnapshotCacheKey, responseJson, {
               expirationTtl: newsCacheExpirationTtl,
-              metadata,
+              metadata: responseMetadata,
             });
             snapshotWasWritten = true;
             const current = await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY);
@@ -544,6 +559,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
     > | null = null;
     const clientDataVersion = context.req.header(NEWS_DATA_VERSION_HEADER) || null;
     let cachePutDurationMs = 0;
+    let refreshStatePutDurationMs = 0;
     let currentEtagCheckDurationMs = 0;
     let leaseCompletionDurationMs = 0;
     const refreshStartedAt = performance.now();
@@ -591,26 +607,22 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           ? result.currentEtag
           : null;
       const cacheRefreshAvailableAt = new Date(nowMs + NEWS_REFRESH_COOLDOWN_MS).toISOString();
-      const metadata = {
-        ...createNewsCacheMetadata(
-          "merged",
-          result.officialCheckedAt,
-          reusableArchiveEtag,
-          result.newsCount,
-        ),
-        refreshAvailableAt: cacheRefreshAvailableAt,
-      };
-      const responseJson = result.clientJson;
-      const cachePutStartedAt = performance.now();
-      try {
-        await context.env.KF3_NOTIF_CACHE.put(cacheKey, responseJson, {
-          expirationTtl: newsCacheExpirationTtl,
-          metadata,
-        });
-      } finally {
-        cachePutDurationMs = performance.now() - cachePutStartedAt;
-      }
+      const metadata = createNewsCacheMetadata(
+        "merged",
+        result.officialCheckedAt,
+        reusableArchiveEtag,
+        result.newsCount,
+      );
+      const refreshState = createNewsRefreshState(
+        reusableArchiveEtag,
+        result.officialCheckedAt,
+        cacheRefreshAvailableAt,
+      );
+      const shouldWriteNewsData = result.refreshDataSource !== "kv";
+      let newsDataWasWritten = false;
+      let refreshStateWasWritten = false;
       const deleteWrittenCache = async () => {
+        if (!newsDataWasWritten) return;
         try {
           await context.env.KF3_NOTIF_CACHE.delete(cacheKey);
         } catch (cleanupError) {
@@ -620,16 +632,57 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           });
         }
       };
-      try {
-        const currentEtagCheckStartedAt = performance.now();
-        let currentEtag: string | null;
+      const deleteWrittenRefreshState = async () => {
+        if (!refreshStateWasWritten) return;
         try {
-          currentEtag = (await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY))?.etag ?? null;
-        } finally {
-          currentEtagCheckDurationMs = performance.now() - currentEtagCheckStartedAt;
+          await context.env.KF3_NOTIF_CACHE.delete(refreshStateKey);
+        } catch (cleanupError) {
+          logger.error({
+            event: "news_refresh_cache_cleanup_failed",
+            key: refreshStateKey,
+            originalError: serializeArchiveErrorForLog(cleanupError),
+          });
         }
-        if ((result.currentEtag ?? null) !== currentEtag) {
-          throw new NewsArchiveError("etag-conflict", "refreshのKV保存中にcurrentが競合しました");
+      };
+      try {
+        if (shouldWriteNewsData) {
+          const cachePutStartedAt = performance.now();
+          try {
+            await context.env.KF3_NOTIF_CACHE.put(cacheKey, result.clientJson, {
+              expirationTtl: newsCacheExpirationTtl,
+              metadata: createNewsCacheMetadata(
+                "merged",
+                null,
+                reusableArchiveEtag,
+                result.newsCount,
+              ),
+            });
+            newsDataWasWritten = true;
+          } finally {
+            cachePutDurationMs = performance.now() - cachePutStartedAt;
+          }
+
+          const currentEtagCheckStartedAt = performance.now();
+          let currentEtag: string | null;
+          try {
+            currentEtag =
+              (await context.env.KF3_NOTIF_DATA.head(CURRENT_ARCHIVE_KEY))?.etag ?? null;
+          } finally {
+            currentEtagCheckDurationMs = performance.now() - currentEtagCheckStartedAt;
+          }
+          if ((result.currentEtag ?? null) !== currentEtag) {
+            throw new NewsArchiveError("etag-conflict", "refreshのKV保存中にcurrentが競合しました");
+          }
+        }
+
+        const refreshStatePutStartedAt = performance.now();
+        try {
+          await context.env.KF3_NOTIF_CACHE.put(refreshStateKey, JSON.stringify(refreshState), {
+            expirationTtl: newsCacheExpirationTtl,
+          });
+          refreshStateWasWritten = true;
+        } finally {
+          refreshStatePutDurationMs = performance.now() - refreshStatePutStartedAt;
         }
       } catch (error) {
         await deleteWrittenCache();
@@ -655,7 +708,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           event: "news_refresh_control_completion_failed",
           originalError: serializeArchiveErrorForLog(error),
         });
-        await deleteWrittenCache();
+        await Promise.all([deleteWrittenCache(), deleteWrittenRefreshState()]);
         throw error;
       } finally {
         leaseCompletionDurationMs = performance.now() - leaseCompletionStartedAt;
@@ -663,10 +716,31 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       if (leaseCompletion === "lease-mismatch") {
         return createRefreshLeaseExpiredResponse();
       }
-      const officialCheckStateStatus = await updateOfficialCheckState(
-        context.env.KF3_NOTIF_DATA,
-        result.officialCheckedAt,
-      );
+      let officialCheckStateStatus: "scheduled" | "schedule-failed" = "scheduled";
+      try {
+        context.executionCtx.waitUntil(
+          updateOfficialCheckState(context.env.KF3_NOTIF_DATA, result.officialCheckedAt)
+            .then((status) =>
+              logger.log({
+                event: "news_official_check_state_updated",
+                officialCheckedAt: result.officialCheckedAt,
+                status,
+              }),
+            )
+            .catch((error) => {
+              logger.error({
+                event: "news_official_check_state_update_failed",
+                originalError: serializeArchiveErrorForLog(error),
+              });
+            }),
+        );
+      } catch (error) {
+        officialCheckStateStatus = "schedule-failed";
+        logger.error({
+          event: "news_official_check_state_update_failed",
+          originalError: serializeArchiveErrorForLog(error),
+        });
+      }
       const requiresInitialization = !result.currentExists;
       const archiveChanged = result.addedCount > 0 || result.updatedCount > 0;
       const archiveUpdateNeeded = requiresInitialization || archiveChanged;
@@ -727,7 +801,9 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         officialFetchDurationMs: result.officialFetchDurationMs,
         refreshCacheReadDurationMs: result.refreshCacheReadDurationMs,
         archiveReadDurationMs: result.archiveReadDurationMs,
+        newsDataWritten: shouldWriteNewsData,
         cachePutDurationMs,
+        refreshStatePutDurationMs,
         currentEtagCheckDurationMs,
         leaseCompletionDurationMs,
         refreshFinalizationDurationMs: performance.now() - refreshFinalizationStartedAt,

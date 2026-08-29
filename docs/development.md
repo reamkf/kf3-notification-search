@@ -78,7 +78,7 @@ bunx wrangler r2 object put kf3-notif-data/entries_merged_20241107.json --file="
 
 通常の累積archiveは`KF3_NOTIF_DATA/archive/current.json`である。これがない初回だけ`entries_merged_20241107.json`を読み込み、Queue consumerまたは03:15 JSTのscheduled fallbackの初回更新で`archive/current.json`を作成する。backupは`KF3_NOTIF_BACKUP/daily/YYYY/MM/DD/`と`KF3_NOTIF_BACKUP/monthly/YYYY-MM.json`へ保存する。
 
-refresh制御は`KF3_REFRESH_COORDINATOR` Durable ObjectのSQLite stateへ保存し、`getByName("kf3-news")`のleaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。既存R2の`control/news-refresh.json`は初回bootstrap時だけ読み、以降は制御に使わない。KV finalization前にはleaseの残り時間が20秒未満の場合だけ、`renew` RPCで5分間へ延長する。refreshはcurrent、daily、monthly、公式ETag stateを変更せず、公式確認時刻stateを更新する。merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知する。Queue送信に失敗してもrefreshは200を返す。
+refresh制御は`KF3_REFRESH_COORDINATOR` Durable ObjectのSQLite stateへ保存し、`getByName("kf3-news")`のleaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。既存R2の`control/news-refresh.json`は初回bootstrap時だけ読み、以降は制御に使わない。KV finalization前にはleaseの残り時間が20秒未満の場合だけ、`renew` RPCで5分間へ延長する。表示用本文は`kf3-news`、可変時刻は`kf3-news-refresh-state`へ分離し、304で本文を再利用できる場合は本文再保存とpost-write HEADを省略する。refreshはcurrent、daily、monthly、公式ETag stateを変更せず、R2の公式確認時刻stateを`waitUntil()`で更新する。merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知する。background処理に失敗してもrefreshは200を返す。
 
 ## ローカルで実行
 
@@ -118,15 +118,15 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - local testがproduction bucketと本番Queueを変更していない
 - 304経路で公式本文とcurrent本文の不要な処理を行わない
 - `GET /`がStatic Assetsからお知らせ取得なしのSSG済みshellを返す
-- GETのmerged KV hitが外部I/Oを行わず、両KV miss時はR2 snapshotを投影して同じJSONをGET専用KVへwrite-throughする
+- GETのmerged本文KVと可変state KVを並列に読み、本文KV miss時はR2 snapshotを投影して同じJSONをGET専用KVへwrite-throughする
 - GETのKV write-through失敗でもHTTP 200と`news_api_cache_write_failed`ログを維持する
 - refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
-- refreshの公式304かつKV v2/current ETag一致時にR2 current本文を読まずKV JSONを再利用し、data version一致時はレスポンスのnews配列を省略する
+- refreshの公式304かつKV v2/current ETag一致時にR2 current本文を読まずKV JSONを再利用し、本文再保存とpost-write HEADを省略する
 - KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、Durable Objectの`renew` RPCで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す
-- refresh invocation自身は表示用KV、公式確認時刻state、Durable Objectのrefresh制御stateを更新し、archiveを書き込まず、merge差分またはcurrent初期化をQueueへbest-effortで通知する
+- refresh invocation自身は表示用本文KV、可変state KV、Durable Objectのrefresh制御stateを同期更新し、R2公式確認時刻stateと必要なQueue通知を`waitUntil()`へ登録する
 - Queue consumer完了後にcurrent、daily、monthly、公式ETag state、公式確認時刻stateが更新され、refresh由来の表示KVが維持される
 - Queue送信失敗でもrefreshが200を返し、`news_archive_update_enqueue_failed`を記録する
-- refresh本体、scheduled、Queue invocationの処理はリクエスト内で完了し、refreshのQueue送信だけを`waitUntil`へ登録している
+- refresh本体、scheduled、Queue invocationの処理はリクエスト内で完了し、refreshのQueue送信とR2公式確認時刻state更新だけを`waitUntil()`へ登録している
 - Workers LogsとTracingが有効で、refreshの公式fetch、KV、R2のI/O spanをWorkers Observabilityで確認できる
 
 ## Queue consumerをローカルで確認

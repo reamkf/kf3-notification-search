@@ -25,6 +25,7 @@ import {
   type NewsRefreshCompletionResult,
   type NewsRefreshRenewalResult,
 } from "../news-refresh-control";
+import { NEWS_CACHE_KEY, NEWS_REFRESH_STATE_KEY } from "../news-cache-keys";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createWorkerHandler } from "../server";
 import { createNewsCacheMetadata } from "../news-response-metadata";
@@ -76,6 +77,7 @@ type RefreshCoordinatorStub = {
 type TestBindings = {
   env: WorkerBindings;
   dataGets: string[];
+  getCurrentHeadCalls: () => number;
   cacheValues: Map<string, string>;
   cacheMetadata: Map<string, unknown>;
   cachePuts: Array<{
@@ -99,6 +101,7 @@ type BindingOptions = {
   stateEtag?: string;
   checkStateText?: string;
   checkStateEtag?: string;
+  checkStatePutBlock?: Promise<void>;
   conditionalCurrentMismatch?: boolean;
   conditionalCurrentReadMismatch?: boolean;
   currentChangesOnCachePut?: boolean;
@@ -183,6 +186,7 @@ const createBindings = (
     },
     put: async (key: string, value: string) => {
       if (key === OFFICIAL_CHECK_STATE_KEY) {
+        if (options.checkStatePutBlock) await options.checkStatePutBlock;
         checkStateText = value;
         checkStateEtag = `check-state-etag-${checkStateText.length}`;
         return { etag: checkStateEtag } as R2Object;
@@ -219,7 +223,9 @@ const createBindings = (
         expirationTtl: putOptions.expirationTtl,
         metadata: putOptions.metadata,
       });
-      if (options.currentChangesOnCachePut) currentEtag = "changed-current-etag";
+      if (options.currentChangesOnCachePut && key !== NEWS_REFRESH_STATE_KEY) {
+        currentEtag = "changed-current-etag";
+      }
     },
     delete: async (key: string) => {
       cacheDeletes.push(key);
@@ -253,6 +259,7 @@ const createBindings = (
       KF3_REFRESH_COORDINATOR: refreshCoordinatorNamespace,
     },
     dataGets,
+    getCurrentHeadCalls: () => currentHeadCalls,
     cacheValues,
     cacheMetadata,
     cachePuts,
@@ -336,10 +343,10 @@ describe("Worker API handler", () => {
       },
     ];
     setup.cacheValues.set("kf3-news", JSON.stringify(cached));
-    setup.cacheMetadata.set(
-      "kf3-news",
-      createNewsCacheMetadata("archive-fallback", "2026-08-09T12:34:56.789Z"),
-    );
+    setup.cacheMetadata.set("kf3-news", {
+      ...createNewsCacheMetadata("archive-fallback", "2026-08-09T12:34:56.789Z"),
+      refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+    });
     setup.env.CF_VERSION_METADATA = {
       id: "version-1",
       tag: "test",
@@ -383,6 +390,37 @@ describe("Worker API handler", () => {
         totalDurationMs: expect.any(Number),
       }),
     );
+  });
+
+  it("refresh state KVは本文とETagが一致するとGET metadataへ反映する", async () => {
+    const setup = createBindings(null);
+    setup.cacheValues.set("kf3-news", "cached-json");
+    setup.cacheMetadata.set(
+      NEWS_CACHE_KEY,
+      createNewsCacheMetadata("merged", null, "current-etag", 1),
+    );
+    setup.cacheValues.set(
+      NEWS_REFRESH_STATE_KEY,
+      JSON.stringify({
+        version: 1,
+        baseArchiveEtag: "current-etag",
+        officialCheckedAt: "2026-08-09T12:34:56.789Z",
+        refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+      }),
+    );
+
+    const response = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe("2026-08-09T12:34:56.789Z");
+    expect(response.headers.get("X-KF3-News-Refresh-Available-At")).toBe(
+      "2026-08-09T12:39:56.789Z",
+    );
+    expect(setup.dataGets).toEqual([]);
   });
 
   it("cacheは再検証せずそのまま返す", async () => {
@@ -559,6 +597,72 @@ describe("Worker API handler", () => {
         totalDurationMs: expect.any(Number),
       }),
     );
+  });
+
+  it("snapshot KV hitでも対応するrefresh stateをmetadataへ反映する", async () => {
+    const setup = createBindings(null);
+    setup.cacheValues.set("kf3-news-archive-snapshot", "archive-json");
+    setup.cacheMetadata.set(
+      "kf3-news-archive-snapshot",
+      createNewsCacheMetadata("archive-snapshot", "2026-08-09T12:00:00.000Z", "current-etag", 1),
+    );
+    setup.cacheValues.set(
+      NEWS_REFRESH_STATE_KEY,
+      JSON.stringify({
+        version: 1,
+        baseArchiveEtag: "current-etag",
+        officialCheckedAt: "2026-08-09T12:34:56.789Z",
+        refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+      }),
+    );
+
+    const response = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("archive-json");
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe("2026-08-09T12:34:56.789Z");
+    expect(response.headers.get("X-KF3-News-Refresh-Available-At")).toBe(
+      "2026-08-09T12:39:56.789Z",
+    );
+    expect(setup.dataGets).toEqual([]);
+  });
+
+  it("R2 fallbackでも対応するrefresh stateをmetadataへ反映する", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      checkStateText: JSON.stringify({ version: 1, checkedAt: "2026-08-09T12:00:00.000Z" }),
+    });
+    setup.cacheValues.set(
+      NEWS_REFRESH_STATE_KEY,
+      JSON.stringify({
+        version: 1,
+        baseArchiveEtag: "current-etag",
+        officialCheckedAt: "2026-08-09T12:34:56.789Z",
+        refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+      }),
+    );
+    const pending: Promise<unknown>[] = [];
+
+    const response = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+      pending,
+    );
+    await Promise.all(pending);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe("2026-08-09T12:34:56.789Z");
+    expect(response.headers.get("X-KF3-News-Refresh-Available-At")).toBe(
+      "2026-08-09T12:39:56.789Z",
+    );
+    expect(setup.cachePuts[0].metadata).toMatchObject({
+      officialCheckedAt: "2026-08-09T12:34:56.789Z",
+      refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+    });
   });
 
   it("cache missのKV write失敗でもHTTP 200を維持する", async () => {
@@ -751,14 +855,21 @@ describe("Worker API handler", () => {
       "2026-08-09T12:39:56.789Z",
     );
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(setup.cachePuts[0].expirationTtl).toBe(86400);
-    expect(setup.cachePuts[0].metadata).toEqual({
-      ...createNewsCacheMetadata(
-        "merged",
-        "2026-08-09T12:34:56.789Z",
-        null,
-        MIN_OFFICIAL_ENTRY_COUNT,
-      ),
+    expect(setup.cachePuts).toHaveLength(2);
+    expect(setup.cachePuts[0]).toMatchObject({
+      key: NEWS_CACHE_KEY,
+      expirationTtl: 86400,
+      metadata: createNewsCacheMetadata("merged", null, null, MIN_OFFICIAL_ENTRY_COUNT),
+    });
+    expect(setup.cachePuts[1]).toMatchObject({
+      key: NEWS_REFRESH_STATE_KEY,
+      expirationTtl: 86400,
+      metadata: undefined,
+    });
+    expect(JSON.parse(setup.cachePuts[1].value)).toEqual({
+      version: 1,
+      baseArchiveEtag: null,
+      officialCheckedAt: "2026-08-09T12:34:56.789Z",
       refreshAvailableAt: "2026-08-09T12:39:56.789Z",
     });
     const cachedGetResponse = await callFetch(
@@ -838,7 +949,9 @@ describe("Worker API handler", () => {
     });
     expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe(officialCheckedAt);
     expect(response.headers.get("X-KF3-News-Refresh-Available-At")).toBe(refreshAvailableAt);
-    expect(setup.cachePuts[0].metadata).toMatchObject({ officialCheckedAt });
+    expect(JSON.parse(setup.cacheValues.get(NEWS_REFRESH_STATE_KEY) ?? "null")).toMatchObject({
+      officialCheckedAt,
+    });
   });
 
   it("refresh成功後に表示KVが期限切れしても公式確認日時を維持する", async () => {
@@ -848,12 +961,15 @@ describe("Worker API handler", () => {
       fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
       clock: () => Date.parse(officialCheckedAt),
     });
+    const pending: Promise<unknown>[] = [];
     const refreshResponse = await callFetch(
       handler,
       new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
       setup.env,
+      pending,
     );
     expect(refreshResponse.status).toBe(200);
+    await Promise.all(pending);
 
     setup.cacheValues.delete("kf3-news");
     setup.cacheMetadata.delete("kf3-news");
@@ -868,6 +984,28 @@ describe("Worker API handler", () => {
     expect(getResponse.status).toBe(200);
     expect(getResponse.headers.get("X-KF3-News-Official-Checked-At")).toBe(officialCheckedAt);
     expect(setup.queueMessages).toHaveLength(0);
+  });
+
+  it("official-check-state保存はrefreshレスポンスを待たせない", async () => {
+    let releasePut!: () => void;
+    const checkStatePutBlock = new Promise<void>((resolve) => {
+      releasePut = resolve;
+    });
+    const document = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
+    const setup = createBindings(JSON.stringify(document), undefined, { checkStatePutBlock });
+    const pending: Promise<unknown>[] = [];
+    const response = await callFetch(
+      createWorkerHandler({ fetcher: async () => createResponse(document) }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+      pending,
+    );
+
+    expect(response.status).toBe(200);
+    expect(pending).toHaveLength(1);
+
+    releasePut();
+    await Promise.all(pending);
   });
 
   it("refreshで既存お知らせの変更だけを検出した場合はQueueへ通知する", async () => {
@@ -1045,12 +1183,17 @@ describe("Worker API handler", () => {
     expect(payload).not.toHaveProperty("news");
     expect(response.headers.get("X-KF3-News-Data-Version")).toBe("current-etag");
     expect(setup.dataGets).not.toContain(CURRENT_ARCHIVE_KEY);
+    expect(setup.getCurrentHeadCalls()).toBe(1);
     expect(setup.cachePuts).toHaveLength(1);
-    expect(setup.cachePuts[0].value).toBe(clientJson);
-    expect(setup.cachePuts[0].metadata).toEqual({
-      ...createNewsCacheMetadata("merged", "2026-08-09T12:34:56.789Z", "current-etag", 1),
+    expect(setup.cachePuts[0].key).toBe(NEWS_REFRESH_STATE_KEY);
+    expect(JSON.parse(setup.cachePuts[0].value)).toEqual({
+      version: 1,
+      baseArchiveEtag: "current-etag",
+      officialCheckedAt: "2026-08-09T12:34:56.789Z",
       refreshAvailableAt: "2026-08-09T12:39:56.789Z",
     });
+    expect(setup.cachePuts[0].metadata).toBeUndefined();
+    expect(setup.cacheValues.get(NEWS_CACHE_KEY)).toBe(clientJson);
     expect(setup.queueMessages).toHaveLength(0);
   });
 
@@ -1145,7 +1288,7 @@ describe("Worker API handler", () => {
     await Promise.all(pending);
 
     expect(response.status).toBe(200);
-    expect(setup.cachePuts).toHaveLength(1);
+    expect(setup.cachePuts).toHaveLength(2);
     expect(setup.queueMessages).toHaveLength(0);
     expect(logs).toContainEqual(
       expect.objectContaining({ event: "news_archive_update_enqueue_failed" }),
@@ -1177,7 +1320,7 @@ describe("Worker API handler", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(pending).toHaveLength(1);
+    expect(pending).toHaveLength(2);
     expect(setup.queueMessages).toHaveLength(0);
 
     releaseSend();
@@ -1235,7 +1378,8 @@ describe("Worker API handler", () => {
     );
 
     expect(response.status).toBe(503);
-    expect(setup.cacheDeletes).toContain("kf3-news");
+    expect(setup.cacheDeletes).toContain(NEWS_CACHE_KEY);
+    expect(setup.cacheDeletes).toContain(NEWS_REFRESH_STATE_KEY);
     expect(setup.queueMessages).toHaveLength(0);
     expect(logs).toContainEqual(
       expect.objectContaining({ event: "news_refresh_control_completion_failed" }),
@@ -1318,7 +1462,7 @@ describe("Worker API handler", () => {
       setup.env,
     );
     expect(response.status).toBe(202);
-    expect(setup.cachePuts).toHaveLength(1);
+    expect(setup.cachePuts).toHaveLength(2);
     expect(setup.queueMessages).toHaveLength(0);
   });
 
@@ -1337,7 +1481,7 @@ describe("Worker API handler", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(setup.cachePuts).toHaveLength(1);
+    expect(setup.cachePuts).toHaveLength(2);
     expect(setup.cacheDeletes).not.toContain("kf3-news");
     expect(setup.cacheValues.get("kf3-news")).not.toBe("old-cache");
     expect(setup.queueMessages).toHaveLength(1);
@@ -1359,7 +1503,7 @@ describe("Worker API handler", () => {
     );
 
     expect(response.status).toBe(202);
-    expect(setup.cachePuts).toHaveLength(1);
+    expect(setup.cachePuts).toHaveLength(2);
     expect(setup.cacheDeletes).not.toContain("kf3-news");
     expect(setup.cacheValues.get("kf3-news")).toBe("newer-refresh-cache");
     expect(setup.queueMessages).toHaveLength(0);

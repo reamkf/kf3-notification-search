@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyNewsRefreshState,
   createNewsCacheMetadata,
+  createNewsRefreshState,
   createNewsResponseHeaders,
   isReusableNewsCacheMetadata,
   NEWS_CACHE_METADATA_VERSION,
   NEWS_OFFICIAL_CHECKED_AT_HEADER,
   NEWS_REFRESH_AVAILABLE_AT_HEADER,
   parseNewsCacheMetadata,
+  parseNewsRefreshState,
   parseNewsResponseHeaders,
   toNewsResponseMetadata,
 } from "../news-response-metadata";
@@ -110,6 +113,25 @@ describe("news response metadata", () => {
       refreshAvailableAt: null,
       dataVersion: null,
     });
+  });
+
+  it("merges a matching refresh state without trusting a mismatched state", () => {
+    const metadata = createNewsCacheMetadata("merged", null, "archive-etag", 12);
+    const state = createNewsRefreshState("archive-etag", officialCheckedAt, refreshAvailableAt);
+
+    expect(applyNewsRefreshState(metadata, state)).toEqual({
+      ...metadata,
+      officialCheckedAt,
+      refreshAvailableAt,
+    });
+    expect(applyNewsRefreshState(metadata, { ...state, baseArchiveEtag: "other-etag" })).toEqual(
+      metadata,
+    );
+  });
+
+  it("rejects invalid refresh state", () => {
+    expect(parseNewsRefreshState('{"version":1,"baseArchiveEtag":null}')).toBeNull();
+    expect(parseNewsRefreshState(null)).toBeNull();
   });
 
   it("creates response headers and reads official and cooldown times back", () => {

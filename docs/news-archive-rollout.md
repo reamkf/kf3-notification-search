@@ -5,10 +5,10 @@
 本番Workerは次の処理を提供する。
 
 - `GET /`はStatic Assetsからお知らせ取得を行わないSSG済みshellを返す。
-- `GET /api/kf3-news`はmerged結果用KVを最優先し、値がない場合はGET専用snapshot KVを返す。両方のKV miss時はR2のcurrentまたはlegacy snapshotを投影してGET専用KVへwrite-throughする。
-- `POST /api/kf3-news/refresh`は公式データを取得、検証、mergeし、成功結果を表示用KVへ保存する。`X-KF3-News-Data-Version`が一致する場合は`{changed:false, metadata}`、それ以外は`{news, metadata}`形式で200を返す。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、送信失敗でも200を返す。実行中は202、cooldownは429、依存障害は503を返す。
+- `GET /api/kf3-news`はmerged本文KVと可変state KVを最優先し、本文がない場合はGET専用snapshot KVを返す。両方の本文KV miss時はR2のcurrentまたはlegacy snapshotを投影してGET専用KVへwrite-throughする。
+- `POST /api/kf3-news/refresh`は公式データを取得、検証、mergeし、必要な本文を表示用本文KVへ保存する。可変refresh stateは別KVへ保存し、公式確認時刻stateの更新とQueue送信は`waitUntil()`へ登録する。`X-KF3-News-Data-Version`が一致する場合は`{changed:false, metadata}`、それ以外は`{news, metadata}`形式で200を返す。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知し、background処理の失敗でも200を返す。実行中は202、cooldownは429、同期依存障害は503を返す。
 - refreshは`KF3_REFRESH_COORDINATOR` Durable ObjectのSQLite stateと5分cooldownで制限し、Cloudflare Rate LimitingとWAFで公開routeを保護する。
-- refresh invocation自身は表示用KV、公式確認時刻state、Durable Objectのrefresh制御stateを変更し、current、daily、monthly、公式ETag stateを書き込まない。
+- refresh invocation自身は表示用本文KV、可変state KV、Durable Objectのrefresh制御stateを同期更新し、R2公式確認時刻stateの更新を`waitUntil()`へ登録する。current、daily、monthly、公式ETag stateは書き込まない。
 - Queue consumerは別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行し、scheduledの`updateNewsArchive`は03:15 JSTのfallbackとして`trigger=scheduled`で実行する。両方がcurrent、daily、monthly、公式ETag state、公式確認時刻stateを更新する。
 - Queue consumerはheartbeatを送らず、refresh由来の表示KVを維持する。batch size 1、concurrency 1、更新失敗時は60秒後にretryし、重複messageは既存のETag、CAS、304経路で許容する。
 - restoreはlocalhost専用Workerとしてsnapshotからcurrentを条件付きで復元する。
@@ -31,10 +31,10 @@
 | 本番Worker               | 現HEADに対応するWorker versionへ反映され、`GET /`、GET、refresh、Queue consumer、scheduled fallbackが有効                                                                                                                                                        |
 | Queue                    | `kf3-notif-archive-update`を作成済みで、producerとconsumerが本番Workerに設定され、batch size 1、concurrency 1である                                                                                                                                              |
 | HTTP `/`                 | Static AssetsからSSG済みshellだけを返し、レスポンス中にお知らせ配列を含まず、Workerを起動しない                                                                                                                                                                  |
-| HTTP GET                 | merged KVを最優先し、次にGET専用snapshot KVを読む。両方のmiss時はR2 currentまたはlegacyを投影してsnapshot KVへwrite-throughし、write失敗でも200を維持する                                                                                                        |
-| HTTP refresh             | 実行中は202、成功時は200とし、data version一致時は`{changed:false, metadata}`、それ以外は`{news, metadata}`を返してKVへ同じ表示用データを保存する。304かつKV v2/current ETag一致時はcurrent本文を読まず再利用する。merge差分またはcurrent未作成をQueueへ通知する |
+| HTTP GET                 | merged本文KVと可変state KVを並列に読み、次にGET専用snapshot KVを読む。本文KVのmiss時はR2 currentまたはlegacyを投影してsnapshot KVへwrite-throughし、write失敗でも200を維持する                                                                                   |
+| HTTP refresh             | 実行中は202、成功時は200とし、data version一致時は`{changed:false, metadata}`、それ以外は`{news, metadata}`を返す。304かつKV v2/current ETag一致時は本文再保存とpost-write HEADを省き、可変state KVだけを更新する。merge差分またはcurrent未作成をQueueへ通知する |
 | refresh制御              | Coordinatorの同一DOでleaseを直列化し、実行中は202、5分cooldown中は429、依存障害は503を返す。無条件上書きを行わない                                                                                                                                               |
-| refresh書き込み境界      | refresh invocation自身はcurrent、daily、monthly、公式ETag stateを書き込まず、公式確認時刻stateとCoordinator stateだけを更新する。Queue送信失敗でも200を返す                                                                                                      |
+| refresh書き込み境界      | refresh invocation自身はcurrent、daily、monthly、公式ETag stateを書き込まず、表示用KVとCoordinator stateを同期更新する。R2公式確認時刻stateとQueue送信は`waitUntil()`へ登録し、失敗しても200を返す                                                               |
 | Queue consumer           | 別invocationで`trigger=queue`を実行し、batch size 1、concurrency 1、60秒後retry、heartbeatなし、表示KV維持を確認する                                                                                                                                             |
 | Cron Trigger             | `15 18 * * *`を1本だけ登録し、Queueのfallbackとして毎日03:15 JSTに実行される                                                                                                                                                                                     |
 | archive update           | Queue consumerとscheduled fallbackが同じETag/CAS/304、CAS更新、daily/monthly backup、公式ETag state保存を行う                                                                                                                                                    |
@@ -66,27 +66,27 @@ refreshは公開APIであり、アプリケーション内のDurable Object leas
 ## 受け入れ条件
 
 - [ ] `GET /`がStatic Assetsからお知らせ取得なしのSSG済みshellを返し、Workerを起動しない。
-- [ ] GETのKV hitがKVだけで完了する。
-- [ ] current更新時にGET専用snapshot KVを削除し、Queueではmerged KVを維持する。
+- [ ] GETのKV hitが本文KVと可変state KVの読み込みだけで完了する。
+- [ ] current更新時にGET専用snapshot KVと可変state KVを削除し、Queueでは本文KVと可変state KVを維持する。
 - [ ] merged KVとGET専用snapshot KVの両方がmissした場合、R2 currentまたはlegacyを投影し、同じJSONをTTL 86400秒でsnapshot KVへwrite-throughする。write失敗でも200を維持し、公式取得とmergeを行わない。
-- [ ] refresh実行中が202と`Retry-After`を返し、成功時は200とし、data version一致時は`{changed:false, metadata}`、それ以外は`{news, metadata}`を返して表示用KVへ保存する。
+- [ ] refresh実行中が202と`Retry-After`を返し、成功時は200とし、data version一致時は`{changed:false, metadata}`、それ以外は`{news, metadata}`を返して必要な本文KVと可変state KVへ保存する。
 - [ ] refreshのcooldownが429と`Retry-After`を返す。
 - [ ] KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、Coordinatorの`renew` RPCで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す。
 - [ ] KV保存中にrefresh leaseが失効または別tokenへ移行した場合は、他refreshのKVを削除せず、Queueへ通知せず202を返す。
 - [ ] refreshのR2、公式、検証、merge、KV保存の依存障害が503を返す。
-- [ ] refreshがcurrent、daily、monthly、公式ETag stateを変更せず、公式確認時刻stateを更新する。
+- [ ] refreshがcurrent、daily、monthly、公式ETag stateを変更せず、R2公式確認時刻state更新を`waitUntil()`へ登録する。
 - [ ] currentが存在し、merge差分がないrefreshはQueue messageを生成しない。
 - [ ] merge差分があるrefreshは`refresh-detected-change` messageを1件生成する。
 - [ ] current未作成のrefreshはmerge差分が0でも`refresh-current-missing`と`requiresInitialization=true`のmessageを1件生成する。
-- [ ] Queue送信失敗でもrefreshは200とKV更新を維持する。
-- [ ] 公式304かつKV v2/current ETag一致時はR2 current本文を読まず、同じKV JSONをTTLとmetadataだけ更新して再保存する。
+- [ ] Queue送信またはR2公式確認時刻state更新に失敗してもrefreshは200とKV更新を維持する。
+- [ ] 公式304かつKV v2/current ETag一致時はR2 current本文を読まず、本文KVを再保存せず、可変state KVだけを更新する。
 - [ ] Queue consumerが別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行し、成功時にackする。
 - [ ] Queue consumer成功後にcurrentへ変更が反映され、公式ETag stateと公式確認時刻stateが更新され、refresh由来の表示KVが維持される。
 - [ ] Queue consumerがbatch size 1、concurrency 1、heartbeatなし、失敗時60秒後retryで動作する。
 - [ ] Queue consumerとscheduled fallbackが競合してもcurrentを無条件PUTしない。
 - [ ] scheduled fallbackはQueueの成否に関係なく毎日03:15 JSTに実行される。
 - [ ] refresh、Queue consumer、scheduled fallbackが別invocationとしてCPU時間へ記録される。
-- [ ] shell、GET、refresh、scheduled、Queue consumerを別invocationとして確認でき、refreshのQueue送信だけが`waitUntil`へ登録される。
+- [ ] shell、GET、refresh、scheduled、Queue consumerを別invocationとして確認でき、refreshのQueue送信とR2公式確認時刻state更新だけが`waitUntil()`へ登録される。
 - [ ] 手動操作なしで毎日03:15 JSTにscheduled fallbackが実行される。
 - [ ] Healthchecks.ioからCron失敗またはCron欠落の通知を実受信できる。
 - [ ] 公式サイトから消えたIDがQueue consumerまたはscheduled fallbackのarchiveに残り、同一IDの更新には公式内容が採用される。
