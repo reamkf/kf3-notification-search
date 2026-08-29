@@ -1,4 +1,10 @@
-import type { Fetcher, KVNamespace, Queue, R2Bucket } from "@cloudflare/workers-types/experimental";
+import type {
+  Fetcher,
+  KVNamespace,
+  Queue,
+  R2Bucket,
+  WorkerVersionMetadata,
+} from "@cloudflare/workers-types/experimental";
 import type { NewsArchiveUpdateMessage } from "./news-archive-queue";
 
 type Head = {
@@ -12,6 +18,7 @@ declare global {
     KF3_NOTIF_DATA: R2Bucket;
     KF3_NOTIF_BACKUP: R2Bucket;
     KF3_ARCHIVE_UPDATE_QUEUE: Queue<NewsArchiveUpdateMessage>;
+    CF_VERSION_METADATA?: WorkerVersionMetadata;
     HEALTHCHECKS_PING_URL?: string;
   };
 }
@@ -25,6 +32,7 @@ declare module "hono" {
       KF3_NOTIF_DATA: R2Bucket;
       KF3_NOTIF_BACKUP: R2Bucket;
       KF3_ARCHIVE_UPDATE_QUEUE: Queue<NewsArchiveUpdateMessage>;
+      CF_VERSION_METADATA?: WorkerVersionMetadata;
       HEALTHCHECKS_PING_URL?: string;
     };
   }
