@@ -1,7 +1,7 @@
 name = "kf3notif"
 main = "./dist/index.js"
 compatibility_date = "2024-04-01"
-compatibility_flags = ["nodejs_compat"]
+compatibility_flags = ["nodejs_compat", "rpc"]
 
 [version_metadata]
 binding = "CF_VERSION_METADATA"
@@ -49,3 +49,11 @@ head_sampling_rate = 1
 [observability.traces]
 enabled = true
 head_sampling_rate = 1
+
+[[durable_objects.bindings]]
+name = "KF3_REFRESH_COORDINATOR"
+class_name = "NewsRefreshCoordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NewsRefreshCoordinator"]

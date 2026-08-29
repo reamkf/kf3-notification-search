@@ -78,7 +78,7 @@ bunx wrangler r2 object put kf3-notif-data/entries_merged_20241107.json --file="
 
 通常の累積archiveは`KF3_NOTIF_DATA/archive/current.json`である。これがない初回だけ`entries_merged_20241107.json`を読み込み、Queue consumerまたは03:15 JSTのscheduled fallbackの初回更新で`archive/current.json`を作成する。backupは`KF3_NOTIF_BACKUP/daily/YYYY/MM/DD/`と`KF3_NOTIF_BACKUP/monthly/YYYY-MM.json`へ保存する。
 
-refresh制御metadataは表示用KVやarchiveとは別にR2へ保存し、R2 CAS leaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。KV finalization前にはleaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長する。refreshはcurrent、daily、monthly、公式ETag stateを変更せず、公式確認時刻stateを更新する。merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知する。Queue送信に失敗してもrefreshは200を返す。
+refresh制御は`KF3_REFRESH_COORDINATOR` Durable ObjectのSQLite stateへ保存し、`getByName("kf3-news")`のleaseと5分cooldownで公開refreshの同時実行と連続実行を制限する。既存R2の`control/news-refresh.json`は初回bootstrap時だけ読み、以降は制御に使わない。KV finalization前にはleaseの残り時間が20秒未満の場合だけ、`renew` RPCで5分間へ延長する。refreshはcurrent、daily、monthly、公式ETag stateを変更せず、公式確認時刻stateを更新する。merge差分がある場合またはcurrentが未作成の場合に`kf3-notif-archive-update` Queueへbest-effortで通知する。Queue送信に失敗してもrefreshは200を返す。
 
 ## ローカルで実行
 
@@ -94,7 +94,7 @@ Worker、ローカルR2、scheduled handler、Queue consumerを確認する場�
 VITE_SITE_ORIGIN=http://127.0.0.1:8787 bun run preview
 ```
 
-`bun run preview`のR2はローカルストレージである。本番bucketへ接続する`--remote`操作をローカル確認で使用しない。
+`bun run preview`のR2とDurable Objectはローカルストレージである。本番bucketへ接続する`--remote`操作をローカル確認で使用しない。`bun run dev`はHonoXのUI開発用で、CloudflareのVite開発プロキシでは同じWorker内のDurable Objectを実行できないため、refreshを含むWorker統合確認には`bun run preview`を使用する。
 
 `GET /`はStatic AssetsからSSG済みshellを返す。ブラウザはHTML解析中に`GET /api/kf3-news`のpreloadを開始し、hydration後のIslandがその結果を利用する。必要に応じて`POST /api/kf3-news/refresh`を別リクエストで呼ぶ。Workerを起動せず、公式取得やmergeのCPU時間をshellへ持ち込まない。
 
@@ -122,8 +122,8 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?format=json&cron=15+18+*+*
 - GETのKV write-through失敗でもHTTP 200と`news_api_cache_write_failed`ログを維持する
 - refresh実行中が202、成功が200、cooldownが429、依存障害が503になる
 - refreshの公式304かつKV v2/current ETag一致時にR2 current本文を読まずKV JSONを再利用し、data version一致時はレスポンスのnews配列を省略する
-- KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す
-- refresh invocation自身は表示用KV、公式確認時刻state、refresh制御metadataを更新し、archiveを書き込まず、merge差分またはcurrent初期化をQueueへbest-effortで通知する
+- KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、Durable Objectの`renew` RPCで5分間へ延長し、延長できない場合はKVへ書き込まず202を返す
+- refresh invocation自身は表示用KV、公式確認時刻state、Durable Objectのrefresh制御stateを更新し、archiveを書き込まず、merge差分またはcurrent初期化をQueueへbest-effortで通知する
 - Queue consumer完了後にcurrent、daily、monthly、公式ETag state、公式確認時刻stateが更新され、refresh由来の表示KVが維持される
 - Queue送信失敗でもrefreshが200を返し、`news_archive_update_enqueue_failed`を記録する
 - refresh本体、scheduled、Queue invocationの処理はリクエスト内で完了し、refreshのQueue送信だけを`waitUntil`へ登録している
@@ -171,7 +171,7 @@ bunx wrangler secret put HEALTHCHECKS_PING_URL
 
 ### Cloudflare Rate LimitingとWAF
 
-refreshは公開routeのため、アプリケーションのR2 CAS leaseと5分cooldownに加え、Cloudflare Rate LimitingとWAFを推奨する。
+refreshは公開routeのため、アプリケーションのDurable Object leaseと5分cooldownに加え、Cloudflare Rate LimitingとWAFを推奨する。
 
 - Rate Limitingは`POST /api/kf3-news/refresh`に限定し、送信元IPごとの短時間反復POSTを抑制する。
 - GET `/`と`GET /api/kf3-news`へrefresh用の厳しい制限を適用しない。

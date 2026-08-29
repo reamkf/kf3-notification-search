@@ -4,7 +4,7 @@
 
 本書は、ページ表示と表示用お知らせAPIの仕様を定義する。`GET /`はStatic AssetsからSSG済みshellを返し、Workerを起動せず、お知らせ取得も行わない。ブラウザはHTML解析中に`GET /api/kf3-news`のpreloadを開始し、hydration後のIslandがその結果を利用する。必要に応じて`POST /api/kf3-news/refresh`を別リクエストとして呼び出す。
 
-表示用APIは永続archiveを更新しない。`archive/current.json`、daily、monthly、公式ETag stateはQueue consumerまたは03:15 JSTのscheduled fallbackが更新する。公式確認時刻は独立した`official-check-state`へ、refresh、Queue consumer、scheduled fallbackの公式確認成功時に保存する。refreshは表示用KV、公式確認時刻state、refresh制御metadataを変更し、merge差分がある場合またはcurrentが未作成の場合はQueueへbest-effortで通知する。保存形式と共通契約は [お知らせ機能共通仕様](./news-spec.md)、永続archive更新は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md) を参照する。
+表示用APIは永続archiveを更新しない。`archive/current.json`、daily、monthly、公式ETag stateはQueue consumerまたは03:15 JSTのscheduled fallbackが更新する。公式確認時刻は独立した`official-check-state`へ、refresh、Queue consumer、scheduled fallbackの公式確認成功時に保存する。refreshは表示用KV、公式確認時刻state、`KF3_REFRESH_COORDINATOR` Durable Objectのstateを変更し、merge差分がある場合またはcurrentが未作成の場合はQueueへbest-effortで通知する。保存形式と共通契約は [お知らせ機能共通仕様](./news-spec.md)、永続archive更新は [お知らせアーカイブ更新仕様](./news-archive-update-spec.md) を参照する。
 
 ## `GET /`
 
@@ -45,7 +45,7 @@ APIはsnapshotの入力順を維持して返す。日付順への並べ替えは
 
 1. KVの`kf3-news`を`getWithMetadata`で読み込む。
 2. 値が存在すれば、保存済みのJSON配列を本文へ返す。
-3. R2、公式サーバー、refresh制御metadataへアクセスしない。
+3. R2、公式サーバー、refresh制御stateへアクセスしない。
 4. metadataがあればレスポンスヘッダーへ変換する。metadataがない旧形式のKV valueや不正なmetadataでも、お知らせ配列を壊さずsource不明、取得日時不明として返す。
 
 KV hitから公式データ取得の失敗や`archive-fallback`を推測してはならない。
@@ -81,23 +81,23 @@ GETのR2 snapshot、KV読み込み、またはレスポンス生成の失敗は`
 
 refreshは、表示用データを最新化する公開APIである。公式データの取得、公式レスポンスの検証、currentまたはlegacyとのmerge、クライアント用配列への投影、KV保存を同じrefreshリクエストで完了する。merge差分がある場合またはcurrentが未作成の場合は、永続archive更新を別invocationへ委譲するQueue messageをbest-effortで送信する。
 
-refresh成功時は、保存した表示用配列と表示用metadataを本文へ返す。通常は`{ "news": [...], "metadata": { ... } }`形式とし、リクエストの`X-KF3-News-Data-Version`が今回の表示データと一致する場合だけ`{ "changed": false, "metadata": { ... } }`形式で`news`を省略する。refreshは`archive/current.json`、legacy、daily、monthly、公式ETag stateを更新しないが、独立した公式確認時刻stateは更新する。保存済みstateとcurrent ETagが対応する場合は条件付き公式取得を利用できる。公式が304を返し、表示用KV metadataがv2かつ`baseArchiveEtag`とcurrent ETagが一致する場合は、KVのJSON文字列をR2 currentの本文処理なしで再利用する。一致しない場合はcurrentをETag条件付きで読み込む従来経路へfallbackする。refreshから条件付き取得状態を保存せず、Queue consumerまたはscheduled fallbackのETag最適化状態へ影響を与えない。merge差分またはcurrent未作成を通知するQueue送信に失敗しても、refreshのKV保存とHTTP 200を維持する。
+refresh成功時は、保存した表示用配列と表示用metadataを本文へ返す。通常は`{ "news": [...], "metadata": { ... } }`形式とし、リクエストの`X-KF3-News-Data-Version`が今回の表示データと一致する場合だけ`{ "changed": false, "metadata": { ... } }`形式で`news`を省略する。refreshは`archive/current.json`、legacy、daily、monthly、公式ETag stateを更新しないが、独立した公式確認時刻stateとDurable Objectのrefresh制御stateは更新する。保存済みstateとcurrent ETagが対応する場合は条件付き公式取得を利用できる。公式が304を返し、表示用KV metadataがv2かつ`baseArchiveEtag`とcurrent ETagが一致する場合は、KVのJSON文字列をR2 currentの本文処理なしで再利用する。一致しない場合はcurrentをETag条件付きで読み込む従来経路へfallbackする。refreshから条件付き取得状態を保存せず、Queue consumerまたはscheduled fallbackのETag最適化状態へ影響を与えない。merge差分またはcurrent未作成を通知するQueue送信に失敗しても、refreshのKV保存とHTTP 200を維持する。
 
 クライアントはGETレスポンスの`X-KF3-News-Data-Version`を保持し、refresh時に同じヘッダーで送信する。ヘッダーがない場合、または今回の表示データと一致しない場合は、refreshは通常どおり`news`全件を返す。`changed:false`を受け取ったクライアントは保持中の配列をそのまま使い、metadataだけを更新する。画面の「最終取得」とstale判定は`officialCheckedAt`を使い、refresh後のcooldown判定は`refreshAvailableAt`を使う。refresh成功時にKVへ保存した`refreshAvailableAt`はGETのKV hitでも返し、クライアントはその値でボタンを無効化する。値がない旧形式のKVでは、クライアントはローカルの推定値でボタンを無効化せず、refresh APIの制御結果に従う。
 
 ### refresh制御
 
-refreshはR2のCAS leaseと5分cooldownで制限する。
+refreshは`KF3_REFRESH_COORDINATOR` Durable ObjectのSQLite stateと5分cooldownで制限する。Coordinator名は`kf3-news`で固定し、1つのお知らせフィード全体を1つのcoordination単位として扱う。
 
-1. 制御metadataをR2から読み、CAS条件付きPUTでleaseを取得する。
-2. lease取得競合時は別refreshが実行中として扱い、公式取得を開始しない。
-3. lease取得後、最後の成功refreshから5分未満の場合はcooldownとして拒否し、公式取得を開始しない。
-4. 公式取得、検証、mergeの完了後、KV finalization前にleaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
-5. KV保存とcurrent ETag確認が完了したら、completionでtokenとlease期限を検証してleaseを解放し、成功時刻を制御metadataへCAS保存する。
-6. 公式取得またはKV保存に失敗した場合もleaseを解放する。失敗したrefreshはcooldownを開始しない。
-7. leaseとcooldownの判定、取得、延長、解放はCASで行い、無条件上書きに切り替えない。
+1. `getByName("kf3-news")`でCoordinatorを取得し、`acquire(nowMs)` RPCを呼び出す。
+2. Coordinator内でrunningと有効なcooldownを判定し、実行中またはcooldown中なら公式取得を開始しない。
+3. acquire成功時はtokenとlease期限をDO stateへ保存し、呼び出し元へleaseを返す。
+4. 公式取得、検証、mergeの完了後、KV finalization前にleaseの残り時間が20秒未満の場合だけ、`renew(token, nowMs, leaseMs)` RPCで5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
+5. KV保存とcurrent ETag確認が完了したら、`complete(token, "success", nowMs)` RPCでtokenとlease期限を検証してcooldownへ遷移する。
+6. 公式取得またはKV保存に失敗した場合は`complete(token, "failure", nowMs)` RPCでidleへ戻す。失敗したrefreshはcooldownを開始しない。
+7. DO stateは初回bootstrap時だけ既存R2の`control/news-refresh.json`から引き継ぐ。bootstrap後はR2 controlを読み書きせず、CoordinatorのStorageだけを正本として扱う。
 
-制御metadataの内容は表示用KVやarchiveの内容と混同せず、公式ETag stateとして利用しない。refreshの同時実行、cooldown、制御metadataのCAS失敗はHTTP契約へ変換する。
+Coordinatorのstateは表示用KV、archive、公式ETag stateと分離する。refreshの同時実行、cooldown、RPCまたはstate保存の失敗はHTTP契約へ変換する。
 
 ### HTTP契約
 
@@ -106,7 +106,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 |  202 | refreshが実行中、または実行中にleaseが失効し、成功結果を確定できない                                   | 他refreshのKVを削除せず、`Retry-After`を付ける                                                         |
 |  200 | lease取得済みでrefreshを実行し、公式取得、検証、merge、KV保存に成功した。Queue送信失敗は成功を妨げない | `X-KF3-News-Data-Version`一致時は`{changed:false, metadata}`、それ以外は`{news, metadata}`を本文で返す |
 |  429 | 最後の成功から5分未満                                                                                  | 公式取得を開始せず、`Retry-After`を付ける                                                              |
-|  503 | R2 lease、制御metadata、公式取得、検証、merge、KV保存などの依存処理に失敗した                          | 表示用KVとarchiveを変更せずエラーを返す                                                                |
+|  503 | Durable Object RPC、制御state、公式取得、検証、merge、KV保存などの依存処理に失敗した                   | 表示用KVとarchiveを変更せずエラーを返す                                                                |
 |  405 | POST以外でrefresh endpointを呼び出した                                                                 | `Allow: POST`を返す                                                                                    |
 
 200レスポンスの本文は、通常は`{news, metadata}`オブジェクトとする。`news`は表示用のお知らせ配列、`metadata`はcache metadataの`version`、`source`、`officialCheckedAt`、`baseArchiveEtag`、`newsCount`を含む。refresh成功時は、公式確認時刻とは別に`refreshAvailableAt`（サーバー側cooldown終了時刻）を含め、表示用KV metadataにも保存する。リクエストの`X-KF3-News-Data-Version`が`baseArchiveEtag`と一致する場合は、`news`を含めず`{changed:false, metadata}`を返す。GETだけが成功時にトップレベル配列を返す。
@@ -143,7 +143,7 @@ refreshはR2のCAS leaseと5分cooldownで制限する。
 2. 公式レスポンスを取得し、HTTPステータス、本文サイズ、JSON構造、必須フィールド、ID一意性、安全性閾値を検証する。
 3. 公式データの新規または変更項目を検証し、IDをキーにsnapshotとmergeする。同じIDには公式データを採用し、snapshotにだけ存在するIDは残す。
 4. 統合結果をクライアント用配列へ投影し、JSON.stringifyを1回だけ実行して`clientJson`を作る。304 fast pathでは既存KVのJSON文字列を`clientJson`としてそのまま使う。
-5. refresh leaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
+5. refresh leaseの残り時間が20秒未満の場合だけ、Coordinatorの`renew` RPCで同じtokenのleaseを5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
 6. 表示用KV `kf3-news`へ`clientJson`をTTL 86400秒で保存し、metadataの`version`を2、`source`を`merged`、`officialCheckedAt`を公式確認時刻、`newsCount`を配列件数として記録する。統合結果がcurrentの正確な投影である場合だけ`baseArchiveEtag`へcurrent ETagを記録し、それ以外は`null`とする。`refreshAvailableAt`にはrefresh成功時のcooldown終了時刻を記録する。公式確認時刻は公式確認成功後に`archive/official-check-state.json`へCAS保存する。
 7. KV保存後にcurrent ETagを確認する。archive更新と競合していた場合は保存したKVを削除し、Queueへ通知せず503を返す。currentが一致した場合は、同じtokenのleaseが未失効であることを確認して成功完了する。leaseが失効または別tokenへ移行していた場合は、次refreshのKVを削除しないよう共有キーを変更せず202を返す。
 8. merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへのmessage送信を`waitUntil`へ登録する。送信失敗はログへ記録するが、KV保存を取り消さずHTTP 200を返す。

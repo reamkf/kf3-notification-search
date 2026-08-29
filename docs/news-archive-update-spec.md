@@ -19,7 +19,7 @@ Queue consumerまたはscheduled handlerが更新または削除できる対象�
 - `KF3_NOTIF_BACKUP/monthly/...`
 - current更新成功後のGET専用snapshot KV `kf3-news-archive-snapshot`の削除。scheduledまたはmanual更新ではWorkers KV `kf3-news`も削除し、Queue consumerは表示KVを維持する
 
-refreshは公式確認時刻stateを更新し、表示用KVとrefresh制御metadataも更新する。merge差分がある場合またはcurrentが未作成の場合はQueueへ更新messageを送るが、Queue送信はbest-effortであり、`waitUntil`へ登録してレスポンス経路から分離する。送信失敗でもrefreshの200応答と表示用KVの保存を維持する。公式データの取得または検証が失敗した場合、Queue consumerまたはscheduled handlerはarchive、backup、公式ETag state、KVを変更せず失敗する。
+refreshは公式確認時刻stateとDurable Objectのrefresh制御stateを更新し、表示用KVも更新する。merge差分がある場合またはcurrentが未作成の場合はQueueへ更新messageを送るが、Queue送信はbest-effortであり、`waitUntil`へ登録してレスポンス経路から分離する。送信失敗でもrefreshの200応答と表示用KVの保存を維持する。公式データの取得または検証が失敗した場合、Queue consumerまたはscheduled handlerはarchive、backup、公式ETag state、KVを変更せず失敗する。
 
 ## refreshからQueueへの委譲
 
@@ -29,8 +29,8 @@ refreshは公式データとcurrentまたはlegacyをmergeし、表示用配列�
 - message versionは`2`とし、`reason`、`detectedAt`、`addedCount`、`updatedCount`、`requiresInitialization`を含める。
 - merge差分では`reason=refresh-detected-change`、current未作成では`reason=refresh-current-missing`と`requiresInitialization=true`を使用する。current未作成messageは追加・変更件数が0でも有効とする。
 - Queue送信はbest-effortで行い、`waitUntil`へ登録する。送信失敗は`news_archive_update_enqueue_failed`へ記録するが、refreshの表示用KV保存を取り消さず、HTTP 200を返す。
-- KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、同じtokenのleaseをCASで5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
-- KV保存後にcurrent ETagを確認し、競合時は保存したKVを削除して503を返す。currentが一致した場合は取得時または延長後のlease handleの期限を検証し、leaseTokenはcontrol metadataとして扱い、保持したcontrol ETagだけでcompletionをCASする。CAS不成立または期限切れの場合は他refreshのKVを削除せず202を返し、Queueへ通知しない。
+- KV finalization前にrefresh leaseの残り時間が20秒未満の場合だけ、Coordinatorの`renew` RPCでleaseを5分間へ延長する。延長できない場合はKVへ書き込まず202を返す。
+- KV保存後にcurrent ETagを確認し、競合時は保存したKVを削除して503を返す。currentが一致した場合はCoordinatorの`complete` RPCでtokenとlease期限を検証し、成功時はcooldownへ遷移する。不一致または期限切れの場合は他refreshのKVを削除せず202を返し、Queueへ通知しない。
 - Queue consumerはmessageを検証し、別invocationで同じ`updateNewsArchive`を`trigger=queue`として実行する。`requiresInitialization=true`の場合も公式データを再取得し、currentがなければ既存の初回作成経路を使用する。
 - Queue consumerが成功したmessageはackし、更新処理が失敗したmessageはackせず60秒後にretryする。
 - scheduled handlerはQueue送信またはconsumer実行に依存せず、毎日03:15 JSTに`trigger=scheduled`で同じ更新処理を実行する。
@@ -164,7 +164,7 @@ Queue consumerは次の設定と動作で運用する。
 - `updateNewsArchive`が失敗した場合はackせず、60秒後にretryする。Wrangler設定の最大retry回数は3とする。
 - Queue consumerはheartbeatを送信しない。`HEALTHCHECKS_PING_URL`はscheduled handlerの開始、成功、失敗通知に使用する。
 - Queue consumerは`invalidateDisplayCache=false`で実行し、refreshが保存した表示KVをexpirationTtl満了まで維持する。クライアントは`officialCheckedAt`が5分以上古い表示を受け取るとrefreshを試みるため、表示用KVの保持時間と公式確認の更新間隔は別に管理する。
-- 同じmessageが重複配送されても、既存のETag条件付き取得、R2 CAS、304経路で同じ更新結果を安全に再確認できる。無条件上書きは行わず、競合時はQueueのretryへ委ねる。
+- 同じmessageが重複配送されても、既存のETag条件付き取得、R2のcurrent更新条件、304経路で同じ更新結果を安全に再確認できる。無条件上書きは行わず、競合時はQueueのretryへ委ねる。refresh制御はDurable Objectが担当し、Queue consumerはCoordinatorを取得しない。
 
 ## 監視とログ
 
@@ -202,9 +202,9 @@ GETのKV missはarchive snapshotを投影してwrite-throughするが、公式�
 
 更新成功ログには更新有無、実行時刻、各件数、公式レスポンスのバイト数、backup key、`officialFetchStatus`、`conditionalRequestUsed`、`currentEtagMatchedState`、`officialBodyProcessed`、`monthlyBackupStatus`、`etagStateStatus`、処理時間を含める。公式ETagとR2 ETagの値自体はログへ出さない。処理時間は外部I/O待ちを含む経過時間であり、WorkersのCPU時間判定には使用しない。
 
-refresh成功ログには`workerVersionId`、archive件数、merge後件数、追加件数、変更件数、current初期化の要否、archive更新の要否、Queue送信状態、lease完了状態、`officialFetchCount`、`officialFetchStatus`、`refreshDataSource`、`refreshEligibilityDurationMs`、`officialFetchDurationMs`、`refreshCacheReadDurationMs`、`archiveReadDurationMs`、`cachePutDurationMs`、`currentEtagCheckDurationMs`、`leaseCompletionDurationMs`を含める。各durationは外部I/O待ちを含む経過時間であり、制御metadataの内容、ETag値、公式本文、secretは記録しない。
+refresh成功ログには`workerVersionId`、archive件数、merge後件数、追加件数、変更件数、current初期化の要否、archive更新の要否、Queue送信状態、lease完了状態、`officialFetchCount`、`officialFetchStatus`、`refreshDataSource`、`refreshLeaseAcquireDurationMs`、`refreshEligibilityDurationMs`、`refreshFetchDurationMs`、`officialFetchDurationMs`、`refreshCacheReadDurationMs`、`archiveReadDurationMs`、`cachePutDurationMs`、`currentEtagCheckDurationMs`、`leaseCompletionDurationMs`、`refreshFinalizationDurationMs`、`refreshTotalDurationMs`を含める。各durationは外部I/O待ちを含む経過時間であり、Durable Object stateの内容、ETag値、公式本文、secretは記録しない。
 
-失敗ログには処理段階とエラー詳細を含め、refreshの失敗ログには`workerVersionId`も含めるが、公式レスポンス本文やheartbeat URL、ETag値、refresh制御metadataの秘密値は含めない。汎用エラーの詳細には`originalError`としてnameとmessageだけを含める。制御文字と改行を空白へ正規化し、URL、Authorization、Bearer、一般的なtoken・secret・password形式、JWTと既知のtoken prefixをredactした後、nameを100文字、messageを500文字までに制限する。stack、cause、独自プロパティは含めず、非`Error`値は任意に文字列化せず固定値で記録する。
+失敗ログには処理段階とエラー詳細を含め、refreshの失敗ログには`workerVersionId`も含めるが、公式レスポンス本文やheartbeat URL、ETag値、Durable Object stateの秘密値は含めない。汎用エラーの詳細には`originalError`としてnameとmessageだけを含める。制御文字と改行を空白へ正規化し、URL、Authorization、Bearer、一般的なtoken・secret・password形式、JWTと既知のtoken prefixをredactした後、nameを100文字、messageを500文字までに制限する。stack、cause、独自プロパティは含めず、非`Error`値は任意に文字列化せず固定値で記録する。
 
 ## 公式データの閾値と障害調査
 

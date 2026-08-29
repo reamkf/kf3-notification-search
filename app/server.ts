@@ -31,9 +31,6 @@ import {
 import {
   NEWS_REFRESH_COOLDOWN_MS,
   NEWS_REFRESH_FINALIZATION_LEASE_MS,
-  acquireNewsRefreshLease,
-  completeNewsRefreshLease,
-  renewNewsRefreshLease,
   type NewsRefreshAcquireResult,
   type NewsRefreshLease,
 } from "./news-refresh-control";
@@ -542,17 +539,18 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
   ) => {
     let archiveCount: number | null = null;
     let lease: NewsRefreshLease | null = null;
+    let refreshCoordinator: ReturnType<
+      WorkerBindings["KF3_REFRESH_COORDINATOR"]["getByName"]
+    > | null = null;
     const clientDataVersion = context.req.header(NEWS_DATA_VERSION_HEADER) || null;
     let cachePutDurationMs = 0;
     let currentEtagCheckDurationMs = 0;
     let leaseCompletionDurationMs = 0;
     const refreshStartedAt = performance.now();
     try {
+      refreshCoordinator = context.env.KF3_REFRESH_COORDINATOR.getByName("kf3-news");
       const leaseAcquireStartedAt = performance.now();
-      const acquired = await acquireNewsRefreshLease(
-        context.env.KF3_NOTIF_DATA,
-        dependencies.clock?.() ?? Date.now(),
-      );
+      const acquired = await refreshCoordinator.acquire(dependencies.clock?.() ?? Date.now());
       const refreshLeaseAcquireDurationMs = performance.now() - leaseAcquireStartedAt;
       if (acquired.status !== "acquired") {
         logger.error({
@@ -579,9 +577,8 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       const nowMs = dependencies.clock?.() ?? Date.now();
       const remainingLeaseMs = Date.parse(lease.leaseUntil) - nowMs;
       if (remainingLeaseMs < 20_000) {
-        const leaseRenewal = await renewNewsRefreshLease(
-          context.env.KF3_NOTIF_DATA,
-          lease,
+        const leaseRenewal = await refreshCoordinator!.renew(
+          lease.leaseToken,
           nowMs,
           NEWS_REFRESH_FINALIZATION_LEASE_MS,
         );
@@ -643,9 +640,8 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       const leaseCompletionNowMs = dependencies.clock?.() ?? Date.now();
       const leaseCompletionStartedAt = performance.now();
       try {
-        leaseCompletion = await completeNewsRefreshLease(
-          context.env.KF3_NOTIF_DATA,
-          lease,
+        leaseCompletion = await refreshCoordinator!.complete(
+          lease.leaseToken,
           "success",
           leaseCompletionNowMs,
         );
@@ -748,9 +744,8 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       logger.error(createRefreshErrorLog(error, archiveCount, workerVersionId));
       if (lease !== null) {
         try {
-          await completeNewsRefreshLease(
-            context.env.KF3_NOTIF_DATA,
-            lease,
+          await refreshCoordinator!.complete(
+            lease.leaseToken,
             "failure",
             dependencies.clock?.() ?? Date.now(),
           );

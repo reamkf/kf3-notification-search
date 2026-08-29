@@ -15,6 +15,13 @@ import { NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION } from "../news-archive-queue";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createNewsCacheMetadata } from "../news-response-metadata";
 import { createWorkerHandler } from "../server";
+import {
+  NEWS_REFRESH_CONTROL_KEY,
+  NEWS_REFRESH_CONTROL_VERSION,
+  NEWS_REFRESH_COOLDOWN_MS,
+  NEWS_REFRESH_FINALIZATION_LEASE_MS,
+  NEWS_REFRESH_LEASE_MS,
+} from "../news-refresh-control";
 
 const bindings = env as unknown as WorkerBindings;
 
@@ -298,5 +305,187 @@ describe("Cloudflare bindings", () => {
     expect(await (await bindings.KF3_NOTIF_BACKUP.get(monthlyKey))?.text()).toBe(
       "existing monthly",
     );
+  });
+
+  it("DOの初回bootstrapで有効なR2 controlを引き継ぎ、以降はDO stateを使う", async () => {
+    const nowMs = Date.parse("2026-08-09T12:00:00.000Z");
+    const name = `bootstrap-${crypto.randomUUID()}`;
+    const cooldownUntil = new Date(nowMs + NEWS_REFRESH_COOLDOWN_MS).toISOString();
+    await bindings.KF3_NOTIF_DATA.put(
+      NEWS_REFRESH_CONTROL_KEY,
+      JSON.stringify({
+        version: NEWS_REFRESH_CONTROL_VERSION,
+        status: "cooldown",
+        token: null,
+        leaseUntil: null,
+        cooldownUntil,
+        lastOutcome: "success",
+      }),
+    );
+
+    const coordinator = bindings.KF3_REFRESH_COORDINATOR.getByName(name);
+    await expect(coordinator.acquire(nowMs)).resolves.toMatchObject({
+      status: "cooldown",
+      nextAvailableAt: cooldownUntil,
+    });
+
+    await bindings.KF3_NOTIF_DATA.put(
+      NEWS_REFRESH_CONTROL_KEY,
+      JSON.stringify({
+        version: NEWS_REFRESH_CONTROL_VERSION,
+        status: "idle",
+        token: null,
+        leaseUntil: null,
+        cooldownUntil: null,
+        lastOutcome: null,
+      }),
+    );
+    await expect(coordinator.acquire(nowMs + 1)).resolves.toMatchObject({ status: "cooldown" });
+  });
+
+  it("同じDOへの同時acquireは一つだけ成功する", async () => {
+    const coordinator = bindings.KF3_REFRESH_COORDINATOR.getByName(
+      `concurrent-${crypto.randomUUID()}`,
+    );
+    const results = await Promise.all([coordinator.acquire(0), coordinator.acquire(0)]);
+
+    expect(results.filter((result) => result.status === "acquired")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "running")).toHaveLength(1);
+  });
+
+  it("DOのrenewとcompleteはtokenを検証してcooldownへ遷移する", async () => {
+    const nowMs = Date.parse("2026-08-09T12:00:00.000Z");
+    const coordinator = bindings.KF3_REFRESH_COORDINATOR.getByName(
+      `lifecycle-${crypto.randomUUID()}`,
+    );
+    const acquired = await coordinator.acquire(nowMs);
+    expect(acquired.status).toBe("acquired");
+    if (acquired.status !== "acquired") return;
+
+    const renewed = await coordinator.renew(
+      acquired.lease.leaseToken,
+      nowMs + 59_000,
+      NEWS_REFRESH_FINALIZATION_LEASE_MS,
+    );
+    expect(renewed).toMatchObject({
+      leaseToken: acquired.lease.leaseToken,
+      leaseUntil: new Date(nowMs + 59_000 + NEWS_REFRESH_FINALIZATION_LEASE_MS).toISOString(),
+    });
+    expect(await coordinator.complete(acquired.lease.leaseToken, "success", nowMs + 59_001)).toBe(
+      "updated",
+    );
+    expect(await coordinator.complete(acquired.lease.leaseToken, "failure", nowMs + 59_002)).toBe(
+      "lease-mismatch",
+    );
+    expect(await coordinator.acquire(nowMs + 59_002)).toMatchObject({ status: "cooldown" });
+  });
+
+  it("refresh APIは実Durable Objectのcooldownを使う", async () => {
+    const nowMs = Date.parse("2026-08-09T12:00:00.000Z");
+    await bindings.KF3_NOTIF_DATA.put(CURRENT_ARCHIVE_KEY, JSON.stringify(createDocument(1)));
+    const handler = createWorkerHandler({
+      fetcher: async () => new Response(JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT))),
+      clock: () => nowMs,
+      logger,
+    });
+
+    const first = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+    );
+    const second = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(429);
+    expect(second.headers.get("retry-after")).toBe(String(NEWS_REFRESH_COOLDOWN_MS / 1000));
+  });
+
+  it("refresh APIは実Durable Objectのrunning leaseを202で返す", async () => {
+    const nowMs = Date.parse("2026-08-09T12:00:00.000Z");
+    await bindings.KF3_NOTIF_DATA.put(CURRENT_ARCHIVE_KEY, JSON.stringify(createDocument(1)));
+    let releaseFetch!: () => void;
+    let markFetchStarted!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => {
+      markFetchStarted = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    const handler = createWorkerHandler({
+      fetcher: async () => {
+        markFetchStarted();
+        await release;
+        return new Response(JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT)));
+      },
+      clock: () => nowMs,
+      logger,
+    });
+
+    const first = callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+    );
+    await fetchStarted;
+    const second = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+    );
+
+    expect(second.status).toBe(202);
+    releaseFetch();
+    expect((await first).status).toBe(200);
+  });
+
+  it("期限切れleaseは再取得でき、期限境界のrenewとcompleteは拒否する", async () => {
+    const nowMs = Date.parse("2026-08-09T12:00:00.000Z");
+    const recoveryCoordinator = bindings.KF3_REFRESH_COORDINATOR.getByName(
+      `recovery-${crypto.randomUUID()}`,
+    );
+    const first = await recoveryCoordinator.acquire(nowMs);
+    expect(first.status).toBe("acquired");
+    if (first.status !== "acquired") return;
+
+    const recovered = await recoveryCoordinator.acquire(nowMs + NEWS_REFRESH_LEASE_MS);
+    expect(recovered.status).toBe("acquired");
+    if (recovered.status === "acquired") {
+      expect(recovered.lease.leaseToken).not.toBe(first.lease.leaseToken);
+    }
+
+    const boundaryCoordinator = bindings.KF3_REFRESH_COORDINATOR.getByName(
+      `boundary-${crypto.randomUUID()}`,
+    );
+    const boundaryLease = await boundaryCoordinator.acquire(nowMs);
+    expect(boundaryLease.status).toBe("acquired");
+    if (boundaryLease.status !== "acquired") return;
+
+    expect(
+      await boundaryCoordinator.renew(
+        boundaryLease.lease.leaseToken,
+        nowMs + NEWS_REFRESH_LEASE_MS,
+      ),
+    ).toBe("inactive");
+    expect(
+      await boundaryCoordinator.complete(
+        boundaryLease.lease.leaseToken,
+        "success",
+        nowMs + NEWS_REFRESH_LEASE_MS,
+      ),
+    ).toBe("lease-mismatch");
+  });
+
+  it("failure完了後はcooldownなしで再取得できる", async () => {
+    const nowMs = Date.parse("2026-08-09T12:00:00.000Z");
+    const coordinator = bindings.KF3_REFRESH_COORDINATOR.getByName(
+      `failure-${crypto.randomUUID()}`,
+    );
+    const first = await coordinator.acquire(nowMs);
+    expect(first.status).toBe("acquired");
+    if (first.status !== "acquired") return;
+
+    expect(await coordinator.complete(first.lease.leaseToken, "failure", nowMs)).toBe("updated");
+    expect(await coordinator.acquire(nowMs + 1)).toMatchObject({ status: "acquired" });
   });
 });

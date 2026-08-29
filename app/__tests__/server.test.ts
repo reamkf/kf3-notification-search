@@ -19,6 +19,12 @@ import {
   NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
   type NewsArchiveUpdateMessage,
 } from "../news-archive-queue";
+import {
+  NEWS_REFRESH_LEASE_MS,
+  type NewsRefreshAcquireResult,
+  type NewsRefreshCompletionResult,
+  type NewsRefreshRenewalResult,
+} from "../news-refresh-control";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createWorkerHandler } from "../server";
 import { createNewsCacheMetadata } from "../news-response-metadata";
@@ -57,6 +63,16 @@ const createR2Object = (text: string, etag = "etag"): R2ObjectBody =>
 const createResponse = (document: unknown, ok = true) =>
   new Response(ok ? JSON.stringify(document) : "failed", { status: ok ? 200 : 503 });
 
+type RefreshCoordinatorStub = {
+  acquire(nowMs: number): Promise<NewsRefreshAcquireResult>;
+  renew(token: string, nowMs: number, leaseMs?: number): Promise<NewsRefreshRenewalResult>;
+  complete(
+    token: string,
+    outcome: "success" | "failure",
+    nowMs: number,
+  ): Promise<NewsRefreshCompletionResult>;
+};
+
 type TestBindings = {
   env: WorkerBindings;
   dataGets: string[];
@@ -70,6 +86,7 @@ type TestBindings = {
   }>;
   cacheDeletes: string[];
   queueMessages: NewsArchiveUpdateMessage[];
+  refreshCoordinator: RefreshCoordinatorStub;
 };
 
 type BindingOptions = {
@@ -86,6 +103,33 @@ type BindingOptions = {
   conditionalCurrentReadMismatch?: boolean;
   currentChangesOnCachePut?: boolean;
   cachePutBlock?: Promise<void>;
+  refreshRenewResult?: NewsRefreshRenewalResult;
+  refreshCompleteResult?: NewsRefreshCompletionResult;
+  refreshCompleteError?: Error;
+  refreshCompleteBeforeResult?: () => void;
+};
+
+const createRefreshCoordinator = (options: BindingOptions): RefreshCoordinatorStub => {
+  const token = crypto.randomUUID();
+  return {
+    acquire: async (nowMs) => ({
+      status: "acquired",
+      lease: {
+        leaseToken: token,
+        leaseUntil: new Date(nowMs + NEWS_REFRESH_LEASE_MS).toISOString(),
+      },
+    }),
+    renew: async (leaseToken, nowMs, leaseMs = NEWS_REFRESH_LEASE_MS) =>
+      options.refreshRenewResult ?? {
+        leaseToken,
+        leaseUntil: new Date(nowMs + leaseMs).toISOString(),
+      },
+    complete: async () => {
+      options.refreshCompleteBeforeResult?.();
+      if (options.refreshCompleteError) throw options.refreshCompleteError;
+      return options.refreshCompleteResult ?? "updated";
+    },
+  };
 };
 
 const createBindings = (
@@ -96,8 +140,6 @@ const createBindings = (
   const dataGets: string[] = [];
   let currentHeadCalls = 0;
   let currentEtag = "current-etag";
-  let controlText: string | null = null;
-  let controlEtag = "control-etag-0";
   let checkStateText = options.checkStateText ?? null;
   let checkStateEtag = options.checkStateEtag ?? "check-state-etag-0";
   const cacheValues = new Map<string, string>();
@@ -113,9 +155,6 @@ const createBindings = (
   const dataBucket = {
     get: async (key: string, getOptions?: { onlyIf?: { etagMatches?: string } }) => {
       dataGets.push(key);
-      if (key === "control/news-refresh.json") {
-        return controlText === null ? null : createR2Object(controlText, controlEtag);
-      }
       if (
         key === CURRENT_ARCHIVE_KEY &&
         getOptions?.onlyIf?.etagMatches !== undefined &&
@@ -148,10 +187,7 @@ const createBindings = (
         checkStateEtag = `check-state-etag-${checkStateText.length}`;
         return { etag: checkStateEtag } as R2Object;
       }
-      if (key !== "control/news-refresh.json") return null;
-      controlText = value;
-      controlEtag = `control-etag-${controlText.length}`;
-      return { etag: controlEtag } as R2Object;
+      return null;
     },
   } as unknown as R2Bucket;
   const cache = {
@@ -203,6 +239,10 @@ const createBindings = (
       queueMessages.push(message);
     },
   } as unknown as Queue<NewsArchiveUpdateMessage>;
+  const refreshCoordinator = createRefreshCoordinator(options);
+  const refreshCoordinatorNamespace = {
+    getByName: () => refreshCoordinator,
+  } as unknown as WorkerBindings["KF3_REFRESH_COORDINATOR"];
   return {
     env: {
       ASSETS: {} as Fetcher,
@@ -210,6 +250,7 @@ const createBindings = (
       KF3_NOTIF_DATA: dataBucket,
       KF3_NOTIF_BACKUP: backup,
       KF3_ARCHIVE_UPDATE_QUEUE: archiveUpdateQueue,
+      KF3_REFRESH_COORDINATOR: refreshCoordinatorNamespace,
     },
     dataGets,
     cacheValues,
@@ -217,6 +258,7 @@ const createBindings = (
     cachePuts,
     cacheDeletes,
     queueMessages,
+    refreshCoordinator,
   };
 };
 
@@ -674,28 +716,6 @@ describe("Worker API handler", () => {
       tag: "test-refresh",
       timestamp: "2026-08-09T12:34:56.789Z",
     };
-    const originalData = setup.env.KF3_NOTIF_DATA;
-    let controlText: string | null = null;
-    let controlEtag = "control-etag-0";
-    let controlPuts = 0;
-    setup.env.KF3_NOTIF_DATA = {
-      get: async (key: string, options?: unknown) => {
-        if (key === "control/news-refresh.json") {
-          return controlText === null ? null : createR2Object(controlText, controlEtag);
-        }
-        return originalData.get(key, options as never);
-      },
-      head: originalData.head.bind(originalData),
-      put: async (key: string, value: string) => {
-        if (key === "control/news-refresh.json") {
-          controlPuts += 1;
-          controlText = value;
-          controlEtag = `control-etag-${controlText.length}`;
-          return { etag: controlEtag } as R2Object;
-        }
-        return null;
-      },
-    } as unknown as R2Bucket;
     const logs: Record<string, unknown>[] = [];
     const handler = createWorkerHandler({
       fetcher: async () => createResponse(official),
@@ -713,7 +733,6 @@ describe("Worker API handler", () => {
     };
 
     expect(response.status).toBe(200);
-    expect(controlPuts).toBe(2);
     expect(payload.news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
     expect(payload.news[0].category).toBe("refresh");
     expect(payload.metadata).toEqual({
@@ -1181,29 +1200,10 @@ describe("Worker API handler", () => {
   });
 
   it("refresh完了CAS失敗後はKVを維持して202を返す", async () => {
-    const setup = createBindings(JSON.stringify(createDocument(1)));
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      refreshCompleteResult: "lease-mismatch",
+    });
     setup.cacheValues.set("kf3-news", "old-cache");
-    const originalData = setup.env.KF3_NOTIF_DATA;
-    let controlText: string | null = null;
-    let controlEtag = "control-0";
-    let puts = 0;
-    setup.env.KF3_NOTIF_DATA = {
-      get: async (key: string, options?: unknown) => {
-        if (key === "control/news-refresh.json") {
-          return controlText === null ? null : createR2Object(controlText, controlEtag);
-        }
-        return originalData.get(key, options as never);
-      },
-      head: originalData.head.bind(originalData),
-      put: async (key: string, value: string) => {
-        if (key !== "control/news-refresh.json") return null;
-        puts += 1;
-        if (puts > 1) return null;
-        controlText = value;
-        controlEtag = "control-1";
-        return { etag: controlEtag } as R2Object;
-      },
-    } as unknown as R2Bucket;
     const logs: Record<string, unknown>[] = [];
     const handler = createWorkerHandler({
       fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
@@ -1221,28 +1221,9 @@ describe("Worker API handler", () => {
   });
 
   it("refresh完了の依存処理失敗時はKVを削除して503を返す", async () => {
-    const setup = createBindings(JSON.stringify(createDocument(1)));
-    const originalData = setup.env.KF3_NOTIF_DATA;
-    let controlText: string | null = null;
-    let controlEtag = "control-0";
-    let puts = 0;
-    setup.env.KF3_NOTIF_DATA = {
-      get: async (key: string, options?: unknown) => {
-        if (key === "control/news-refresh.json") {
-          return controlText === null ? null : createR2Object(controlText, controlEtag);
-        }
-        return originalData.get(key, options as never);
-      },
-      head: originalData.head.bind(originalData),
-      put: async (key: string, value: string) => {
-        if (key !== "control/news-refresh.json") return null;
-        puts += 1;
-        if (puts > 1) throw new Error("completion failed");
-        controlText = value;
-        controlEtag = "control-etag-1";
-        return { etag: controlEtag } as R2Object;
-      },
-    } as unknown as R2Bucket;
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      refreshCompleteError: new Error("completion failed"),
+    });
     const logs: Record<string, unknown>[] = [];
     const response = await callFetch(
       createWorkerHandler({
@@ -1262,23 +1243,12 @@ describe("Worker API handler", () => {
     expect(logs).toContainEqual(expect.objectContaining({ event: "news_refresh_failed" }));
   });
 
-  it("refresh leaseの延長CAS競合時はKVを更新せず202にする", async () => {
-    const setup = createBindings(JSON.stringify(createDocument(1)));
+  it("refresh leaseの延長競合時はKVを更新せず202にする", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      refreshRenewResult: "lease-mismatch",
+    });
     const startedAt = Date.parse("2026-08-09T12:00:00.000Z");
     const clockValues = [startedAt, startedAt + 50_000];
-    const originalData = setup.env.KF3_NOTIF_DATA;
-    let controlPuts = 0;
-    setup.env.KF3_NOTIF_DATA = {
-      get: originalData.get.bind(originalData),
-      head: originalData.head.bind(originalData),
-      put: async (key: string, value: string, options?: unknown) => {
-        if (key === "control/news-refresh.json") {
-          controlPuts += 1;
-          if (controlPuts > 1) return null;
-        }
-        return originalData.put(key, value, options as never);
-      },
-    } as unknown as R2Bucket;
 
     const response = await callFetch(
       createWorkerHandler({
@@ -1337,36 +1307,9 @@ describe("Worker API handler", () => {
   });
 
   it("refreshのlease失効をKV保存後に検出して202にする", async () => {
-    const setup = createBindings(JSON.stringify(createDocument(1)));
-    const originalData = setup.env.KF3_NOTIF_DATA;
-    let controlText: string | null = null;
-    let controlPuts = 0;
-    setup.env.KF3_NOTIF_DATA = {
-      get: async (key: string, options?: unknown) => {
-        if (key === "control/news-refresh.json") {
-          if (controlText === null) return null;
-          return createR2Object(controlText, "control-etag");
-        }
-        return originalData.get(key, options as never);
-      },
-      head: originalData.head.bind(originalData),
-      put: async (key: string, _value: string) => {
-        if (key === "control/news-refresh.json") {
-          controlPuts += 1;
-          if (controlPuts > 1) return null;
-          controlText = JSON.stringify({
-            version: 1,
-            status: "running",
-            token: "other-token",
-            leaseUntil: "2000-01-01T00:00:00.000Z",
-            cooldownUntil: null,
-            lastOutcome: null,
-          });
-          return { etag: "control-etag" } as R2Object;
-        }
-        return null;
-      },
-    } as unknown as R2Bucket;
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      refreshCompleteResult: "lease-mismatch",
+    });
     const response = await callFetch(
       createWorkerHandler({
         fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
@@ -1401,24 +1344,12 @@ describe("Worker API handler", () => {
   });
 
   it("KV保存後にleaseが不一致でも次refreshのKVを削除しない", async () => {
-    const setup = createBindings(JSON.stringify(createDocument(1)));
+    let setup!: TestBindings;
+    setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      refreshCompleteResult: "lease-mismatch",
+      refreshCompleteBeforeResult: () => setup.cacheValues.set("kf3-news", "newer-refresh-cache"),
+    });
     setup.cacheValues.set("kf3-news", "old-cache");
-    const originalData = setup.env.KF3_NOTIF_DATA;
-    let controlPuts = 0;
-    setup.env.KF3_NOTIF_DATA = {
-      get: originalData.get.bind(originalData),
-      head: originalData.head.bind(originalData),
-      put: async (key: string, value: string, options?: unknown) => {
-        if (key === "control/news-refresh.json") {
-          controlPuts += 1;
-          if (controlPuts > 1) {
-            setup.cacheValues.set("kf3-news", "newer-refresh-cache");
-            return null;
-          }
-        }
-        return originalData.put(key, value, options as never);
-      },
-    } as unknown as R2Bucket;
     const response = await callFetch(
       createWorkerHandler({
         fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),

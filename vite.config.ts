@@ -1,7 +1,9 @@
 import honox from "honox/vite";
 import { defineConfig } from "vite";
 import adapter from "@hono/vite-dev-server/cloudflare";
-import build from "@hono/vite-build/cloudflare-workers";
+import build, {
+  defaultOptions as cloudflareWorkersBuildOptions,
+} from "@hono/vite-build/cloudflare-workers";
 
 export default defineConfig(({ command }) => ({
   server: {
@@ -10,7 +12,7 @@ export default defineConfig(({ command }) => ({
   },
   plugins: [
     honox({
-      entry: command === "serve" ? "./app/dev-server.ts" : "./app/server.ts",
+      entry: command === "serve" ? "./app/dev-server.ts" : "./app/worker.ts",
       client: {
         input: ["/app/client.ts", "/app/style.css"],
       },
@@ -23,9 +25,15 @@ export default defineConfig(({ command }) => ({
         },
       },
     }),
-    build(),
+    build({
+      external: ["cloudflare:workers"],
+      entryContentAfterHooks: [
+        ...cloudflareWorkersBuildOptions.entryContentAfterHooks,
+        () => 'export { NewsRefreshCoordinator } from "/app/news-refresh-coordinator.ts";',
+      ],
+    }),
   ],
   ssr: {
-    external: ["dayjs"],
+    external: ["dayjs", "cloudflare:workers"],
   },
 }));

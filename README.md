@@ -12,6 +12,7 @@
 - [Cloudflare Workers](https://workers.cloudflare.com/)
 - [Cloudflare KV](https://developers.cloudflare.com/kv/)
 - [Cloudflare R2](https://developers.cloudflare.com/r2/)
+- [Cloudflare Durable Objects](https://developers.cloudflare.com/durable-objects/)
 - [Cloudflare Queues](https://developers.cloudflare.com/queues/)
 
 ## ローカル開発
@@ -20,7 +21,7 @@
 
 ## お知らせ一覧取得フロー
 
-`GET /`はStatic AssetsからSSG済みshellを返します。Workerを起動せず、shell表示後の`GET /api/kf3-news`はKV snapshotを即時返し、merged KVがない場合はGET専用snapshot KVを読み、両方のKV miss時はR2 currentまたはlegacy snapshotを投影して同じJSONをGET専用KVへwrite-throughします。公式取得、検証、mergeを行う`POST /api/kf3-news/refresh`は別リクエストで、実行中は202、成功時は表示用KVへ保存して200を返します。`X-KF3-News-Data-Version`が一致する場合は`{changed:false, metadata}`、それ以外は`{news, metadata}`を返し、cooldownは429、依存障害は503を返します。公式が304を返し、KV v2のcurrent ETagが一致する場合は、refreshがKV JSONを再利用してR2 current本文の処理を省略します。refreshはR2 CAS leaseと5分cooldownで制限し、merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知します。Queue送信に失敗してもrefreshは200を返します。Queue consumerは別invocationで`updateNewsArchive(trigger=queue)`を実行し、03:15 JSTのscheduled handlerは`trigger=scheduled`でQueueのfallbackとして継続します。restoreはsnapshotからcurrentを復元します。
+`GET /`はStatic AssetsからSSG済みshellを返します。Workerを起動せず、shell表示後の`GET /api/kf3-news`はKV snapshotを即時返し、merged KVがない場合はGET専用snapshot KVを読み、両方のKV miss時はR2 currentまたはlegacy snapshotを投影して同じJSONをGET専用KVへwrite-throughします。公式取得、検証、mergeを行う`POST /api/kf3-news/refresh`は別リクエストで、実行中は202、成功時は表示用KVへ保存して200を返します。`X-KF3-News-Data-Version`が一致する場合は`{changed:false, metadata}`、それ以外は`{news, metadata}`を返し、cooldownは429、依存障害は503を返します。公式が304を返し、KV v2のcurrent ETagが一致する場合は、refreshがKV JSONを再利用してR2 current本文の処理を省略します。refreshは`KF3_REFRESH_COORDINATOR` Durable ObjectのSQLite stateと5分cooldownで制限します。既存R2の`control/news-refresh.json`は初回bootstrap時だけ読み、以降の制御には使いません。merge差分がある場合またはcurrentが未作成の場合は`kf3-notif-archive-update` Queueへbest-effortで通知します。Queue送信に失敗してもrefreshは200を返します。Queue consumerは別invocationで`updateNewsArchive(trigger=queue)`を実行し、03:15 JSTのscheduled handlerは`trigger=scheduled`でQueueのfallbackとして継続します。restoreはsnapshotからcurrentを復元します。
 
 - [機能共通仕様](./docs/news-spec.md)
 - [ページリクエスト仕様](./docs/news-page-request-spec.md)

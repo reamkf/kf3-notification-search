@@ -17,7 +17,7 @@ Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 - 統合結果のソートとJSONシリアライズ
 - 日次backup、current更新、KV削除
 
-表示用GETの両KV missでは公式取得を行わず、R2 snapshotを投影する。投影したJSONをGET専用KV `kf3-news-archive-snapshot`へTTL付きでbest-effort保存し、同じ本文を直接返す。merged結果用KVを最優先し、GET専用KVの保存がmerged結果用KVを上書きすることはない。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KV、公式確認時刻state、refresh制御metadataを更新し、公式ETag state、current、daily、monthlyを更新しない。merge差分がある場合またはcurrentが未作成の場合のQueue publishは表示用refreshの委譲であり、公式ETag stateや永続archiveの書き込みではない。
+表示用GETの両KV missでは公式取得を行わず、R2 snapshotを投影する。投影したJSONをGET専用KV `kf3-news-archive-snapshot`へTTL付きでbest-effort保存し、同じ本文を直接返す。merged結果用KVを最優先し、GET専用KVの保存がmerged結果用KVを上書きすることはない。GETのKV hitではKVだけを読み、外部I/Oを行わない。refreshは表示用KV、公式確認時刻state、Durable Objectのrefresh制御stateを更新し、公式ETag state、current、daily、monthlyを更新しない。merge差分がある場合またはcurrentが未作成の場合のQueue publishは表示用refreshの委譲であり、公式ETag stateや永続archiveの書き込みではない。
 
 ### refreshの304 fast path
 
@@ -36,7 +36,7 @@ Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 
 Queue consumerまたはscheduled fallbackの`updateNewsArchive`開始時に、保存済みのcurrentのETagと実際のcurrentのETagが一致する場合だけ条件付きGETを行う。これにより、復元、手動操作、別実行によってcurrentが変わった後に、古い公式ETagを使って処理を省略することを防ぐ。
 
-stateは正しさの根拠ではなく最適化用のヒントとして扱う。stateが欠落、不正、競合、またはcurrentと不一致の場合は、エラーで停止せず条件なしの完全処理へ切り替える。refreshも同じ対応関係を条件付き取得の判定に利用するが、stateは書き換えない。refreshの実行後もQueue consumerとscheduled fallbackは保存済みstateとcurrent ETagの対応を検証する。重複Queue messageもこのETag/CAS/304境界で処理し、無条件上書きを行わない。
+stateは正しさの根拠ではなく最適化用のヒントとして扱う。stateが欠落、不正、競合、またはcurrentと不一致の場合は、エラーで停止せず条件なしの完全処理へ切り替える。refreshも同じ対応関係を条件付き取得の判定に利用するが、公式ETag stateは書き換えない。refreshのleaseとcooldownはDurable Objectが管理し、refreshの実行後もQueue consumerとscheduled fallbackは保存済みstateとcurrent ETagの対応を検証する。重複Queue messageもこのETag/CAS/304境界で処理し、無条件上書きを行わない。
 
 ## 状態object
 
@@ -171,7 +171,7 @@ stateをcurrent更新より先に保存してはならない。先に保存す�
 
 復元applyによって`archive/current.json`が置換されるとR2のETagが変わる。保存済みstateの`currentEtag`とは一致しなくなるため、次回のQueue consumerまたはscheduled fallbackは条件付き取得を使用せず、公式データを完全取得して復元後のcurrentと再統合する。
 
-復元処理でstate objectを削除することは必須としない。明示的に削除する場合も、current更新成功後に行い、削除失敗によって復元済みcurrentを巻き戻さない。refresh制御metadataは復元の対象外とする。
+復元処理でstate objectを削除することは必須としない。明示的に削除する場合も、current更新成功後に行い、削除失敗によって復元済みcurrentを巻き戻さない。Durable Objectのrefresh制御stateとR2の`control/news-refresh.json`は復元の対象外とする。
 
 ## ログと計測
 
@@ -205,11 +205,11 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - 304を公式取得エラーとして扱わない。
 - GETのKV hitではR2、公式サーバー、stateへアクセスしない。
 - GETのKV missでは公式サーバーへアクセスせず、R2 snapshotを投影し、official-check-stateの`checkedAt`を同じJSONのmetadataへ反映して表示用KVへbest-effort保存する。
-- refreshは公式取得、検証、merge、KV保存、official-check-state更新を行い、成功本文はdata version一致時の`{changed:false, metadata}`または通常の`{news, metadata}`とするが、current、daily、monthly、公式ETag stateを変更しない。304かつKV v2/current ETag一致時は、KV JSONを再利用してR2 current本文を読まない。
+- refreshは公式取得、検証、merge、KV保存、official-check-state更新、Durable Objectのrefresh制御state更新を行い、成功本文はdata version一致時の`{changed:false, metadata}`または通常の`{news, metadata}`とするが、current、daily、monthly、公式ETag stateを変更しない。304かつKV v2/current ETag一致時は、KV JSONを再利用してR2 current本文を読まない。
 - 別refreshの実行中は公式取得前に202、5分cooldown中は429を返す。
 - refresh成功時は200と、data versionの一致に応じたレスポンス本文を返す。
 - refreshの依存処理失敗時は503を返し、表示用KVを置き換えない。
-- refresh制御metadataのCAS競合で無条件上書きを行わない。
+- refresh制御はDurable Object RPCで行い、state更新時に無条件上書きを行わない。
 - 復元後を模したcurrentのETag不一致ではQueue consumerまたはscheduled fallbackが完全処理へ戻る。
 
 ## 受け入れ条件
@@ -218,7 +218,7 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - Queue consumerまたはscheduled fallbackの304経路でも月次backupの欠落を補完できる。
 - Queue consumerとscheduled fallbackの200経路で安全性検証、日次backup、ETag条件付きcurrent更新、月次backup、state保存の順序を維持する。scheduled fallbackではcurrent更新後にKVも削除し、Queue consumerではrefresh由来のKVを維持する。
 - stateとcurrentの不一致時に、公式変更を取り逃がさず完全処理へ戻る。
-- refreshが表示用KVとofficial-check-stateを更新し、永続archiveと公式ETag stateへ影響を与えない。
+- refreshが表示用KV、official-check-state、Durable Objectのrefresh制御stateを更新し、永続archiveと公式ETag stateへ影響を与えない。
 - 別refreshの実行中とlease失効は202、cooldownは429、依存処理の失敗は503へ変換する。
 - `GET /`のStatic Assets応答が公式サーバー、R2、KVへのお知らせ取得を開始せず、Workerを起動しない。
 - GETのKV write-through後にcurrent ETagを再確認し、古いsnapshotを削除できる。writeまたは確認失敗でもHTTP 200を維持し、`news_api_cache_write_failed`を記録できる。
@@ -232,7 +232,7 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 主な実装箇所と関連文書は次のとおり。
 
 - `app/news-archive.ts`: 公式取得結果の200、304分岐、stateの読み書き、current HEAD、scheduled 304経路
-- `app/server.ts`: 表示用GET、refresh、Queue publish、Queue consumer、R2 leaseと制御metadata、KV投影
+- `app/server.ts`: 表示用GET、refresh、Queue publish、Queue consumer、Durable Object RPC、KV投影
 - `app/news-archive-queue.ts`: Queue messageの形式と検証
 - `app/routes/index.tsx`: お知らせ取得を行わないSSG shell
 - `app/islands/KemonoFriends3NewsSearch.tsx`: preload済みGETの利用、refresh呼び出し

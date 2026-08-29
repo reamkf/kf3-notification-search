@@ -11,7 +11,7 @@
 - 公開routeを追加しない。
 - remote bindingは本番R2とKVを直接操作するため、対象を確認してから起動する。
 - applyは実障害で復元が必要な場合だけ実行する。
-- restoreはrefresh制御metadataを変更しない。
+- restoreはDurable Objectのrefresh制御stateとR2の`control/news-refresh.json`を変更しない。
 
 ## 事前確認
 
@@ -28,7 +28,7 @@
 4. snapshotの保存日時と復元したい状態が一致することを確認する。
 5. accountやsnapshot keyが不明な場合は操作を中止する。
 6. `HEALTHCHECKS_PING_URL`などのsecretをコマンド、ログ、運用記録へ書き込まない。
-7. refreshが実行中でないこと、Cloudflare Rate LimitingまたはWAFの運用変更を同時に行っていないことを確認する。
+7. Coordinatorのleaseが実行中でないこと、Cloudflare Rate LimitingまたはWAFの運用変更を同時に行っていないことを確認する。
 
 ## localhost専用Workerの起動
 
@@ -92,7 +92,7 @@ applyでは次の順序で処理される。
 4. APIの件数、最古日、最新日をdry-run結果と比較する。
 5. snapshot digest、更新後ETag、KV削除結果、API確認結果が運用記録と一致することを確認する。
 6. current ETagが復元前から変わったことを確認する。次回のQueue consumerまたはscheduled fallbackはETag条件付き取得ではなく、公式データの完全取得とcurrentの再統合へ戻る。
-7. refresh制御metadataが変更されていないことを確認する。refreshの次回実行は通常のleaseと5分cooldownの契約に従う。
+7. Durable Objectのrefresh制御stateとR2の`control/news-refresh.json`が変更されていないことを確認する。refreshの次回実行はCoordinatorのleaseと5分cooldownの契約に従う。
 8. Cloudflare Rate LimitingとWAFのイベントに、復元作業による意図しない公開refreshやroute変更がないことを確認する。
 
 ## 復元できない場合のrollback
@@ -103,7 +103,7 @@ R2からsnapshotを読み込めない場合だけ、legacy objectを使う緊急
 - legacy objectを削除しない。
 - backup snapshotを削除しない。
 - R2復旧後は、通常の復元手順を最新snapshotとcurrent ETagでやり直す。
-- refreshのlease、cooldown、表示用KVの契約を復元障害の回避目的で変更しない。
+- refreshのCoordinator lease、cooldown、表示用KVの契約を復元障害の回避目的で変更しない。
 
 ## 運用記録
 
@@ -117,6 +117,6 @@ R2からsnapshotを読み込めない場合だけ、legacy objectを使う緊急
 - apply後のcurrent ETag
 - KV削除結果
 - API確認結果
-- refresh制御metadataに変更がないことの確認
+- Durable Objectのrefresh制御stateとR2の`control/news-refresh.json`に変更がないことの確認
 - Rate LimitingとWAFのイベント確認結果（refreshの200、202、429、503契約への影響）
 - 復元後のQueue consumerまたはscheduled fallbackの処理確認結果
