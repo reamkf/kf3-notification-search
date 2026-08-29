@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --config vite.dev.config.ts",
     "build": "vite build --mode client && vite build && vite build --config vite.ssg.config.ts && bun scripts/assert-build-output.ts",
     "preview": "$npm_execpath run build && wrangler dev",
     "restore:dev": "wrangler dev --config wrangler.restore.toml --ip 127.0.0.1 --port 8790",
@@ -30,10 +30,10 @@
     "valibot": "^1.4.2"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.53.1",
     "@cloudflare/vitest-pool-workers": "^0.20.1",
     "@cloudflare/workers-types": "^5.20260729.1",
     "@hono/vite-build": "^1.11.1",
-    "@hono/vite-dev-server": "^0.26.1",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4.3.3",
     "autoprefixer": "^10.5.4",

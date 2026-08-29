@@ -94,9 +94,9 @@ Worker、ローカルR2、scheduled handler、Queue consumerを確認する場�
 VITE_SITE_ORIGIN=http://127.0.0.1:8787 bun run preview
 ```
 
-`bun run preview`のR2とDurable Objectはローカルストレージである。本番bucketへ接続する`--remote`操作をローカル確認で使用しない。`bun run dev`はHonoXのUI開発用で、CloudflareのVite開発プロキシでは同じWorker内のDurable Objectを実行できないため、refreshを含むWorker統合確認には`bun run preview`を使用する。
+`bun run dev`はCloudflare公式Vite plugin上でHonoXのUI/HMRとWorkerを同時に起動し、ローカルのKV、R2、Durable Object、Queue bindingを利用する。`bun run preview`はビルド後のWorkerをWranglerで起動する統合確認用である。どちらもR2とDurable Objectはローカルストレージを使用し、本番bucketへ接続する`--remote`操作をローカル確認で使用しない。
 
-`GET /`はStatic AssetsからSSG済みshellを返す。ブラウザはHTML解析中に`GET /api/kf3-news`のpreloadを開始し、hydration後のIslandがその結果を利用する。必要に応じて`POST /api/kf3-news/refresh`を別リクエストで呼ぶ。Workerを起動せず、公式取得やmergeのCPU時間をshellへ持ち込まない。
+本番の`GET /`はStatic AssetsからSSG済みshellを返す。ブラウザはHTML解析中に`GET /api/kf3-news`のpreloadを開始し、hydration後のIslandがその結果を利用する。必要に応じて`POST /api/kf3-news/refresh`を別リクエストで呼ぶ。Workerを起動せず、公式取得やmergeのCPU時間をshellへ持ち込まない。
 
 ## scheduled handlerをローカルで確認
 
