@@ -298,6 +298,12 @@ describe("Worker API handler", () => {
       "kf3-news",
       createNewsCacheMetadata("archive-fallback", "2026-08-09T12:34:56.789Z"),
     );
+    setup.env.CF_VERSION_METADATA = {
+      id: "version-1",
+      tag: "test",
+      timestamp: "2026-08-09T12:34:56.789Z",
+    };
+    const logs: Record<string, unknown>[] = [];
     let fetchCalls = 0;
     let clockCalls = 0;
     const handler = createWorkerHandler({
@@ -309,6 +315,7 @@ describe("Worker API handler", () => {
         clockCalls += 1;
         return Date.now();
       },
+      logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
     });
     const response = await callFetch(
       handler,
@@ -322,6 +329,18 @@ describe("Worker API handler", () => {
     expect(setup.dataGets).toEqual([]);
     expect(fetchCalls).toBe(0);
     expect(clockCalls).toBe(0);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "news_api_succeeded",
+        dataSource: "merged-kv",
+        workerVersionId: "version-1",
+        primaryCacheReadDurationMs: expect.any(Number),
+        snapshotCacheReadDurationMs: 0,
+        archiveReadDurationMs: 0,
+        officialCheckStateReadDurationMs: 0,
+        totalDurationMs: expect.any(Number),
+      }),
+    );
   });
 
   it("cacheは再検証せずそのまま返す", async () => {
@@ -354,10 +373,12 @@ describe("Worker API handler", () => {
     const setup = createBindings(JSON.stringify(createDocument(2)), undefined, {
       checkStateText: JSON.stringify({ version: 1, checkedAt: officialCheckedAt }),
     });
+    const logs: Record<string, unknown>[] = [];
     const handler = createWorkerHandler({
       fetcher: async () => {
         throw new Error("unexpected fetch");
       },
+      logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
     });
     const pending: Promise<unknown>[] = [];
     const response = await callFetch(
@@ -381,7 +402,7 @@ describe("Worker API handler", () => {
     expect(setup.cachePuts[0]).toMatchObject({
       key: "kf3-news-archive-snapshot",
       value: responseText,
-      expirationTtl: 300,
+      expirationTtl: 86400,
       metadata: {
         version: 2,
         source: "archive-snapshot",
@@ -390,6 +411,17 @@ describe("Worker API handler", () => {
         newsCount: 2,
       },
     });
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "news_api_succeeded",
+        dataSource: "r2",
+        primaryCacheReadDurationMs: expect.any(Number),
+        snapshotCacheReadDurationMs: expect.any(Number),
+        archiveReadDurationMs: expect.any(Number),
+        officialCheckStateReadDurationMs: expect.any(Number),
+        totalDurationMs: expect.any(Number),
+      }),
+    );
   });
 
   it("snapshot cache maintenanceはレスポンスを待たせない", async () => {
@@ -460,9 +492,12 @@ describe("Worker API handler", () => {
       "kf3-news-archive-snapshot",
       createNewsCacheMetadata("archive-snapshot", "2026-08-09T12:34:56.789Z", null, 1),
     );
+    const logs: Record<string, unknown>[] = [];
 
     const response = await callFetch(
-      createWorkerHandler(),
+      createWorkerHandler({
+        logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+      }),
       new Request("https://example.com/api/kf3-news"),
       setup.env,
     );
@@ -471,6 +506,17 @@ describe("Worker API handler", () => {
     expect(await response.text()).toBe("archive-json");
     expect(setup.dataGets).toEqual([]);
     expect(setup.cachePuts).toEqual([]);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "news_api_succeeded",
+        dataSource: "snapshot-kv",
+        primaryCacheReadDurationMs: expect.any(Number),
+        snapshotCacheReadDurationMs: expect.any(Number),
+        archiveReadDurationMs: 0,
+        officialCheckStateReadDurationMs: 0,
+        totalDurationMs: expect.any(Number),
+      }),
+    );
   });
 
   it("cache missのKV write失敗でもHTTP 200を維持する", async () => {
@@ -623,6 +669,11 @@ describe("Worker API handler", () => {
     const official = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
     official.news[0] = { ...official.news[0], category: "refresh" };
     const setup = createBindings(JSON.stringify(archive));
+    setup.env.CF_VERSION_METADATA = {
+      id: "version-refresh",
+      tag: "test-refresh",
+      timestamp: "2026-08-09T12:34:56.789Z",
+    };
     const originalData = setup.env.KF3_NOTIF_DATA;
     let controlText: string | null = null;
     let controlEtag = "control-etag-0";
@@ -681,7 +732,7 @@ describe("Worker API handler", () => {
       "2026-08-09T12:39:56.789Z",
     );
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(setup.cachePuts[0].expirationTtl).toBe(300);
+    expect(setup.cachePuts[0].expirationTtl).toBe(86400);
     expect(setup.cachePuts[0].metadata).toEqual({
       ...createNewsCacheMetadata(
         "merged",
@@ -714,6 +765,7 @@ describe("Worker API handler", () => {
     expect(logs).toContainEqual(
       expect.objectContaining({
         event: "news_refresh_succeeded",
+        workerVersionId: "version-refresh",
         archiveCount: MIN_OFFICIAL_ENTRY_COUNT,
         addedCount: MIN_OFFICIAL_ENTRY_COUNT - 1,
         updatedCount: 1,
@@ -1384,6 +1436,11 @@ describe("Worker API handler", () => {
 
   it("refresh失敗時は既存KVを維持して503にする", async () => {
     const setup = createBindings(JSON.stringify(createDocument(1)));
+    setup.env.CF_VERSION_METADATA = {
+      id: "version-refresh-failed",
+      tag: "test-refresh-failed",
+      timestamp: "2026-08-09T12:34:56.789Z",
+    };
     setup.cacheValues.set("kf3-news", "old-cache");
     const logs: Record<string, unknown>[] = [];
     const handler = createWorkerHandler({
@@ -1399,7 +1456,12 @@ describe("Worker API handler", () => {
     expect(setup.cacheValues.get("kf3-news")).toBe("old-cache");
     expect(setup.cachePuts).toHaveLength(0);
     expect(setup.queueMessages).toHaveLength(0);
-    expect(logs).toContainEqual(expect.objectContaining({ event: "news_refresh_failed" }));
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        event: "news_refresh_failed",
+        workerVersionId: "version-refresh-failed",
+      }),
+    );
   });
 
   it("legacy routeのGETとHEAD互換性を維持する", async () => {

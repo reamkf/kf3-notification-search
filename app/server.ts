@@ -50,7 +50,7 @@ import { NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, NEWS_CACHE_KEY } from "./news-cache-ke
 const oldNewsPath = `/${LEGACY_ARCHIVE_KEY}`;
 const cacheKey = NEWS_CACHE_KEY;
 const archiveSnapshotCacheKey = NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY;
-const normalCacheTtl = 60 * 5;
+const newsCacheExpirationTtl = 24 * 60 * 60;
 const heartbeatTimeoutMs = 10_000;
 
 export type ServerDependencies = {
@@ -65,6 +65,8 @@ const defaultLogger: ArchiveLogger = {
   log: (event) => console.log(event),
   error: (event) => console.error(event),
 };
+
+const getWorkerVersionId = (env: WorkerBindings) => env.CF_VERSION_METADATA?.id ?? null;
 
 const getOldNewsObject = async (bucket: WorkerBindings["KF3_NOTIF_DATA"]) => {
   const object = await bucket.get(LEGACY_ARCHIVE_KEY);
@@ -87,12 +89,17 @@ const createApiErrorLog = (error: unknown, archiveCount: number | null = null) =
   archiveCount,
 });
 
-const createRefreshErrorLog = (error: unknown, archiveCount: number | null = null) => ({
+const createRefreshErrorLog = (
+  error: unknown,
+  archiveCount: number | null = null,
+  workerVersionId: string | null = null,
+) => ({
   event: "news_refresh_failed",
   stage: getErrorStage(error),
   error: "お知らせ更新に失敗しました",
   originalError: serializeArchiveErrorForLog(error),
   archiveCount,
+  workerVersionId,
 });
 
 const refreshPath = "/api/kf3-news/refresh";
@@ -178,6 +185,15 @@ type RefreshMeasurements = RefreshDurations & {
   refreshDataSource: "kv" | "current" | "full-merge" | null;
 };
 
+type NewsApiMeasurements = {
+  primaryCacheReadDurationMs: number;
+  snapshotCacheReadDurationMs: number;
+  archiveReadDurationMs: number;
+  officialCheckStateReadDurationMs: number;
+};
+
+type NewsApiDataSource = "merged-kv" | "snapshot-kv" | "r2";
+
 type RefreshNewsResult = RefreshDurations & {
   officialFetchCount: number;
   clientJson: string;
@@ -202,6 +218,35 @@ const measureRefreshOperation = async <T>(
   } finally {
     durations[field] += performance.now() - startedAt;
   }
+};
+
+const measureNewsApiOperation = async <T>(
+  measurements: NewsApiMeasurements,
+  field: keyof NewsApiMeasurements,
+  operation: () => Promise<T>,
+): Promise<T> => {
+  const startedAt = performance.now();
+  try {
+    return await operation();
+  } finally {
+    measurements[field] += performance.now() - startedAt;
+  }
+};
+
+const logNewsApiSuccess = (
+  logger: ArchiveLogger,
+  env: WorkerBindings,
+  dataSource: NewsApiDataSource,
+  measurements: NewsApiMeasurements,
+  startedAt: number,
+) => {
+  logger.log({
+    event: "news_api_succeeded",
+    dataSource,
+    ...measurements,
+    totalDurationMs: performance.now() - startedAt,
+    workerVersionId: getWorkerVersionId(env),
+  });
 };
 
 const measureOfficialFetch = (
@@ -393,25 +438,47 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
 
   baseApp.get("/api/kf3-news", async (context) => {
     let archiveCount: number | null = null;
+    const startedAt = performance.now();
+    const measurements: NewsApiMeasurements = {
+      primaryCacheReadDurationMs: 0,
+      snapshotCacheReadDurationMs: 0,
+      archiveReadDurationMs: 0,
+      officialCheckStateReadDurationMs: 0,
+    };
     try {
-      const cachedNews =
-        await context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey);
-      if (cachedNews.value !== null)
-        return createJsonResponse(cachedNews.value, cachedNews.metadata ?? undefined);
+      const cachedNews = await measureNewsApiOperation(
+        measurements,
+        "primaryCacheReadDurationMs",
+        () => context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey),
+      );
+      if (cachedNews.value !== null) {
+        const response = createJsonResponse(cachedNews.value, cachedNews.metadata ?? undefined);
+        logNewsApiSuccess(logger, context.env, "merged-kv", measurements, startedAt);
+        return response;
+      }
 
-      const cachedArchiveSnapshot =
-        await context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(
-          archiveSnapshotCacheKey,
-        );
-      if (cachedArchiveSnapshot.value !== null)
-        return createJsonResponse(
+      const cachedArchiveSnapshot = await measureNewsApiOperation(
+        measurements,
+        "snapshotCacheReadDurationMs",
+        () =>
+          context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(archiveSnapshotCacheKey),
+      );
+      if (cachedArchiveSnapshot.value !== null) {
+        const response = createJsonResponse(
           cachedArchiveSnapshot.value,
           cachedArchiveSnapshot.metadata ?? undefined,
         );
+        logNewsApiSuccess(logger, context.env, "snapshot-kv", measurements, startedAt);
+        return response;
+      }
 
       const [snapshot, checkState] = await Promise.all([
-        readArchiveSnapshot(context.env),
-        readOfficialCheckState(context.env.KF3_NOTIF_DATA),
+        measureNewsApiOperation(measurements, "archiveReadDurationMs", () =>
+          readArchiveSnapshot(context.env),
+        ),
+        measureNewsApiOperation(measurements, "officialCheckStateReadDurationMs", () =>
+          readOfficialCheckState(context.env.KF3_NOTIF_DATA),
+        ),
       ]);
       archiveCount = snapshot.clientNews.length;
       const responseJson = JSON.stringify(snapshot.clientNews);
@@ -428,7 +495,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           let snapshotWasWritten = false;
           try {
             await context.env.KF3_NOTIF_CACHE.put(archiveSnapshotCacheKey, responseJson, {
-              expirationTtl: normalCacheTtl,
+              expirationTtl: newsCacheExpirationTtl,
               metadata,
             });
             snapshotWasWritten = true;
@@ -456,6 +523,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           }
         })(),
       );
+      logNewsApiSuccess(logger, context.env, "r2", measurements, startedAt);
       return response;
     } catch (error) {
       logger.error(createApiErrorLog(error, archiveCount));
@@ -497,6 +565,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           archiveCount,
           reason: acquired.status,
           retryAfterSeconds: acquired.retryAfterSeconds,
+          workerVersionId: getWorkerVersionId(context.env),
         });
         return createRefreshBusyResponse(acquired);
       }
@@ -538,7 +607,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       const cachePutStartedAt = performance.now();
       try {
         await context.env.KF3_NOTIF_CACHE.put(cacheKey, responseJson, {
-          expirationTtl: normalCacheTtl,
+          expirationTtl: newsCacheExpirationTtl,
           metadata,
         });
       } finally {
@@ -641,6 +710,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       }
       logger.log({
         event: "news_refresh_succeeded",
+        workerVersionId: getWorkerVersionId(context.env),
         archiveCount,
         mergedCount: result.newsCount,
         addedCount: result.addedCount,
@@ -674,7 +744,8 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         refreshAvailableAt,
       );
     } catch (error) {
-      logger.error(createRefreshErrorLog(error, archiveCount));
+      const workerVersionId = getWorkerVersionId(context.env);
+      logger.error(createRefreshErrorLog(error, archiveCount, workerVersionId));
       if (lease !== null) {
         try {
           await completeNewsRefreshLease(
@@ -684,7 +755,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
             dependencies.clock?.() ?? Date.now(),
           );
         } catch (completionError) {
-          logger.error(createRefreshErrorLog(completionError, archiveCount));
+          logger.error(createRefreshErrorLog(completionError, archiveCount, workerVersionId));
         }
       }
       return context.json({ error: "お知らせ更新に失敗しました" }, 503);

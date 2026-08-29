@@ -261,7 +261,7 @@ describe("KemonoFriends3NewsSearch", () => {
     expect(refreshButton?.className).toContain("text-gray-700");
   });
 
-  it("古いGETデータを表示してからrefreshを自動実行する", async () => {
+  it("KV保持期間にかかわらず公式確認日時が5分以上古ければrefreshを自動実行する", async () => {
     const oldNews = [createNews(1, "前回のお知らせ")];
     const refreshedNews = [createNews(1, "更新されたお知らせ")];
     const officialCheckedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
