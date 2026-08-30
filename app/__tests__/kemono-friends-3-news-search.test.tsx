@@ -3,8 +3,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot } from "hono/jsx/dom/client";
 import KemonoFriends3NewsSearch, {
+  formatRelativeCheckedAt,
+  getRelativeTimeUpdateDelay,
   INITIAL_LOADING_INDICATOR_ID,
 } from "../islands/KemonoFriends3NewsSearch";
+
+const newsRowRenderSpy = vi.hoisted(() => vi.fn());
+
+vi.mock("../islands/KemonoFriends3NewsRow", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../islands/KemonoFriends3NewsRow")>();
+  return {
+    ...actual,
+    NewsRow: vi.fn((props: Parameters<typeof actual.NewsRow>[0]) => {
+      newsRowRenderSpy();
+      return actual.NewsRow(props);
+    }),
+  };
+});
 
 const createNews = (
   id: number,
@@ -103,6 +118,20 @@ const flushUpdates = async () => {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 };
 
+const flushFakeUpdates = async () => {
+  for (let index = 0; index < 4; index++) {
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(20);
+  }
+};
+
+const setVisibilityState = (state: DocumentVisibilityState) => {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: state,
+  });
+};
+
 const advanceRefreshCooldown = async (elapsedMs = 5 * 60_000) => {
   const now = Date.now();
   vi.spyOn(Date, "now").mockReturnValue(now + elapsedMs);
@@ -126,6 +155,8 @@ const getRefreshIndicator = () =>
 
 beforeEach(() => {
   intersectionObservers.length = 0;
+  newsRowRenderSpy.mockClear();
+  setVisibilityState("visible");
   localStorage.clear();
   vi.stubGlobal(
     "IntersectionObserver",
@@ -140,11 +171,103 @@ afterEach(() => {
   root = undefined;
   document.body.replaceChildren();
   localStorage.clear();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
+describe("relative-time helpers", () => {
+  it("formats every display unit and returns the next boundary delay", () => {
+    const now = Date.parse("2026-08-30T00:00:00.000Z");
+    const timestamp = (elapsedMs: number) => new Date(now - elapsedMs).toISOString();
+
+    expect(formatRelativeCheckedAt(timestamp(59_999), now)).toBe("59秒前");
+    expect(getRelativeTimeUpdateDelay(timestamp(59_999), now)).toBe(1);
+    expect(formatRelativeCheckedAt(timestamp(60_000), now)).toBe("1分前");
+    expect(getRelativeTimeUpdateDelay(timestamp(60_000), now)).toBe(60_000);
+    expect(formatRelativeCheckedAt(timestamp(60 * 60_000), now)).toBe("1時間前");
+    expect(getRelativeTimeUpdateDelay(timestamp(60 * 60_000), now)).toBe(60 * 60_000);
+    expect(formatRelativeCheckedAt(timestamp(24 * 60 * 60_000), now)).toBe("1日前");
+    expect(getRelativeTimeUpdateDelay(timestamp(24 * 60 * 60_000), now)).toBe(24 * 60 * 60_000);
+    expect(formatRelativeCheckedAt(timestamp(30 * 24 * 60 * 60_000), now)).toBe("1か月前");
+    expect(getRelativeTimeUpdateDelay(timestamp(30 * 24 * 60 * 60_000), now)).toBe(
+      30 * 24 * 60 * 60_000,
+    );
+    expect(formatRelativeCheckedAt(timestamp(12 * 30 * 24 * 60 * 60_000), now)).toBe("1年前");
+    expect(getRelativeTimeUpdateDelay(timestamp(12 * 30 * 24 * 60 * 60_000), now)).toBe(
+      12 * 30 * 24 * 60 * 60_000,
+    );
+    expect(getRelativeTimeUpdateDelay(null, now)).toBeNull();
+  });
+});
+
 describe("KemonoFriends3NewsSearch", () => {
+  it("相対時刻とcooldownのtimerは非表示中に停止し、復帰時に再計算する", async () => {
+    vi.useFakeTimers();
+    const baseTime = Date.parse("2026-08-30T00:00:00.000Z");
+    vi.setSystemTime(baseTime);
+    const officialCheckedAt = new Date(baseTime - 30_000).toISOString();
+    const refreshAvailableAt = new Date(baseTime + 5_000).toISOString();
+    mockNewsApi({
+      news: [createNews(1)],
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Official-Checked-At": officialCheckedAt,
+        "X-KF3-News-Refresh-Available-At": refreshAvailableAt,
+      },
+    });
+
+    mount();
+    await flushFakeUpdates();
+    expect(container.textContent).toContain("最終取得: 30秒前");
+    expect(getRefreshButton()?.disabled).toBe(true);
+
+    setVisibilityState("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(container.textContent).toContain("最終取得: 30秒前");
+    expect(getRefreshButton()?.disabled).toBe(true);
+
+    setVisibilityState("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushFakeUpdates();
+    expect(container.textContent).toContain("最終取得: 1分前");
+    expect(getRefreshButton()?.disabled).toBe(false);
+    expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("idle");
+  });
+
+  it("2,000件表示中の相対時刻更新はニュース行を再描画しない", async () => {
+    vi.useFakeTimers();
+    const baseTime = Date.parse("2026-08-30T00:00:00.000Z");
+    vi.setSystemTime(baseTime);
+    const news = Array.from({ length: 2_000 }, (_, index) =>
+      createNews(index + 1, `お知らせ${index + 1}`, "2026年08月01日 12時00分00秒"),
+    );
+    mockNewsApi({
+      news,
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Official-Checked-At": new Date(baseTime - 30_000).toISOString(),
+      },
+    });
+
+    mount();
+    await flushFakeUpdates();
+    expect(container.querySelectorAll("li")).toHaveLength(20);
+    while (container.querySelectorAll("li").length < news.length) {
+      const previousCount = container.querySelectorAll("li").length;
+      intersectionObservers.at(-1)?.trigger();
+      await flushFakeUpdates();
+      expect(container.querySelectorAll("li").length).toBeGreaterThan(previousCount);
+    }
+    const initialRowRenderCount = newsRowRenderSpy.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await flushFakeUpdates();
+    expect(container.textContent).toContain("最終取得: 1分前");
+    expect(newsRowRenderSpy).toHaveBeenCalledTimes(initialRowRenderCount);
+  });
+
   it("取得中から成功へ遷移し、20件ずつ追加表示する", async () => {
     const news = Array.from({ length: 25 }, (_, index) =>
       createNews(index + 1, `お知らせ${index + 1}`, "2026年08月01日 12時00分00秒"),

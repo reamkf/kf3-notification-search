@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "hono/jsx";
+import { useCallback, useEffect, useMemo, useRef, useState } from "hono/jsx";
 import * as v from "valibot";
 import { newsArraySchema, News, summarizeValidationIssues } from "../schema";
 import { QueryParser } from "../query-parser";
@@ -9,6 +9,7 @@ import {
   parseNewsResponseHeaders,
   type NewsResponseMetadata,
 } from "../news-response-metadata";
+import { NewsRow } from "./KemonoFriends3NewsRow";
 
 // localStorageのキー(同一ドメインでの競合回避のためアプリ固有のprefixを付与)
 const STORAGE_KEYS = {
@@ -30,36 +31,11 @@ const REFRESH_TIMEOUT_MS = 15_000;
 const REFRESH_COOLDOWN_MS = 5 * 60_000;
 const SEARCH_OPTIONS_TRANSITION_MS = 300;
 const METADATA_TEXT_CLASS = "text-sm font-normal leading-5 text-gray-600";
-
-const CATEGORY_LABEL_CLASSES: Record<string, string> = {
-  おしらせ: "bg-orange-200 text-orange-900",
-  しょうたい: "bg-[#00ac8e]/30 text-[#006b58]",
-  イベント: "bg-[#ea5420]/30 text-[#9a3412]",
-  キャンペーン: "bg-yellow-200 text-yellow-900",
-  スペシャル: "bg-blue-200 text-blue-900",
-  メンテナンス: "bg-purple-200 text-purple-900",
-  不具合: "bg-gray-300 text-gray-900",
-  重要: "bg-red-200 text-red-900",
-  アプリ: "bg-green-200 text-green-900",
-};
-
-const FALLBACK_CATEGORY_LABEL_CLASSES = [
-  "bg-slate-200 text-slate-900",
-  "bg-lime-200 text-lime-900",
-  "bg-teal-200 text-teal-900",
-  "bg-indigo-200 text-indigo-900",
-] as const;
-
-const getCategoryLabels = (category?: string): string[] =>
-  category
-    ?.split(",")
-    .map((label) => label.trim())
-    .filter(Boolean)
-    .map((label) => (label === "【サイト】アプリ" ? "アプリ" : label)) ?? [];
-
-const getCategoryLabelClass = (label: string, index: number): string =>
-  CATEGORY_LABEL_CLASSES[label] ??
-  FALLBACK_CATEGORY_LABEL_CLASSES[index % FALLBACK_CATEGORY_LABEL_CLASSES.length];
+const RELATIVE_MINUTE_MS = 60 * 1000;
+const RELATIVE_HOUR_MS = 60 * RELATIVE_MINUTE_MS;
+const RELATIVE_DAY_MS = 24 * RELATIVE_HOUR_MS;
+const RELATIVE_MONTH_MS = 30 * RELATIVE_DAY_MS;
+const RELATIVE_YEAR_MS = 12 * RELATIVE_MONTH_MS;
 
 type NewsPayload = {
   data: Array<News>;
@@ -202,7 +178,7 @@ const getNewsTimestamp = (news: News) => {
   return timestamp;
 };
 
-const formatRelativeCheckedAt = (officialCheckedAt: string | null, now = Date.now()) => {
+export const formatRelativeCheckedAt = (officialCheckedAt: string | null, now = Date.now()) => {
   const checkedAtMs = officialCheckedAt ? Date.parse(officialCheckedAt) : Number.NaN;
   if (!Number.isFinite(checkedAtMs)) return "不明";
 
@@ -210,24 +186,188 @@ const formatRelativeCheckedAt = (officialCheckedAt: string | null, now = Date.no
   const elapsedSeconds = Math.floor(elapsedMs / 1000);
   if (elapsedSeconds < 60) return `${elapsedSeconds}秒前`;
 
-  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  const elapsedMinutes = Math.floor(elapsedMs / RELATIVE_MINUTE_MS);
   if (elapsedMinutes < 60) return `${elapsedMinutes}分前`;
 
-  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  const elapsedHours = Math.floor(elapsedMs / RELATIVE_HOUR_MS);
   if (elapsedHours < 24) return `${elapsedHours}時間前`;
 
-  const elapsedDays = Math.floor(elapsedHours / 24);
+  const elapsedDays = Math.floor(elapsedMs / RELATIVE_DAY_MS);
   if (elapsedDays < 30) return `${elapsedDays}日前`;
 
-  const elapsedMonths = Math.floor(elapsedDays / 30);
+  const elapsedMonths = Math.floor(elapsedMs / RELATIVE_MONTH_MS);
   if (elapsedMonths < 12) return `${elapsedMonths}か月前`;
 
-  return `${Math.floor(elapsedMonths / 12)}年前`;
+  return `${Math.floor(elapsedMs / RELATIVE_YEAR_MS)}年前`;
+};
+
+export const getRelativeTimeUpdateDelay = (officialCheckedAt: string | null, now = Date.now()) => {
+  const checkedAtMs = officialCheckedAt ? Date.parse(officialCheckedAt) : Number.NaN;
+  if (!Number.isFinite(checkedAtMs)) return null;
+
+  const elapsedMs = Math.max(0, now - checkedAtMs);
+  const unitMs =
+    elapsedMs < RELATIVE_MINUTE_MS
+      ? 1000
+      : elapsedMs < RELATIVE_HOUR_MS
+        ? RELATIVE_MINUTE_MS
+        : elapsedMs < RELATIVE_DAY_MS
+          ? RELATIVE_HOUR_MS
+          : elapsedMs < RELATIVE_MONTH_MS
+            ? RELATIVE_DAY_MS
+            : elapsedMs < RELATIVE_YEAR_MS
+              ? RELATIVE_MONTH_MS
+              : RELATIVE_YEAR_MS;
+  const nextBoundary = checkedAtMs + (Math.floor(elapsedMs / unitMs) + 1) * unitMs;
+  return Math.max(1, nextBoundary - now);
 };
 
 const getRefreshCooldownUntil = (refreshAvailableAt: string | null, now = Date.now()) => {
   const availableAtMs = refreshAvailableAt ? Date.parse(refreshAvailableAt) : Number.NaN;
   return Number.isFinite(availableAtMs) ? availableAtMs : now + REFRESH_COOLDOWN_MS;
+};
+
+type NewsMetadataProps = {
+  metadata: NewsResponseMetadata | null;
+  totalNewsCount: number;
+  isInitialLoading: boolean;
+  refreshState: RefreshState;
+  onRefresh: () => void;
+  onCooldownExpired: (retryAt: number) => void;
+};
+
+const NewsMetadata = ({
+  metadata,
+  totalNewsCount,
+  isInitialLoading,
+  refreshState,
+  onRefresh,
+  onCooldownExpired,
+}: NewsMetadataProps) => {
+  const [relativeNow, setRelativeNow] = useState(() => Date.now());
+  const officialCheckedAt = metadata?.officialCheckedAt ?? null;
+  const cooldownAt = refreshState.status === "cooldown" ? refreshState.retryAt : null;
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let active = true;
+
+    const clearTimer = () => {
+      if (timer === null) return;
+      clearTimeout(timer);
+      timer = null;
+    };
+
+    const schedule = () => {
+      clearTimer();
+      if (!active || document.visibilityState === "hidden") return;
+
+      const now = Date.now();
+      setRelativeNow(now);
+      if (cooldownAt !== null && now >= cooldownAt) {
+        onCooldownExpired(cooldownAt);
+        return;
+      }
+
+      const relativeDelay = getRelativeTimeUpdateDelay(officialCheckedAt, now);
+      const cooldownDelay = cooldownAt === null ? null : Math.max(1, cooldownAt - now);
+      const nextDelay = [relativeDelay, cooldownDelay]
+        .filter((delay): delay is number => delay !== null)
+        .reduce<number | null>(
+          (shortest, delay) => (shortest === null ? delay : Math.min(shortest, delay)),
+          null,
+        );
+      if (nextDelay === null) return;
+
+      timer = setTimeout(() => {
+        timer = null;
+        const tickNow = Date.now();
+        setRelativeNow(tickNow);
+        if (cooldownAt !== null && tickNow >= cooldownAt) {
+          onCooldownExpired(cooldownAt);
+          return;
+        }
+        schedule();
+      }, nextDelay);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") clearTimer();
+      else schedule();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    schedule();
+    return () => {
+      active = false;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      clearTimer();
+    };
+  }, [officialCheckedAt, cooldownAt, onCooldownExpired]);
+
+  const isRefreshing = refreshState.status === "refreshing";
+  const isCooldownActive = cooldownAt !== null && cooldownAt > relativeNow;
+  const isRefreshDisabled = isInitialLoading || isRefreshing || isCooldownActive;
+  const lastCheckedText = formatRelativeCheckedAt(officialCheckedAt, relativeNow);
+  const refreshStatusMessage =
+    refreshState.status === "refreshing"
+      ? "お知らせを再取得しています"
+      : refreshState.status === "error"
+        ? "お知らせの再取得に失敗しました"
+        : refreshState.status === "cooldown" && isCooldownActive
+          ? "お知らせは再取得待機中です"
+          : "";
+  const refreshButtonClasses = isRefreshDisabled
+    ? "text-gray-400"
+    : "text-gray-700 hover:text-gray-900";
+
+  return (
+    <>
+      {metadata && (
+        <div class="ml-auto flex items-center gap-1.5">
+          <span
+            data-testid="news-metadata"
+            data-refresh-status={refreshState.status}
+            aria-busy={isRefreshing ? "true" : "false"}
+            class="inline-flex items-center gap-1.5 whitespace-nowrap"
+          >
+            <RefreshStatusIcon status={refreshState.status} />
+            <span class={METADATA_TEXT_CLASS}>
+              最終取得:{" "}
+              {metadata.officialCheckedAt ? (
+                <time dateTime={metadata.officialCheckedAt}>{lastCheckedText}</time>
+              ) : (
+                lastCheckedText
+              )}
+              {" ･ "}
+              {totalNewsCount}件
+            </span>
+          </span>
+          <button
+            type="button"
+            data-testid="news-refresh-button"
+            onClick={onRefresh}
+            disabled={isRefreshDisabled}
+            aria-label="お知らせを再取得"
+            aria-describedby="news-refresh-status"
+            title="お知らせを再取得"
+            class={`inline-flex min-h-7 cursor-pointer items-center justify-center rounded p-1 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed ${refreshButtonClasses}`}
+          >
+            <ReloadIcon />
+          </button>
+        </div>
+      )}
+      <span
+        id="news-refresh-status"
+        class="sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {refreshStatusMessage}
+      </span>
+    </>
+  );
 };
 
 const isRefreshNeeded = (metadata: NewsResponseMetadata) => {
@@ -331,7 +471,6 @@ const KemonoFriends3NewsSearch = () => {
   const [initialErrorMessage, setInitialErrorMessage] = useState<string | null>(null);
   const [newsPayload, setNewsPayload] = useState<NewsPayload | null>(null);
   const [refreshState, setRefreshState] = useState<RefreshState>({ status: "idle" });
-  const [relativeNow, setRelativeNow] = useState(() => Date.now());
   const [searchKeyword, setSearchKeyword] = useState("");
   const [appliedSearchKeyword, setAppliedSearchKeyword] = useState("");
   const [visibleNewsCount, setVisibleNewsCount] = useState(NEWS_PAGE_SIZE);
@@ -455,7 +594,6 @@ const KemonoFriends3NewsSearch = () => {
           setNewsPayload({ data: validated.news, metadata });
         }
         const refreshedAt = Date.now();
-        setRelativeNow(refreshedAt);
         refreshInFlightRef.current = false;
         updateRefreshState({
           status: "cooldown",
@@ -479,6 +617,16 @@ const KemonoFriends3NewsSearch = () => {
   };
 
   refreshNewsRef.current = refreshNews;
+
+  const handleRefresh = useCallback(() => {
+    refreshNewsRef.current?.();
+  }, []);
+
+  const handleCooldownExpired = useCallback((retryAt: number) => {
+    const current = refreshStateRef.current;
+    if (current?.status !== "cooldown" || current.retryAt !== retryAt) return;
+    updateRefreshState({ status: "idle" });
+  }, []);
 
   useEffect(() => {
     setEndDate(getJapaneseDate());
@@ -559,38 +707,6 @@ const KemonoFriends3NewsSearch = () => {
     return () => clearTimeout(timer);
   }, [isSearchVisible, isSearchOptionsRendered]);
 
-  useEffect(() => {
-    if (!newsPayload?.metadata.officialCheckedAt && refreshState.status !== "cooldown") return;
-    let interval: ReturnType<typeof setInterval> | null = null;
-    const stop = () => {
-      if (interval === null) return;
-      clearInterval(interval);
-      interval = null;
-    };
-    const start = () => {
-      if (document.visibilityState === "hidden" || interval !== null) return;
-      interval = setInterval(() => setRelativeNow(Date.now()), 1_000);
-    };
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "hidden") stop();
-      else {
-        setRelativeNow(Date.now());
-        start();
-      }
-    };
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    start();
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      stop();
-    };
-  }, [newsPayload?.metadata.officialCheckedAt, refreshState.status]);
-
-  useEffect(() => {
-    if (refreshState.status !== "cooldown" || refreshState.retryAt > relativeNow) return;
-    updateRefreshState({ status: "idle" });
-  }, [relativeNow, refreshState]);
-
   // 検索キーワードの変更をハンドリング
   const handleSearchChange = (event: Event) => {
     if (event.target instanceof HTMLInputElement) setSearchKeyword(event.target.value);
@@ -657,9 +773,6 @@ const KemonoFriends3NewsSearch = () => {
   const isKeywordSearchApplied = normalizeQuery(appliedSearchKeyword).length > 0;
   const hasMoreNews = visibleNewsCount < numberOfNews;
   const isInitialLoading = initialLoadStatus === "loading";
-  const isRefreshing = refreshState.status === "refreshing";
-  const isCooldownActive = refreshState.status === "cooldown" && refreshState.retryAt > relativeNow;
-  const isRefreshDisabled = isInitialLoading || isRefreshing || isCooldownActive;
 
   useEffect(() => {
     const loadMoreTarget = loadMoreRef.current;
@@ -680,18 +793,6 @@ const KemonoFriends3NewsSearch = () => {
   }, [hasMoreNews, numberOfNews, visibleNewsCount]);
 
   const metadata = newsPayload?.metadata ?? null;
-  const lastCheckedText = formatRelativeCheckedAt(metadata?.officialCheckedAt ?? null, relativeNow);
-  const refreshStatusMessage =
-    refreshState.status === "refreshing"
-      ? "お知らせを再取得しています"
-      : refreshState.status === "error"
-        ? "お知らせの再取得に失敗しました"
-        : refreshState.status === "cooldown" && isCooldownActive
-          ? "お知らせは再取得待機中です"
-          : "";
-  const refreshButtonClasses = isRefreshDisabled
-    ? "text-gray-400"
-    : "text-gray-700 hover:text-gray-900";
   return (
     <div>
       {initialErrorMessage && (
@@ -852,81 +953,19 @@ const KemonoFriends3NewsSearch = () => {
           {isKeywordSearchApplied && (
             <span class={METADATA_TEXT_CLASS}>検索結果: {numberOfNews}件</span>
           )}
-          {metadata && (
-            <div class="ml-auto flex items-center gap-1.5">
-              <span
-                data-testid="news-metadata"
-                data-refresh-status={refreshState.status}
-                aria-busy={isRefreshing ? "true" : "false"}
-                class="inline-flex items-center gap-1.5 whitespace-nowrap"
-              >
-                <RefreshStatusIcon status={refreshState.status} />
-                <span class={METADATA_TEXT_CLASS}>
-                  最終取得:{" "}
-                  {metadata.officialCheckedAt ? (
-                    <time dateTime={metadata.officialCheckedAt}>{lastCheckedText}</time>
-                  ) : (
-                    lastCheckedText
-                  )}
-                  {" ･ "}
-                  {totalNewsCount}件
-                </span>
-              </span>
-              <button
-                type="button"
-                data-testid="news-refresh-button"
-                onClick={() => refreshNewsRef.current?.()}
-                disabled={isRefreshDisabled}
-                aria-label="お知らせを再取得"
-                aria-describedby="news-refresh-status"
-                title="お知らせを再取得"
-                class={`inline-flex min-h-7 cursor-pointer items-center justify-center rounded p-1 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed ${refreshButtonClasses}`}
-              >
-                <ReloadIcon />
-              </button>
-            </div>
-          )}
-          <span
-            id="news-refresh-status"
-            class="sr-only"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-          >
-            {refreshStatusMessage}
-          </span>
+          <NewsMetadata
+            metadata={metadata}
+            totalNewsCount={totalNewsCount}
+            isInitialLoading={isInitialLoading}
+            refreshState={refreshState}
+            onRefresh={handleRefresh}
+            onCooldownExpired={handleCooldownExpired}
+          />
         </div>
 
         <ul class="space-y-4">
           {newsData.map((news) => (
-            <li
-              key={news.targetUrl}
-              class="group bg-white hover:bg-blue-50 border border-gray-300 rounded-lg transition-all duration-200 hover:shadow-lg"
-            >
-              <a
-                href={`https://kemono-friends-3.jp${news.targetUrl}`}
-                target="_blank"
-                rel="noreferrer"
-                class="block p-4"
-              >
-                <div class="flex flex-wrap items-center gap-2 mb-2">
-                  <time class="text-sm text-gray-500">{news.newsDate.slice(0, 11)}</time>
-                  {getCategoryLabels(news.category).map((categoryLabel, categoryIndex) => (
-                    <span
-                      class={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${getCategoryLabelClass(categoryLabel, categoryIndex)}`}
-                      data-testid="news-category"
-                      key={`${categoryLabel}-${categoryIndex}`}
-                    >
-                      <span class="sr-only">分類: </span>
-                      {categoryLabel}
-                    </span>
-                  ))}
-                </div>
-                <p class="text-gray-800 group-hover:text-blue-600 transition-colors duration-200">
-                  {news.title}
-                </p>
-              </a>
-            </li>
+            <NewsRow key={news.targetUrl} news={news} />
           ))}
         </ul>
 
