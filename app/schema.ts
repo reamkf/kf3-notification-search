@@ -28,6 +28,32 @@ export const storedNewsDocumentSchema = v.looseObject({
 export type StoredNews = v.InferOutput<typeof storedNewsSchema>;
 export type StoredNewsDocument = v.InferOutput<typeof storedNewsDocumentSchema>;
 
+export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
+export type JsonObject = { [key: string]: JsonValue };
+export type JsonInput =
+  | undefined
+  | null
+  | boolean
+  | number
+  | string
+  | JsonInput[]
+  | { [key: string]: JsonInput };
+
+export const jsonValueSchema: v.GenericSchema<unknown, JsonValue> = v.lazy(() =>
+  v.union([
+    v.null(),
+    v.boolean(),
+    v.number(),
+    v.string(),
+    v.array(jsonValueSchema),
+    v.record(v.string(), jsonValueSchema),
+  ]),
+);
+
+export const jsonObjectSchema = v.record(v.string(), jsonValueSchema);
+
+const validationPathKeySchema = v.union([v.string(), v.number()]);
+
 export type ValidationIssueSummary = {
   message: string;
   path: Array<string | number>;
@@ -42,6 +68,6 @@ export const summarizeValidationIssues = (
       issue.path
         ?.map(({ key }) => key)
         .filter(
-          (key): key is string | number => typeof key === "string" || typeof key === "number",
+          (key): key is string | number => v.safeParse(validationPathKeySchema, key).success,
         ) ?? [],
   }));

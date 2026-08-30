@@ -1,3 +1,6 @@
+import * as v from "valibot";
+type ValidationInput = Parameters<typeof v.safeParse>[1];
+
 export const NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION = 2;
 
 export type NewsArchiveUpdateMessage = {
@@ -9,24 +12,32 @@ export type NewsArchiveUpdateMessage = {
   requiresInitialization: boolean;
 };
 
-export const isNewsArchiveUpdateMessage = (value: unknown): value is NewsArchiveUpdateMessage => {
-  if (typeof value !== "object" || value === null) return false;
-  const message = value as Record<string, unknown>;
-  const detectedAt = typeof message.detectedAt === "string" ? Date.parse(message.detectedAt) : NaN;
-  const addedCount = Number(message.addedCount);
-  const updatedCount = Number(message.updatedCount);
-  const hasChanges = addedCount + updatedCount > 0;
-  const requiresInitialization = message.requiresInitialization === true;
+const messageSchema = v.object({
+  version: v.literal(NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION),
+  reason: v.union([v.literal("refresh-detected-change"), v.literal("refresh-current-missing")]),
+  detectedAt: v.pipe(
+    v.string(),
+    v.check((value) => {
+      const timestamp = Date.parse(value);
+      return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+    }),
+  ),
+  addedCount: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+  updatedCount: v.pipe(v.number(), v.safeInteger(), v.minValue(0)),
+  requiresInitialization: v.boolean(),
+});
+
+export const isNewsArchiveUpdateMessage = (
+  value: ValidationInput,
+): value is NewsArchiveUpdateMessage => {
+  const result = v.safeParse(messageSchema, value);
+  if (!result.success) return false;
+  const message = result.output;
+  const hasChanges = message.addedCount + message.updatedCount > 0;
   return (
-    message.version === NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION &&
-    Number.isFinite(detectedAt) &&
-    new Date(detectedAt).toISOString() === message.detectedAt &&
-    Number.isSafeInteger(message.addedCount) &&
-    addedCount >= 0 &&
-    Number.isSafeInteger(message.updatedCount) &&
-    updatedCount >= 0 &&
-    typeof message.requiresInitialization === "boolean" &&
-    ((message.reason === "refresh-detected-change" && hasChanges && !requiresInitialization) ||
-      (message.reason === "refresh-current-missing" && requiresInitialization))
+    (message.reason === "refresh-detected-change" &&
+      hasChanges &&
+      !message.requiresInitialization) ||
+    (message.reason === "refresh-current-missing" && message.requiresInitialization)
   );
 };

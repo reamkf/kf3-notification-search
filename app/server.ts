@@ -15,6 +15,7 @@ import {
   updateOfficialCheckState,
   type ArchiveLogger,
   type NewsArchiveUpdateDependencies,
+  type NewsArchiveUpdateResult,
   type NewsFetcher,
 } from "./news-archive";
 import {
@@ -50,6 +51,8 @@ import {
   NEWS_CACHE_KEY,
   NEWS_REFRESH_STATE_KEY,
 } from "./news-cache-keys";
+import { bridgeRuntimeValue } from "./runtime-value";
+import type { JsonInput } from "./schema";
 
 const oldNewsPath = `/${LEGACY_ARCHIVE_KEY}`;
 const cacheKey = NEWS_CACHE_KEY;
@@ -61,7 +64,9 @@ const heartbeatTimeoutMs = 10_000;
 export type ServerDependencies = {
   fetcher?: NewsFetcher;
   heartbeatFetcher?: typeof fetch;
-  updater?: (dependencies: NewsArchiveUpdateDependencies) => Promise<unknown>;
+  updater?: (
+    dependencies: NewsArchiveUpdateDependencies,
+  ) => Promise<void | NewsArchiveUpdateResult>;
   logger?: ArchiveLogger;
   clock?: () => number;
 };
@@ -70,6 +75,8 @@ const defaultLogger: ArchiveLogger = {
   log: (event) => console.log(event),
   error: (event) => console.error(event),
 };
+
+const asLoggableError = <T>(error: T): Error | JsonInput => (error instanceof Error ? error : null);
 
 const getWorkerVersionId = (env: WorkerBindings) => env.CF_VERSION_METADATA?.id ?? null;
 
@@ -81,28 +88,28 @@ const getOldNewsObject = async (bucket: WorkerBindings["KF3_NOTIF_DATA"]) => {
   return object;
 };
 
-const getErrorStage = (error: unknown) => {
+const getErrorStage = <T>(error: T) => {
   if (error instanceof NewsArchiveError || error instanceof NewsDataError) return error.stage;
   return "unknown";
 };
 
-const createApiErrorLog = (error: unknown, archiveCount: number | null = null) => ({
+const createApiErrorLog = <T>(error: T, archiveCount: number | null = null) => ({
   event: "news_api_error",
   stage: getErrorStage(error),
   error: "お知らせAPI処理に失敗しました",
-  originalError: serializeArchiveErrorForLog(error),
+  originalError: serializeArchiveErrorForLog(asLoggableError(error)),
   archiveCount,
 });
 
-const createRefreshErrorLog = (
-  error: unknown,
+const createRefreshErrorLog = <T>(
+  error: T,
   archiveCount: number | null = null,
   workerVersionId: string | null = null,
 ) => ({
   event: "news_refresh_failed",
   stage: getErrorStage(error),
   error: "お知らせ更新に失敗しました",
-  originalError: serializeArchiveErrorForLog(error),
+  originalError: serializeArchiveErrorForLog(asLoggableError(error)),
   archiveCount,
   workerVersionId,
 });
@@ -518,7 +525,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           } catch (error) {
             logger.error({
               event: "news_api_cache_write_failed",
-              originalError: serializeArchiveErrorForLog(error),
+              originalError: serializeArchiveErrorForLog(asLoggableError(error)),
               archiveCount,
             });
             if (snapshotWasWritten) {
@@ -527,7 +534,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
               } catch (cleanupError) {
                 logger.error({
                   event: "news_api_cache_cleanup_failed",
-                  originalError: serializeArchiveErrorForLog(cleanupError),
+                  originalError: serializeArchiveErrorForLog(asLoggableError(cleanupError)),
                   archiveCount,
                 });
               }
@@ -598,7 +605,9 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           nowMs,
           NEWS_REFRESH_FINALIZATION_LEASE_MS,
         );
-        if (typeof leaseRenewal === "string") return createRefreshLeaseExpiredResponse();
+        if (leaseRenewal === "inactive" || leaseRenewal === "lease-mismatch") {
+          return createRefreshLeaseExpiredResponse();
+        }
         lease = leaseRenewal;
       }
 
@@ -628,7 +637,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         } catch (cleanupError) {
           logger.error({
             event: "news_refresh_cache_cleanup_failed",
-            originalError: serializeArchiveErrorForLog(cleanupError),
+            originalError: serializeArchiveErrorForLog(asLoggableError(cleanupError)),
           });
         }
       };
@@ -640,7 +649,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           logger.error({
             event: "news_refresh_cache_cleanup_failed",
             key: refreshStateKey,
-            originalError: serializeArchiveErrorForLog(cleanupError),
+            originalError: serializeArchiveErrorForLog(asLoggableError(cleanupError)),
           });
         }
       };
@@ -706,7 +715,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       } catch (error) {
         logger.error({
           event: "news_refresh_control_completion_failed",
-          originalError: serializeArchiveErrorForLog(error),
+          originalError: serializeArchiveErrorForLog(asLoggableError(error)),
         });
         await Promise.all([deleteWrittenCache(), deleteWrittenRefreshState()]);
         throw error;
@@ -730,7 +739,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
             .catch((error) => {
               logger.error({
                 event: "news_official_check_state_update_failed",
-                originalError: serializeArchiveErrorForLog(error),
+                originalError: serializeArchiveErrorForLog(asLoggableError(error)),
               });
             }),
         );
@@ -738,7 +747,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         officialCheckStateStatus = "schedule-failed";
         logger.error({
           event: "news_official_check_state_update_failed",
-          originalError: serializeArchiveErrorForLog(error),
+          originalError: serializeArchiveErrorForLog(asLoggableError(error)),
         });
       }
       const requiresInitialization = !result.currentExists;
@@ -761,7 +770,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
               .catch((error) => {
                 logger.error({
                   event: "news_archive_update_enqueue_failed",
-                  error: serializeArchiveErrorForLog(error),
+                  error: serializeArchiveErrorForLog(asLoggableError(error)),
                   addedCount: result.addedCount,
                   updatedCount: result.updatedCount,
                 });
@@ -772,7 +781,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           archiveUpdateQueueStatus = "schedule-failed";
           logger.error({
             event: "news_archive_update_enqueue_failed",
-            error: serializeArchiveErrorForLog(error),
+            error: serializeArchiveErrorForLog(asLoggableError(error)),
             addedCount: result.addedCount,
             updatedCount: result.updatedCount,
           });
@@ -861,17 +870,27 @@ const runArchiveUpdate = (
     invalidateDisplayCache: trigger !== "queue",
   });
 
+type WorkerFetchHandler = NonNullable<ExportedHandler<WorkerBindings>["fetch"]>;
+
 export const createWorkerHandler = (
   dependencies: ServerDependencies = {},
 ): ExportedHandler<WorkerBindings, unknown> => {
   const app = createNewsApp(dependencies);
   return {
-    fetch: ((request, env, context) =>
-      app.fetch(
-        request as unknown as globalThis.Request,
-        env,
-        context as unknown as globalThis.ExecutionContext,
-      ) as unknown as globalThis.Response) as NonNullable<ExportedHandler<WorkerBindings>["fetch"]>,
+    fetch: bridgeRuntimeValue<WorkerFetchHandler>(
+      (
+        request: Parameters<WorkerFetchHandler>[0],
+        env: Parameters<WorkerFetchHandler>[1],
+        context: Parameters<WorkerFetchHandler>[2],
+      ) =>
+        bridgeRuntimeValue<globalThis.Response>(
+          app.fetch(
+            bridgeRuntimeValue<globalThis.Request>(request),
+            env,
+            bridgeRuntimeValue<globalThis.ExecutionContext>(context),
+          ),
+        ),
+    ),
     scheduled: async (controller, env) => {
       const logger = dependencies.logger ?? defaultLogger;
       const heartbeatFetcher = dependencies.heartbeatFetcher ?? fetch;
@@ -895,23 +914,24 @@ export const createWorkerHandler = (
           message.ack();
           continue;
         }
+        const body = message.body;
         try {
           await runArchiveUpdate(env, dependencies, dependencies.clock?.() ?? Date.now(), "queue");
           logger.log({
             event: "news_archive_queue_succeeded",
             messageId: message.id,
-            reason: message.body.reason,
-            detectedAt: message.body.detectedAt,
-            addedCount: message.body.addedCount,
-            updatedCount: message.body.updatedCount,
-            requiresInitialization: message.body.requiresInitialization,
+            reason: body.reason,
+            detectedAt: body.detectedAt,
+            addedCount: body.addedCount,
+            updatedCount: body.updatedCount,
+            requiresInitialization: body.requiresInitialization,
           });
           message.ack();
         } catch (error) {
           logger.error({
             event: "news_archive_queue_failed",
             messageId: message.id,
-            error: serializeArchiveErrorForLog(error),
+            error: serializeArchiveErrorForLog(asLoggableError(error)),
           });
           message.retry({ delaySeconds: 60 });
         }

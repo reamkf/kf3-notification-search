@@ -1,3 +1,4 @@
+import * as v from "valibot";
 import type { KVNamespace, R2Bucket } from "@cloudflare/workers-types/experimental";
 import { CURRENT_ARCHIVE_KEY } from "../app/news-archive";
 import {
@@ -6,6 +7,7 @@ import {
   NEWS_REFRESH_STATE_KEY,
 } from "../app/news-cache-keys";
 import { canonicalizeNewsDocument, parseJapaneseNewsDate } from "../app/news-data";
+import type { JsonInput, JsonObject } from "../app/schema";
 
 const cacheKey = NEWS_CACHE_KEY;
 const snapshotKeyPattern =
@@ -40,14 +42,14 @@ class RestoreError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
-    readonly details: Record<string, unknown> = {},
+    readonly details: JsonObject = {},
   ) {
     super(message);
     this.name = "RestoreError";
   }
 }
 
-const jsonResponse = (value: unknown, status = 200) =>
+const jsonResponse = (value: JsonInput, status = 200) =>
   new Response(JSON.stringify(value), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
@@ -59,38 +61,58 @@ const isLocalRequest = (request: Request) => {
 };
 
 const parseRestoreInput = async (request: Request): Promise<RestoreInput> => {
-  let value: unknown;
+  let value: JsonInput;
   try {
     value = await request.json();
   } catch {
     throw new RestoreError(400, "invalid_json", "Request body must be valid JSON");
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (Array.isArray(value)) {
     throw new RestoreError(400, "invalid_request", "Request body must be an object");
   }
-  const body = value as Record<string, unknown>;
-  const mode = body.mode ?? "dry-run";
-  if (mode !== "dry-run" && mode !== "apply") {
+  const objectResult = v.safeParse(v.looseObject({}), value);
+  if (!objectResult.success) {
+    throw new RestoreError(400, "invalid_request", "Request body must be an object");
+  }
+  const bodyResult = v.safeParse(v.record(v.string(), v.any()), objectResult.output);
+  if (!bodyResult.success) {
+    throw new RestoreError(400, "invalid_request", "Request body must be an object");
+  }
+  const body = bodyResult.output;
+  const modeResult = v.safeParse(
+    v.union([v.literal("dry-run"), v.literal("apply")]),
+    body.mode ?? "dry-run",
+  );
+  if (!modeResult.success) {
     throw new RestoreError(400, "invalid_mode", "mode must be dry-run or apply");
   }
-  if (typeof body.snapshotKey !== "string" || !snapshotKeyPattern.test(body.snapshotKey)) {
+  const snapshotKeyResult = v.safeParse(
+    v.pipe(
+      v.string(),
+      v.check((key: string) => snapshotKeyPattern.test(key)),
+    ),
+    body.snapshotKey,
+  );
+  if (!snapshotKeyResult.success) {
     throw new RestoreError(
       400,
       "invalid_snapshot_key",
       "snapshotKey must identify a daily or monthly JSON snapshot",
     );
   }
-  if (body.snapshotDigest !== undefined && typeof body.snapshotDigest !== "string") {
+  const snapshotDigestResult = v.safeParse(v.optional(v.string()), body.snapshotDigest);
+  if (!snapshotDigestResult.success) {
     throw new RestoreError(400, "invalid_snapshot_digest", "snapshotDigest must be a string");
   }
-  if (body.currentEtag !== undefined && typeof body.currentEtag !== "string") {
+  const currentEtagResult = v.safeParse(v.optional(v.string()), body.currentEtag);
+  if (!currentEtagResult.success) {
     throw new RestoreError(400, "invalid_current_etag", "currentEtag must be a string");
   }
   return {
-    mode,
-    snapshotKey: body.snapshotKey,
-    snapshotDigest: body.snapshotDigest,
-    currentEtag: body.currentEtag,
+    mode: modeResult.output,
+    snapshotKey: snapshotKeyResult.output,
+    snapshotDigest: snapshotDigestResult.output,
+    currentEtag: currentEtagResult.output,
   };
 };
 
@@ -110,7 +132,7 @@ const readSnapshot = async (bucket: R2Bucket, snapshotKey: string): Promise<Snap
     throw new RestoreError(502, "snapshot_read_failed", "Failed to read the snapshot");
   }
 
-  let parsed: unknown;
+  let parsed: JsonInput;
   try {
     parsed = JSON.parse(text);
   } catch {

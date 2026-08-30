@@ -1,12 +1,18 @@
 import * as v from "valibot";
+import { bridgeRuntimeValue } from "./runtime-value";
 import {
   newsArraySchema,
   storedNewsDocumentSchema,
   summarizeValidationIssues,
+  type JsonInput,
+  type JsonObject,
+  type JsonValue,
   type News,
   type StoredNews,
   type StoredNewsDocument,
 } from "./schema";
+
+type SerializableValue = JsonInput | StoredNews | StoredNewsDocument;
 
 export const MAX_OFFICIAL_RESPONSE_BYTES = 10 * 1024 * 1024;
 export const MIN_OFFICIAL_ENTRY_COUNT = 1900;
@@ -15,9 +21,9 @@ export const OFFICIAL_NEWS_ORIGIN = "https://kemono-friends-3.jp";
 
 export class NewsDataError extends Error {
   readonly stage: string;
-  readonly details: Record<string, unknown>;
+  readonly details: JsonObject;
 
-  constructor(stage: string, message: string, details: Record<string, unknown> = {}) {
+  constructor(stage: string, message: string, details: JsonObject = {}) {
     super(message);
     this.name = "NewsDataError";
     this.stage = stage;
@@ -25,12 +31,58 @@ export class NewsDataError extends Error {
   }
 }
 
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
-
-const isPlainObject = (value: object) => {
+const isPlainObject = (value: JsonObject) => {
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 };
+
+type InputObject = { [key: string]: JsonInput };
+type NewsRecord = InputObject & {
+  id: number;
+  targetUrl: string;
+  title: string;
+  newsDate: string;
+  updated: string;
+  category?: string;
+};
+
+const isInputObject = (value: SerializableValue): value is InputObject =>
+  value !== null &&
+  !Array.isArray(value) &&
+  Object.prototype.toString.call(value) === "[object Object]";
+
+const isInputString = (value: JsonInput): value is string =>
+  Object.prototype.toString.call(value) === "[object String]";
+
+const isInputNumber = (value: JsonInput): value is number =>
+  Object.prototype.toString.call(value) === "[object Number]" && Number.isFinite(Number(value));
+
+const isNewsRecord = (value: JsonInput): value is NewsRecord => {
+  if (!isInputObject(value)) return false;
+  return (
+    isInputNumber(value.id) &&
+    Number.isSafeInteger(value.id) &&
+    value.id > 0 &&
+    isInputString(value.targetUrl) &&
+    value.targetUrl.length > 0 &&
+    isInputString(value.title) &&
+    value.title.length > 0 &&
+    isInputString(value.newsDate) &&
+    isInputString(value.updated) &&
+    (value.category === undefined || isInputString(value.category))
+  );
+};
+
+const jsonRecordSchema = v.record(v.string(), v.any());
+const jsonPrimitiveSchema = v.union([
+  v.null(),
+  v.boolean(),
+  v.pipe(
+    v.number(),
+    v.check((value: number) => Number.isFinite(value)),
+  ),
+  v.string(),
+]);
 
 const compareUnicodeCodePoints = (left: string, right: string) => {
   let leftIndex = 0;
@@ -57,22 +109,13 @@ const getSortedKeys = (keys: string[], keyOrderCache: Map<string, string[]>) => 
 };
 
 const normalizeJsonValue = (
-  value: unknown,
-  ancestors: Set<object>,
+  value: SerializableValue,
+  ancestors: Set<SerializableValue>,
   keyOrderCache: Map<string, string[]>,
 ): JsonValue => {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
-    return value;
-  }
-
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new NewsDataError("serialization", "JSONで表現できない数値が含まれています");
-    }
-    return value;
-  }
-
-  if (typeof value !== "object") {
+  const primitive = v.safeParse(jsonPrimitiveSchema, value);
+  if (primitive.success) return primitive.output;
+  if (value === undefined) {
     throw new NewsDataError("serialization", "JSONで表現できない値が含まれています");
   }
 
@@ -85,23 +128,24 @@ const normalizeJsonValue = (
   if (Array.isArray(value)) {
     normalized = value.map((item) => normalizeJsonValue(item, ancestors, keyOrderCache));
   } else {
-    if (!isPlainObject(value)) {
+    const objectResult = v.safeParse(jsonRecordSchema, value);
+    if (!objectResult.success || !isPlainObject(objectResult.output)) {
       throw new NewsDataError("serialization", "プレーンオブジェクト以外の値は保存できません");
     }
 
-    const propertyNames = Object.getOwnPropertyNames(value);
-    const enumerableNames = Object.keys(value);
+    const propertyNames = Object.getOwnPropertyNames(objectResult.output);
+    const enumerableNames = Object.keys(objectResult.output);
     if (
       propertyNames.length !== enumerableNames.length ||
-      Object.getOwnPropertySymbols(value).length > 0
+      Object.getOwnPropertySymbols(objectResult.output).length > 0
     ) {
       throw new NewsDataError("serialization", "列挙できないプロパティは保存できません");
     }
 
-    const normalizedObject: { [key: string]: JsonValue } = {};
+    const normalizedObject: JsonObject = {};
     for (const key of getSortedKeys(enumerableNames, keyOrderCache)) {
       normalizedObject[key] = normalizeJsonValue(
-        value[key as keyof typeof value],
+        objectResult.output[key],
         ancestors,
         keyOrderCache,
       );
@@ -113,8 +157,12 @@ const normalizeJsonValue = (
   return normalized;
 };
 
-const stableStringify = (value: unknown) => {
-  const normalized = normalizeJsonValue(value, new Set<object>(), new Map<string, string[]>());
+const stableStringify = (value: SerializableValue) => {
+  const normalized = normalizeJsonValue(
+    value,
+    new Set<SerializableValue>(),
+    new Map<string, string[]>(),
+  );
   const json = JSON.stringify(normalized);
   if (json === undefined) {
     throw new NewsDataError("serialization", "JSONシリアライズに失敗しました");
@@ -122,11 +170,8 @@ const stableStringify = (value: unknown) => {
   return json;
 };
 
-const jsonValuesEqual = (left: unknown, right: unknown): boolean => {
+const jsonValuesEqual = (left: SerializableValue, right: SerializableValue): boolean => {
   if (left === right) return true;
-  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") {
-    return false;
-  }
 
   if (Array.isArray(left)) {
     if (!Array.isArray(right) || left.length !== right.length) return false;
@@ -137,16 +182,17 @@ const jsonValuesEqual = (left: unknown, right: unknown): boolean => {
   }
   if (Array.isArray(right)) return false;
 
-  const leftKeys = Object.keys(left);
-  const rightKeys = Object.keys(right);
+  const leftObject = v.safeParse(jsonRecordSchema, left);
+  const rightObject = v.safeParse(jsonRecordSchema, right);
+  if (!leftObject.success || !rightObject.success) return false;
+
+  const leftKeys = Object.keys(leftObject.output);
+  const rightKeys = Object.keys(rightObject.output);
   if (leftKeys.length !== rightKeys.length) return false;
   for (const key of leftKeys) {
     if (
-      !Object.hasOwn(right, key) ||
-      !jsonValuesEqual(
-        (left as Record<string, unknown>)[key],
-        (right as Record<string, unknown>)[key],
-      )
+      !Object.hasOwn(rightObject.output, key) ||
+      !jsonValuesEqual(leftObject.output[key], rightObject.output[key])
     ) {
       return false;
     }
@@ -154,7 +200,10 @@ const jsonValuesEqual = (left: unknown, right: unknown): boolean => {
   return true;
 };
 
-const parseDocument = (value: unknown, stage = "document-validation"): StoredNewsDocument => {
+const parseDocument = (
+  value: SerializableValue,
+  stage = "document-validation",
+): StoredNewsDocument => {
   const result = v.safeParse(storedNewsDocumentSchema, value);
   if (!result.success) {
     throw new NewsDataError(stage, "保存用お知らせデータの形式が無効です", {
@@ -242,75 +291,51 @@ const validateUniqueIdsAndDates = (document: StoredNewsDocument) => {
   }
 };
 
-export const normalizeNewsDocument = (value: unknown): string => {
+export const normalizeNewsDocument = (value: SerializableValue): string => {
   const document = parseDocument(value);
   return stableStringify(document);
 };
 
-const validateAndNormalizeStoredNewsDocument = (value: unknown) => {
+const validateAndNormalizeStoredNewsDocument = (value: SerializableValue) => {
   const document = parseDocument(value);
   validateUniqueIdsAndDates(document);
   return { document, normalizedJson: stableStringify(document) };
 };
 
 const validateParsedStoredNewsDocumentInternal = (
-  value: unknown,
+  value: SerializableValue,
   validateDates: boolean,
 ): StoredNewsDocument => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new NewsDataError("document-validation", "保存用お知らせデータの形式が無効です");
-  }
-  const news = (value as Record<string, unknown>).news;
-  if (!Array.isArray(news)) {
+  if (!isInputObject(value) || !Array.isArray(value.news)) {
     throw new NewsDataError("document-validation", "保存用お知らせデータの形式が無効です");
   }
 
   const ids = new Set<number>();
-  for (let index = 0; index < news.length; index += 1) {
-    const item = news[index];
-    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+  for (const [index, item] of value.news.entries()) {
+    if (!isNewsRecord(item)) {
       throw new NewsDataError("document-validation", "保存用お知らせデータの形式が無効です", {
         index,
       });
     }
-    const candidate = item as Record<string, unknown>;
-    if (
-      typeof candidate.id !== "number" ||
-      !Number.isSafeInteger(candidate.id) ||
-      candidate.id <= 0 ||
-      typeof candidate.targetUrl !== "string" ||
-      candidate.targetUrl.length === 0 ||
-      typeof candidate.title !== "string" ||
-      candidate.title.length === 0 ||
-      typeof candidate.newsDate !== "string" ||
-      typeof candidate.updated !== "string" ||
-      (candidate.category !== undefined && typeof candidate.category !== "string")
-    ) {
-      throw new NewsDataError("document-validation", "保存用お知らせデータの形式が無効です", {
-        index,
-      });
-    }
-
-    const storedNews = item as StoredNews;
-    if (ids.has(storedNews.id)) {
+    if (ids.has(item.id)) {
       throw new NewsDataError("document-validation", "お知らせIDが重複しています", {
-        id: storedNews.id,
+        id: item.id,
       });
     }
-    ids.add(storedNews.id);
-    if (validateDates) getNewsTimestamp(storedNews);
+    ids.add(item.id);
+    if (validateDates) getNewsTimestamp(item);
   }
-
-  return value as StoredNewsDocument;
+  return bridgeRuntimeValue<StoredNewsDocument>(value);
 };
 
-export const validateParsedStoredNewsDocument = (value: unknown): StoredNewsDocument =>
+export const validateParsedStoredNewsDocument = (value: SerializableValue): StoredNewsDocument =>
   validateParsedStoredNewsDocumentInternal(value, true);
 
-export const validateParsedStoredNewsDocumentShape = (value: unknown): StoredNewsDocument =>
-  validateParsedStoredNewsDocumentInternal(value, false);
+export const validateParsedStoredNewsDocumentStructure = (
+  value: SerializableValue,
+): StoredNewsDocument => validateParsedStoredNewsDocumentInternal(value, false);
 
-export const validateStoredNewsDocument = (value: unknown): StoredNewsDocument => {
+export const validateStoredNewsDocument = (value: SerializableValue): StoredNewsDocument => {
   return validateAndNormalizeStoredNewsDocument(value).document;
 };
 
@@ -328,7 +353,9 @@ export type CanonicalNewsDocument = {
   digest: string;
 };
 
-export const canonicalizeNewsDocument = async (value: unknown): Promise<CanonicalNewsDocument> => {
+export const canonicalizeNewsDocument = async (
+  value: SerializableValue,
+): Promise<CanonicalNewsDocument> => {
   const { document, normalizedJson } = validateAndNormalizeStoredNewsDocument(value);
   return {
     document,
@@ -406,8 +433,10 @@ const validateOfficialDocumentConstraints = (
   }
 };
 
-export const validateParsedOfficialNewsDocumentShape = (value: unknown): StoredNewsDocument => {
-  const document = validateParsedStoredNewsDocumentShape(value);
+export const validateParsedOfficialNewsDocumentStructure = (
+  value: SerializableValue,
+): StoredNewsDocument => {
+  const document = validateParsedStoredNewsDocumentStructure(value);
   if (document.news.length < MIN_OFFICIAL_ENTRY_COUNT) {
     throw thresholdError(
       "threshold-validation",
@@ -421,7 +450,7 @@ export const validateParsedOfficialNewsDocumentShape = (value: unknown): StoredN
 };
 
 export const validateOfficialNewsDocument = (
-  value: unknown,
+  value: SerializableValue,
   options: OfficialValidationOptions = {},
 ): StoredNewsDocument => {
   const document = validateStoredNewsDocument(value);
@@ -447,7 +476,7 @@ export const validateOfficialNewsDocument = (
 };
 
 export const validateParsedOfficialNewsDocument = (
-  value: unknown,
+  value: SerializableValue,
   options: OfficialValidationOptions = {},
 ): StoredNewsDocument => {
   const document = validateParsedStoredNewsDocument(value);
@@ -589,8 +618,8 @@ export const mergeValidatedNewsDocuments = (
 };
 
 export const mergeNewsDocuments = async (
-  existingValue: unknown,
-  officialValue: unknown,
+  existingValue: SerializableValue,
+  officialValue: SerializableValue,
   options: NewsMergeOptions = {},
 ): Promise<NewsMergeResult> => {
   const existing = validateStoredNewsDocument(existingValue);
@@ -607,12 +636,10 @@ export const projectClientNews = (document: StoredNewsDocument): News[] => {
 };
 
 export const projectValidatedClientNews = (document: StoredNewsDocument): News[] =>
-  document.news.map(({ targetUrl, title, newsDate, updated, category }) => ({
-    targetUrl,
-    title,
-    newsDate,
-    updated,
-    ...(category !== undefined ? { category } : {}),
-  }));
+  document.news.map(({ targetUrl, title, newsDate, updated, category }) => {
+    const clientNews: News = { targetUrl, title, newsDate, updated };
+    if (category !== undefined) clientNews.category = category;
+    return clientNews;
+  });
 
 export const toClientNews = projectClientNews;

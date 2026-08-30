@@ -1,3 +1,6 @@
+import * as v from "valibot";
+import type { JsonInput } from "./schema";
+
 export const NEWS_REFRESH_CONTROL_KEY = "control/news-refresh.json";
 export const NEWS_REFRESH_CONTROL_VERSION = 1;
 export const NEWS_REFRESH_LEASE_MS = 60_000;
@@ -43,36 +46,41 @@ export type NewsRefreshAcquireResult =
 export type NewsRefreshCompletionResult = "updated" | "lease-mismatch";
 export type NewsRefreshRenewalResult = NewsRefreshLease | "inactive" | "lease-mismatch";
 
-const toTime = (value: unknown): number | null => {
-  if (typeof value !== "string") return null;
-  const timeMs = Date.parse(value);
-  return Number.isFinite(timeMs) ? timeMs : null;
+const timestampSchema = v.pipe(
+  v.string(),
+  v.check((value) => Number.isFinite(Date.parse(value))),
+);
+const statusSchema = v.union([v.literal("idle"), v.literal("running"), v.literal("cooldown")]);
+const outcomeSchema = v.nullable(v.union([v.literal("success"), v.literal("failure")]));
+const refreshControlStateSchema = v.object({
+  status: statusSchema,
+  token: v.nullable(v.string()),
+  leaseUntil: v.nullable(timestampSchema),
+  cooldownUntil: v.nullable(timestampSchema),
+  lastOutcome: outcomeSchema,
+});
+const refreshControlSchema = v.object({
+  version: v.literal(NEWS_REFRESH_CONTROL_VERSION),
+  status: statusSchema,
+  token: v.nullable(v.string()),
+  leaseUntil: v.nullable(timestampSchema),
+  cooldownUntil: v.nullable(timestampSchema),
+  lastOutcome: outcomeSchema,
+});
+
+const toTime = (value: JsonInput): number | null => {
+  const result = v.safeParse(timestampSchema, value);
+  return result.success ? Date.parse(result.output) : null;
 };
 
-const parseState = (value: unknown): RefreshControlState | null => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const candidate = value as Record<string, unknown>;
-  if (
-    (candidate.status !== "idle" &&
-      candidate.status !== "running" &&
-      candidate.status !== "cooldown") ||
-    (candidate.token !== null && typeof candidate.token !== "string") ||
-    (candidate.leaseUntil !== null && toTime(candidate.leaseUntil) === null) ||
-    (candidate.cooldownUntil !== null && toTime(candidate.cooldownUntil) === null) ||
-    (candidate.lastOutcome !== null &&
-      candidate.lastOutcome !== "success" &&
-      candidate.lastOutcome !== "failure")
-  ) {
-    return null;
-  }
-
+const validateState = (candidate: RefreshControlState): RefreshControlState | null => {
   if (candidate.status === "running") {
-    if (typeof candidate.token !== "string" || toTime(candidate.leaseUntil) === null) return null;
+    if (candidate.token === null || candidate.leaseUntil === null) return null;
   } else if (candidate.status === "cooldown") {
     if (
       candidate.token !== null ||
       candidate.leaseUntil !== null ||
-      toTime(candidate.cooldownUntil) === null
+      candidate.cooldownUntil === null
     ) {
       return null;
     }
@@ -83,24 +91,21 @@ const parseState = (value: unknown): RefreshControlState | null => {
   ) {
     return null;
   }
+  return candidate;
+};
 
-  return {
-    status: candidate.status,
-    token: candidate.token as string | null,
-    leaseUntil: candidate.leaseUntil as string | null,
-    cooldownUntil: candidate.cooldownUntil as string | null,
-    lastOutcome: candidate.lastOutcome as NewsRefreshOutcome | null,
-  };
+const parseState = (value: JsonInput): RefreshControlState | null => {
+  const result = v.safeParse(refreshControlStateSchema, value);
+  return result.success ? validateState(result.output) : null;
 };
 
 export const parseRefreshControlState = parseState;
 
-export const parseNewsRefreshControl = (value: unknown): NewsRefreshControl | null => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const candidate = value as Record<string, unknown>;
-  if (candidate.version !== NEWS_REFRESH_CONTROL_VERSION) return null;
-  const state = parseState(candidate);
-  return state ? { version: NEWS_REFRESH_CONTROL_VERSION, ...state } : null;
+export const parseNewsRefreshControl = (value: JsonInput): NewsRefreshControl | null => {
+  const result = v.safeParse(refreshControlSchema, value);
+  if (!result.success) return null;
+  const state = validateState(result.output);
+  return state === null ? null : { version: result.output.version, ...state };
 };
 
 export const createIdleRefreshControlState = (): RefreshControlState => ({

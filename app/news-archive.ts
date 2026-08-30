@@ -1,3 +1,4 @@
+import * as v from "valibot";
 import type {
   KVNamespace,
   R2Bucket,
@@ -10,10 +11,10 @@ import {
   NewsDataError,
   mergeValidatedNewsDocument,
   serializeSortedNewsDocument,
-  validateParsedOfficialNewsDocumentShape,
-  validateParsedStoredNewsDocumentShape,
+  validateParsedOfficialNewsDocumentStructure,
+  validateParsedStoredNewsDocumentStructure,
 } from "./news-data";
-import type { StoredNewsDocument } from "./schema";
+import type { JsonInput, JsonObject, StoredNewsDocument } from "./schema";
 import {
   NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY,
   NEWS_CACHE_KEY,
@@ -36,9 +37,9 @@ export type NewsFetcher = (input: RequestInfo | URL, init?: RequestInit) => Prom
 
 export class NewsArchiveError extends Error {
   readonly stage: string;
-  readonly details: Record<string, unknown>;
+  readonly details: JsonObject;
 
-  constructor(stage: string, message: string, details: Record<string, unknown> = {}) {
+  constructor(stage: string, message: string, details: JsonObject = {}) {
     super(message);
     this.name = "NewsArchiveError";
     this.stage = stage;
@@ -104,40 +105,66 @@ export type OfficialFetchEligibility = {
   ifNoneMatch: string | null;
 };
 
-const isStrongOfficialEtag = (value: unknown): value is string => {
-  if (
-    typeof value !== "string" ||
-    value.length < 2 ||
-    value.length > MAX_OFFICIAL_ETAG_LENGTH ||
-    !value.startsWith('"') ||
-    !value.endsWith('"') ||
-    value.startsWith("W/")
-  ) {
-    return false;
-  }
-
-  for (const character of value.slice(1, -1)) {
-    const codePoint = character.codePointAt(0);
+const strongOfficialEtagSchema = v.pipe(
+  v.string(),
+  v.check((value: string) => {
     if (
-      codePoint === undefined ||
-      (codePoint !== 0x21 &&
-        (codePoint < 0x23 || codePoint > 0x7e) &&
-        (codePoint < 0x80 || codePoint > 0xff))
+      value.length < 2 ||
+      value.length > MAX_OFFICIAL_ETAG_LENGTH ||
+      !value.startsWith('"') ||
+      !value.endsWith('"') ||
+      value.startsWith("W/")
     ) {
       return false;
     }
-  }
-  return true;
-};
 
-const isValidCurrentEtag = (value: unknown): value is string =>
-  typeof value === "string" && value.length > 0;
+    for (const character of value.slice(1, -1)) {
+      const codePoint = character.codePointAt(0);
+      if (
+        codePoint === undefined ||
+        (codePoint !== 0x21 &&
+          (codePoint < 0x23 || codePoint > 0x7e) &&
+          (codePoint < 0x80 || codePoint > 0xff))
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }),
+);
+const currentEtagSchema = v.pipe(v.string(), v.minLength(1));
+const timestampSchema = v.pipe(
+  v.string(),
+  v.check((value: string) => {
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+  }),
+);
 
-const isValidTimestamp = (value: unknown): value is string => {
-  if (typeof value !== "string") return false;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
-};
+const isStrongOfficialEtag = (value: JsonInput): value is string =>
+  v.safeParse(strongOfficialEtagSchema, value).success;
+
+const isValidCurrentEtag = (value: JsonInput): value is string =>
+  v.safeParse(currentEtagSchema, value).success;
+
+const isValidTimestamp = (value: JsonInput): value is string =>
+  v.safeParse(timestampSchema, value).success;
+
+const legacyOfficialFetchStateSchema = v.object({
+  version: v.literal(1),
+  officialEtag: strongOfficialEtagSchema,
+  currentEtag: currentEtagSchema,
+});
+const officialFetchStateSchema = v.object({
+  version: v.literal(OFFICIAL_FETCH_STATE_VERSION),
+  officialEtag: strongOfficialEtagSchema,
+  currentEtag: currentEtagSchema,
+  checkedAt: timestampSchema,
+});
+const officialCheckStateSchema = v.object({
+  version: v.literal(OFFICIAL_CHECK_STATE_VERSION),
+  checkedAt: timestampSchema,
+});
 
 const ORIGINAL_ERROR_NAME_MAX_LENGTH = 100;
 const ORIGINAL_ERROR_MESSAGE_MAX_LENGTH = 500;
@@ -169,7 +196,18 @@ const sanitizeLogValue = (value: string, maxLength: number, fallback: string) =>
   return truncateLogValue(sanitized || fallback, maxLength);
 };
 
-export const serializeArchiveErrorForLog = (error: unknown) => {
+const asLoggableError = <T>(error: T): Error | JsonInput => (error instanceof Error ? error : null);
+
+const readErrorText = (error: Error, key: "name" | "message", fallback: string): string => {
+  try {
+    const result = v.safeParse(v.string(), error[key]);
+    return result.success ? result.output : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+export const serializeArchiveErrorForLog = (error: Error | JsonInput) => {
   if (!(error instanceof Error)) {
     return {
       name: "NonErrorThrown",
@@ -177,31 +215,20 @@ export const serializeArchiveErrorForLog = (error: unknown) => {
     };
   }
 
-  let name = "Error";
-  let message = "Error message unavailable";
-  try {
-    const errorName = error.name;
-    if (typeof errorName === "string") name = errorName;
-  } catch {
-    name = "Error";
-  }
-  try {
-    const errorMessage = error.message;
-    if (typeof errorMessage === "string") message = errorMessage;
-  } catch {
-    message = "Error message unavailable";
-  }
-
   return {
-    name: sanitizeLogValue(name, ORIGINAL_ERROR_NAME_MAX_LENGTH, "Error"),
+    name: sanitizeLogValue(
+      readErrorText(error, "name", "Error"),
+      ORIGINAL_ERROR_NAME_MAX_LENGTH,
+      "Error",
+    ),
     message: sanitizeLogValue(
-      message,
+      readErrorText(error, "message", "Error message unavailable"),
       ORIGINAL_ERROR_MESSAGE_MAX_LENGTH,
       "Error message unavailable",
     ),
   };
 };
-const createArchiveReadError = (error: unknown, details: Record<string, unknown> = {}) => {
+const createArchiveReadError = (error: Error | JsonInput, details: JsonObject = {}) => {
   if (error instanceof NewsArchiveError) return error;
   if (error instanceof NewsDataError) {
     return new NewsArchiveError("archive-read", error.message, {
@@ -212,7 +239,7 @@ const createArchiveReadError = (error: unknown, details: Record<string, unknown>
   }
   return new NewsArchiveError("archive-read", "アーカイブの読み込みに失敗しました", {
     ...details,
-    originalError: serializeArchiveErrorForLog(error),
+    originalError: serializeArchiveErrorForLog(asLoggableError(error)),
   });
 };
 
@@ -220,7 +247,7 @@ const readObjectText = async (object: R2ObjectBody, sourceKey: string) => {
   try {
     return await object.text();
   } catch (error) {
-    throw createArchiveReadError(error, { sourceKey });
+    throw createArchiveReadError(asLoggableError(error), { sourceKey });
   }
 };
 
@@ -236,7 +263,7 @@ const readArchiveSource = async (bucket: R2Bucket): Promise<ArchiveSource> => {
   try {
     currentObject = await bucket.get(CURRENT_ARCHIVE_KEY);
   } catch (error) {
-    throw createArchiveReadError(error, { sourceKey: CURRENT_ARCHIVE_KEY });
+    throw createArchiveReadError(asLoggableError(error), { sourceKey: CURRENT_ARCHIVE_KEY });
   }
 
   if (currentObject) {
@@ -252,7 +279,7 @@ const readArchiveSource = async (bucket: R2Bucket): Promise<ArchiveSource> => {
   try {
     legacyObject = await bucket.get(LEGACY_ARCHIVE_KEY);
   } catch (error) {
-    throw createArchiveReadError(error, { sourceKey: LEGACY_ARCHIVE_KEY });
+    throw createArchiveReadError(asLoggableError(error), { sourceKey: LEGACY_ARCHIVE_KEY });
   }
   if (!legacyObject) {
     throw new NewsArchiveError("archive-read", "累積アーカイブが見つかりません", {
@@ -269,7 +296,7 @@ const readArchiveSource = async (bucket: R2Bucket): Promise<ArchiveSource> => {
 };
 
 const parseArchiveText = (text: string, sourceKey: string) => {
-  let parsed: unknown;
+  let parsed: JsonInput;
   try {
     parsed = JSON.parse(text);
   } catch {
@@ -277,9 +304,9 @@ const parseArchiveText = (text: string, sourceKey: string) => {
   }
 
   try {
-    return validateParsedStoredNewsDocumentShape(parsed);
+    return validateParsedStoredNewsDocumentStructure(parsed);
   } catch (error) {
-    throw createArchiveReadError(error, { sourceKey });
+    throw createArchiveReadError(asLoggableError(error), { sourceKey });
   }
 };
 
@@ -315,46 +342,21 @@ const readOfficialFetchState = async (bucket: R2Bucket): Promise<OfficialFetchSt
   }
   if (!object) return { state: null, objectEtag: null, status: "missing" };
 
-  let parsed: unknown;
+  let parsed: JsonInput;
   try {
     parsed = JSON.parse(await object.text());
   } catch {
     return { state: null, objectEtag: object.etag, status: "invalid" };
   }
-  if (typeof parsed !== "object" || parsed === null) {
-    return { state: null, objectEtag: object.etag, status: "invalid" };
+
+  const legacy = v.safeParse(legacyOfficialFetchStateSchema, parsed);
+  if (legacy.success) {
+    return { state: legacy.output, objectEtag: object.etag, status: "valid" };
   }
-  const candidate = parsed as Record<string, unknown>;
-  if (!isStrongOfficialEtag(candidate.officialEtag) || !isValidCurrentEtag(candidate.currentEtag)) {
-    return { state: null, objectEtag: object.etag, status: "invalid" };
-  }
-  if (candidate.version === 1) {
-    return {
-      state: {
-        version: 1,
-        officialEtag: candidate.officialEtag,
-        currentEtag: candidate.currentEtag,
-      },
-      objectEtag: object.etag,
-      status: "valid",
-    };
-  }
-  if (
-    candidate.version !== OFFICIAL_FETCH_STATE_VERSION ||
-    !isValidTimestamp(candidate.checkedAt)
-  ) {
-    return { state: null, objectEtag: object.etag, status: "invalid" };
-  }
-  return {
-    state: {
-      version: OFFICIAL_FETCH_STATE_VERSION,
-      officialEtag: candidate.officialEtag,
-      currentEtag: candidate.currentEtag,
-      checkedAt: candidate.checkedAt,
-    },
-    objectEtag: object.etag,
-    status: "valid",
-  };
+  const current = v.safeParse(officialFetchStateSchema, parsed);
+  return current.success
+    ? { state: current.output, objectEtag: object.etag, status: "valid" }
+    : { state: null, objectEtag: object.etag, status: "invalid" };
 };
 
 export const readOfficialCheckState = async (bucket: R2Bucket): Promise<OfficialCheckStateRead> => {
@@ -366,30 +368,17 @@ export const readOfficialCheckState = async (bucket: R2Bucket): Promise<Official
   }
   if (!object) return { state: null, objectEtag: null, status: "missing" };
 
-  let parsed: unknown;
+  let parsed: JsonInput;
   try {
     parsed = JSON.parse(await object.text());
   } catch {
     return { state: null, objectEtag: object.etag, status: "invalid" };
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { state: null, objectEtag: object.etag, status: "invalid" };
-  }
-  const candidate = parsed as Record<string, unknown>;
-  if (
-    candidate.version !== OFFICIAL_CHECK_STATE_VERSION ||
-    !isValidTimestamp(candidate.checkedAt)
-  ) {
-    return { state: null, objectEtag: object.etag, status: "invalid" };
-  }
-  return {
-    state: {
-      version: OFFICIAL_CHECK_STATE_VERSION,
-      checkedAt: candidate.checkedAt,
-    },
-    objectEtag: object.etag,
-    status: "valid",
-  };
+
+  const result = v.safeParse(officialCheckStateSchema, parsed);
+  return result.success
+    ? { state: result.output, objectEtag: object.etag, status: "valid" }
+    : { state: null, objectEtag: object.etag, status: "invalid" };
 };
 
 export const readOfficialFetchEligibility = async (
@@ -425,7 +414,7 @@ export const readOfficialFetchEligibility = async (
 };
 
 const isR2ObjectBody = (object: R2Object | R2ObjectBody | null): object is R2ObjectBody =>
-  object !== null && "body" in object && typeof object.text === "function";
+  object !== null && "body" in object;
 
 export const readCurrentArchiveDocumentIfEtag = async (
   bucket: R2Bucket,
@@ -435,7 +424,7 @@ export const readCurrentArchiveDocumentIfEtag = async (
   try {
     object = await bucket.get(CURRENT_ARCHIVE_KEY, { onlyIf: { etagMatches: etag } });
   } catch (error) {
-    throw createArchiveReadError(error, { sourceKey: CURRENT_ARCHIVE_KEY });
+    throw createArchiveReadError(asLoggableError(error), { sourceKey: CURRENT_ARCHIVE_KEY });
   }
   if (!isR2ObjectBody(object) || object.etag !== etag) return null;
   const text = await readObjectText(object, CURRENT_ARCHIVE_KEY);
@@ -455,7 +444,7 @@ export const readCurrentArchiveBodyIfEtag = async (
   try {
     object = await bucket.get(CURRENT_ARCHIVE_KEY, { onlyIf: { etagMatches: etag } });
   } catch (error) {
-    throw createArchiveReadError(error, { sourceKey: CURRENT_ARCHIVE_KEY });
+    throw createArchiveReadError(asLoggableError(error), { sourceKey: CURRENT_ARCHIVE_KEY });
   }
   return isR2ObjectBody(object) && object.etag === etag ? object : null;
 };
@@ -561,10 +550,9 @@ export const fetchOfficialNews = async (
       const headers = conditionalEtag
         ? new Headers({ "If-None-Match": conditionalEtag })
         : undefined;
-      response = await fetcher(OFFICIAL_NEWS_URL, {
-        signal: controller.signal,
-        ...(headers ? { headers } : {}),
-      });
+      const requestInit: RequestInit = { signal: controller.signal };
+      if (headers) requestInit.headers = headers;
+      response = await fetcher(OFFICIAL_NEWS_URL, requestInit);
     } catch {
       throw new NewsArchiveError(
         "official-fetch",
@@ -610,7 +598,7 @@ export const fetchOfficialNews = async (
       }
       throw error;
     }
-    let parsed: unknown;
+    let parsed: JsonInput;
     try {
       parsed = JSON.parse(text);
     } catch {
@@ -620,7 +608,7 @@ export const fetchOfficialNews = async (
     }
     let document: StoredNewsDocument;
     try {
-      document = validateParsedOfficialNewsDocumentShape(parsed);
+      document = validateParsedOfficialNewsDocumentStructure(parsed);
     } catch (error) {
       if (error instanceof NewsDataError && error.stage === "document-validation") {
         throw new NewsArchiveError("official-parse", "公式お知らせの構造が無効です", {
@@ -682,8 +670,8 @@ export const buildBackupKeys = (timeMs: number): BackupKeys => {
 export const getBackupKeys = buildBackupKeys;
 
 export type ArchiveLogger = {
-  log: (event: Record<string, unknown>) => void;
-  error: (event: Record<string, unknown>) => void;
+  log: (event: JsonObject) => void;
+  error: (event: JsonObject) => void;
 };
 
 export type NewsArchiveUpdateTrigger = "scheduled" | "queue" | "manual";
@@ -734,10 +722,10 @@ const defaultLogger: ArchiveLogger = {
 };
 
 const asArchiveError = (
-  error: unknown,
+  error: Error | JsonInput,
   fallbackStage: string,
   message: string,
-  details: Record<string, unknown> = {},
+  details: JsonObject = {},
 ) => {
   if (error instanceof NewsArchiveError) return error;
   if (error instanceof NewsDataError) {
@@ -749,13 +737,13 @@ const asArchiveError = (
   }
   return new NewsArchiveError(fallbackStage, message, {
     ...details,
-    originalError: serializeArchiveErrorForLog(error),
+    originalError: serializeArchiveErrorForLog(asLoggableError(error)),
   });
 };
 
 const contentType = "application/json; charset=utf-8";
 const createIfAbsentCondition = () => ({ etagDoesNotMatch: "*" });
-const isObjectLockedByBucketPolicy = (error: unknown) =>
+const isObjectLockedByBucketPolicy = (error: Error | JsonInput) =>
   error instanceof Error && /\(10069\)\s*$/.test(error.message);
 
 const putDailyBackup = async (bucket: R2Bucket, key: string, archiveText: string) => {
@@ -766,7 +754,11 @@ const putDailyBackup = async (bucket: R2Bucket, key: string, archiveText: string
       httpMetadata: { contentType },
     });
   } catch (error) {
-    throw asArchiveError(error, "daily-backup", "日次バックアップの保存に失敗しました");
+    throw asArchiveError(
+      asLoggableError(error),
+      "daily-backup",
+      "日次バックアップの保存に失敗しました",
+    );
   }
   if (!result) {
     throw new NewsArchiveError("daily-backup", "日次バックアップキーが競合しました", {
@@ -780,9 +772,10 @@ const putCurrentArchive = async (
   archive: ArchiveReadResult,
   mergedJson: string,
 ) => {
-  const onlyIf = archive.currentExists
-    ? { etagMatches: archive.etag as string }
-    : createIfAbsentCondition();
+  const onlyIf =
+    archive.currentExists && archive.etag !== null
+      ? { etagMatches: archive.etag }
+      : createIfAbsentCondition();
   let result: R2Object | null;
   try {
     result = await bucket.put(CURRENT_ARCHIVE_KEY, mergedJson, {
@@ -790,7 +783,11 @@ const putCurrentArchive = async (
       httpMetadata: { contentType },
     });
   } catch (error) {
-    throw asArchiveError(error, "archive-write", "累積アーカイブの更新に失敗しました");
+    throw asArchiveError(
+      asLoggableError(error),
+      "archive-write",
+      "累積アーカイブの更新に失敗しました",
+    );
   }
   if (!result) {
     throw new NewsArchiveError("etag-conflict", "累積アーカイブの更新が競合しました");
@@ -802,9 +799,14 @@ const hasMonthlyBackup = async (bucket: R2Bucket, key: string): Promise<boolean>
   try {
     return (await bucket.head(key)) !== null;
   } catch (error) {
-    throw asArchiveError(error, "monthly-backup", "月次バックアップの確認に失敗しました", {
-      key,
-    });
+    throw asArchiveError(
+      asLoggableError(error),
+      "monthly-backup",
+      "月次バックアップの確認に失敗しました",
+      {
+        key,
+      },
+    );
   }
 };
 
@@ -825,10 +827,15 @@ const putMonthlyBackup = async (
       httpMetadata: { contentType },
     });
   } catch (error) {
-    if (isObjectLockedByBucketPolicy(error)) return "existing";
-    throw asArchiveError(error, "monthly-backup", "月次バックアップの保存に失敗しました", {
-      key,
-    });
+    if (isObjectLockedByBucketPolicy(asLoggableError(error))) return "existing";
+    throw asArchiveError(
+      asLoggableError(error),
+      "monthly-backup",
+      "月次バックアップの保存に失敗しました",
+      {
+        key,
+      },
+    );
   }
   return result ? "created" : "existing";
 };
@@ -1007,9 +1014,14 @@ export const updateNewsArchive = async (
       try {
         await dependencies.backupBucket.delete(backupKeys.monthlyKey);
       } catch (error) {
-        throw asArchiveError(error, "monthly-backup", "月次バックアップの削除に失敗しました", {
-          key: backupKeys.monthlyKey,
-        });
+        throw asArchiveError(
+          asLoggableError(error),
+          "monthly-backup",
+          "月次バックアップの削除に失敗しました",
+          {
+            key: backupKeys.monthlyKey,
+          },
+        );
       }
     };
     const monthlyExists = await hasMonthlyBackup(dependencies.backupBucket, backupKeys.monthlyKey);
@@ -1150,7 +1162,7 @@ export const updateNewsArchive = async (
       );
       if (failedDeletion) {
         throw asArchiveError(
-          failedDeletion.reason,
+          asLoggableError(failedDeletion.reason),
           "cache-delete",
           "お知らせキャッシュの削除に失敗しました",
         );
@@ -1239,7 +1251,7 @@ export const updateNewsArchive = async (
     return await completeModified(officialResult.value, archiveResult.value);
   } catch (error) {
     const archiveError = asArchiveError(
-      error,
+      asLoggableError(error),
       "archive-validation",
       "お知らせアーカイブの更新に失敗しました",
     );

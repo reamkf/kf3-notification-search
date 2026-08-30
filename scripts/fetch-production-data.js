@@ -24,8 +24,7 @@ const runWrangler = (args) =>
     child.on("close", (code) => resolve({ code, stderr }));
   });
 
-const isNewsDocument = (value) =>
-  value !== null && typeof value === "object" && Array.isArray(value.news);
+const isNewsDocument = (value) => !Array.isArray(value) && Array.isArray(value?.news);
 
 const findProductionData = async (temporaryFile) => {
   for (const key of archiveKeys) {

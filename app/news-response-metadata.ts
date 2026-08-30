@@ -1,3 +1,6 @@
+import * as v from "valibot";
+import { type JsonInput, type JsonValue } from "./schema";
+
 export const NEWS_SOURCE_HEADER = "X-KF3-News-Source";
 export const NEWS_OFFICIAL_CHECKED_AT_HEADER = "X-KF3-News-Official-Checked-At";
 export const NEWS_FETCHED_AT_HEADER = "X-KF3-News-Fetched-At";
@@ -51,26 +54,58 @@ export type NewsRefreshState = {
   refreshAvailableAt: string;
 };
 
-const isValidTimestamp = (value: unknown): value is string => {
-  if (typeof value !== "string") return false;
+const isValidTimestamp = (value: string) => {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 };
 
-const isLegacyTimestamp = (value: unknown): value is string =>
-  typeof value === "string" && Number.isFinite(Date.parse(value));
+const isLegacyTimestamp = (value: string) => Number.isFinite(Date.parse(value));
+const canonicalTimestampSchema = v.pipe(v.string(), v.check(isValidTimestamp));
+const legacyTimestampSchema = v.pipe(v.string(), v.check(isLegacyTimestamp));
+const sourceSchema = v.union([
+  v.literal("merged"),
+  v.literal("archive-fallback"),
+  v.literal("archive-snapshot"),
+]);
+const archiveEtagSchema = v.nullable(v.pipe(v.string(), v.minLength(1)));
+const newsCountSchema = v.pipe(v.number(), v.safeInteger(), v.minValue(0));
 
-const isOptionalTimestamp = (value: unknown): value is string | null =>
-  value === null || isValidTimestamp(value);
+const newsCacheMetadataV1Schema = v.object({
+  version: v.literal(1),
+  source: sourceSchema,
+  fetchedAt: legacyTimestampSchema,
+});
 
-const isNewsCacheSource = (value: unknown): value is NewsCacheSource =>
-  value === "merged" || value === "archive-fallback" || value === "archive-snapshot";
+const legacyNewsCacheMetadataV2Schema = v.object({
+  version: v.literal(NEWS_CACHE_METADATA_VERSION),
+  source: sourceSchema,
+  fetchedAt: legacyTimestampSchema,
+  baseArchiveEtag: archiveEtagSchema,
+  newsCount: newsCountSchema,
+});
 
-const isValidArchiveEtag = (value: unknown): value is string | null =>
-  value === null || (typeof value === "string" && value.length > 0);
+const newsCacheMetadataV2Schema = v.object({
+  version: v.literal(NEWS_CACHE_METADATA_VERSION),
+  source: sourceSchema,
+  officialCheckedAt: v.nullable(canonicalTimestampSchema),
+  baseArchiveEtag: archiveEtagSchema,
+  newsCount: newsCountSchema,
+  refreshAvailableAt: v.optional(v.nullable(canonicalTimestampSchema)),
+});
 
-const isValidNewsCount = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const refreshAvailableAtSchema = v.object({
+  refreshAvailableAt: v.optional(v.nullable(canonicalTimestampSchema)),
+});
+
+const newsRefreshStateSchema = v.object({
+  version: v.literal(1),
+  baseArchiveEtag: archiveEtagSchema,
+  officialCheckedAt: canonicalTimestampSchema,
+  refreshAvailableAt: canonicalTimestampSchema,
+});
+
+const isCurrentNewsCacheMetadata = (value: NewsCacheMetadata): value is NewsCacheMetadataV2 =>
+  value.version === NEWS_CACHE_METADATA_VERSION && "officialCheckedAt" in value;
 
 export const createNewsCacheMetadata = (
   source: NewsCacheSource,
@@ -85,58 +120,18 @@ export const createNewsCacheMetadata = (
   newsCount,
 });
 
-export const parseNewsCacheMetadata = (value: unknown): NewsCacheMetadata | null => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const candidate = value as Record<string, unknown>;
-  if (!isNewsCacheSource(candidate.source)) return null;
+export const parseNewsCacheMetadata = (value: JsonInput): NewsCacheMetadata | null => {
+  const current = v.safeParse(newsCacheMetadataV2Schema, value);
+  if (current.success) return current.output;
 
-  if (candidate.version === 1) {
-    if (!isLegacyTimestamp(candidate.fetchedAt)) return null;
-    return {
-      version: 1,
-      source: candidate.source,
-      fetchedAt: candidate.fetchedAt,
-    };
-  }
+  const legacy = v.safeParse(legacyNewsCacheMetadataV2Schema, value);
+  if (legacy.success) return legacy.output;
 
-  if (candidate.version !== NEWS_CACHE_METADATA_VERSION) return null;
-  if (!Object.hasOwn(candidate, "officialCheckedAt")) {
-    if (
-      !isLegacyTimestamp(candidate.fetchedAt) ||
-      !isValidArchiveEtag(candidate.baseArchiveEtag) ||
-      !isValidNewsCount(candidate.newsCount)
-    ) {
-      return null;
-    }
-    return {
-      version: NEWS_CACHE_METADATA_VERSION,
-      source: candidate.source,
-      fetchedAt: candidate.fetchedAt,
-      baseArchiveEtag: candidate.baseArchiveEtag,
-      newsCount: candidate.newsCount,
-    };
-  }
-
-  if (
-    !isOptionalTimestamp(candidate.officialCheckedAt) ||
-    !isValidArchiveEtag(candidate.baseArchiveEtag) ||
-    !isValidNewsCount(candidate.newsCount)
-  ) {
-    return null;
-  }
-  return {
-    version: NEWS_CACHE_METADATA_VERSION,
-    source: candidate.source,
-    officialCheckedAt: candidate.officialCheckedAt,
-    baseArchiveEtag: candidate.baseArchiveEtag,
-    newsCount: candidate.newsCount,
-  };
+  const versionOne = v.safeParse(newsCacheMetadataV1Schema, value);
+  return versionOne.success ? versionOne.output : null;
 };
 
-const isCurrentNewsCacheMetadata = (value: NewsCacheMetadata): value is NewsCacheMetadataV2 =>
-  value.version === NEWS_CACHE_METADATA_VERSION && Object.hasOwn(value, "officialCheckedAt");
-
-export const isReusableNewsCacheMetadata = (value: unknown): value is NewsCacheMetadataV2 => {
+export const isReusableNewsCacheMetadata = (value: JsonInput): value is NewsCacheMetadataV2 => {
   const metadata = parseNewsCacheMetadata(value);
   return metadata !== null && isCurrentNewsCacheMetadata(metadata);
 };
@@ -152,40 +147,25 @@ export const createNewsRefreshState = (
   refreshAvailableAt,
 });
 
-const getRefreshAvailableAt = (value: unknown) => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const refreshAvailableAt = (value as Record<string, unknown>).refreshAvailableAt;
-  return isValidTimestamp(refreshAvailableAt) ? refreshAvailableAt : null;
+const getRefreshAvailableAt = (value: JsonInput): string | null => {
+  const result = v.safeParse(refreshAvailableAtSchema, value);
+  return result.success ? (result.output.refreshAvailableAt ?? null) : null;
 };
 
 export const parseNewsRefreshState = (value: string | null): NewsRefreshState | null => {
   if (value === null) return null;
-  let parsed: unknown;
+  let parsed: JsonValue;
   try {
     parsed = JSON.parse(value);
   } catch {
     return null;
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const candidate = parsed as Record<string, unknown>;
-  if (
-    candidate.version !== 1 ||
-    !isValidArchiveEtag(candidate.baseArchiveEtag) ||
-    !isValidTimestamp(candidate.officialCheckedAt) ||
-    !isValidTimestamp(candidate.refreshAvailableAt)
-  ) {
-    return null;
-  }
-  return {
-    version: 1,
-    baseArchiveEtag: candidate.baseArchiveEtag,
-    officialCheckedAt: candidate.officialCheckedAt,
-    refreshAvailableAt: candidate.refreshAvailableAt,
-  };
+  const result = v.safeParse(newsRefreshStateSchema, parsed);
+  return result.success ? result.output : null;
 };
 
 export const applyNewsRefreshState = (
-  metadata: unknown,
+  metadata: JsonInput,
   state: NewsRefreshState | null,
 ): NewsCacheMetadata | undefined => {
   const parsedMetadata = parseNewsCacheMetadata(metadata);
@@ -205,7 +185,7 @@ export const applyNewsRefreshState = (
   };
 };
 
-export const toNewsResponseMetadata = (value: unknown): NewsResponseMetadata => {
+export const toNewsResponseMetadata = (value: JsonInput): NewsResponseMetadata => {
   const metadata = parseNewsCacheMetadata(value);
   if (!metadata) {
     return {
@@ -226,7 +206,7 @@ export const toNewsResponseMetadata = (value: unknown): NewsResponseMetadata => 
   };
 };
 
-export const createNewsResponseHeaders = (metadata: unknown): Headers => {
+export const createNewsResponseHeaders = (metadata: JsonInput): Headers => {
   const responseMetadata = toNewsResponseMetadata(metadata);
   const headers = new Headers({
     "content-type": "application/json; charset=UTF-8",
@@ -258,16 +238,21 @@ export const parseNewsResponseHeaders = (headers: Headers): NewsResponseMetadata
   return {
     source: normalizedSource,
     officialCheckedAt:
-      normalizedSource === "unknown" ||
-      !(hasOfficialCheckedAtHeader
-        ? isValidTimestamp(officialCheckedAt)
-        : isLegacyTimestamp(officialCheckedAt))
+      normalizedSource === "unknown" || officialCheckedAt === null
         ? null
-        : officialCheckedAt,
+        : hasOfficialCheckedAtHeader
+          ? v.safeParse(canonicalTimestampSchema, officialCheckedAt).success
+            ? officialCheckedAt
+            : null
+          : v.safeParse(legacyTimestampSchema, officialCheckedAt).success
+            ? officialCheckedAt
+            : null,
     refreshAvailableAt:
-      normalizedSource === "unknown" || !isValidTimestamp(refreshAvailableAt)
+      normalizedSource === "unknown" || refreshAvailableAt === null
         ? null
-        : refreshAvailableAt,
+        : v.safeParse(canonicalTimestampSchema, refreshAvailableAt).success
+          ? refreshAvailableAt
+          : null,
     dataVersion:
       normalizedSource === "unknown" ? null : headers.get(NEWS_DATA_VERSION_HEADER) || null,
   };
