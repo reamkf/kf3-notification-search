@@ -1,15 +1,11 @@
 import { Hono } from "hono";
-import { describe, expect, it, vi } from "vitest";
-import renderer from "../routes/_renderer";
-
-vi.mock("honox/server", () => ({
-  Link: () => null,
-  Script: () => null,
-}));
+import { describe, expect, it } from "vitest";
+import { createRenderer } from "../routes/_renderer";
 
 describe("renderer metadata", () => {
   it("uses an absolute URL for the social image metadata", async () => {
     const app = new Hono();
+    const renderer = createRenderer({ Link: () => null, Script: () => null });
     app.use("*", renderer);
     app.get("/", (c) => c.render("content", { title: "けもフレ３おしらせ検索" }));
 

@@ -2,37 +2,26 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot } from "hono/jsx/dom/client";
+import { bridgeRuntimeValue } from "../runtime-value";
+import type { JsonInput } from "../schema";
 import KemonoFriends3NewsSearch, {
   formatRelativeCheckedAt,
   getRelativeTimeUpdateDelay,
   INITIAL_LOADING_INDICATOR_ID,
 } from "../islands/KemonoFriends3NewsSearch";
 
-const newsRowRenderSpy = vi.hoisted(() => vi.fn());
-
-vi.mock("../islands/KemonoFriends3NewsRow", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../islands/KemonoFriends3NewsRow")>();
-  return {
-    ...actual,
-    NewsRow: vi.fn((props: Parameters<typeof actual.NewsRow>[0]) => {
-      newsRowRenderSpy();
-      return actual.NewsRow(props);
-    }),
-  };
-});
+const newsRowRenderSpy = vi.fn();
 
 const createNews = (
   id: number,
   title = `お知らせ${id}`,
   newsDate = `2026年08月${String(id).padStart(2, "0")}日 12時00分00秒`,
   category?: string,
-) => ({
-  targetUrl: `/info/${id}`,
-  title,
-  newsDate,
-  updated: "",
-  ...(category !== undefined ? { category } : {}),
-});
+) => {
+  const news = { targetUrl: `/info/${id}`, title, newsDate, updated: "" };
+  if (category !== undefined) return { ...news, category };
+  return news;
+};
 
 class TestIntersectionObserver implements IntersectionObserver {
   readonly root = null;
@@ -49,8 +38,14 @@ class TestIntersectionObserver implements IntersectionObserver {
 
   trigger(isIntersecting = true) {
     this.callback(
-      [{ isIntersecting } as IntersectionObserverEntry],
-      this as unknown as IntersectionObserver,
+      // SAFETY: The test supplies the IntersectionObserver fields consumed by the component.
+      [
+        {
+          isIntersecting,
+        } /* SAFETY: The fixture provides the DOM or platform fields consumed by this test. */ as IntersectionObserverEntry,
+      ],
+      // SAFETY: The fixture provides the DOM or platform fields consumed by this test.
+      this /* SAFETY: The fixture provides the DOM or platform fields consumed by this test. */ as IntersectionObserver,
     );
   }
 }
@@ -59,7 +54,7 @@ const intersectionObservers: TestIntersectionObserver[] = [];
 let root: ReturnType<typeof createRoot> | undefined;
 let container: HTMLDivElement;
 
-const jsonResponse = (body: unknown, status = 200, headers: HeadersInit = {}) =>
+const jsonResponse = (body: JsonInput, status = 200, headers: HeadersInit = {}) =>
   new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json", ...headers },
@@ -74,7 +69,7 @@ const mockNewsApi = ({
   refreshResponses = [],
   getStatus = 200,
 }: {
-  news: unknown;
+  news: JsonInput;
   headers?: HeadersInit;
   refreshResponses?: Response[];
   getStatus?: number;
@@ -95,11 +90,11 @@ const mockNewsApi = ({
   );
 };
 
-const mount = () => {
+const mount = (onNewsRowRender?: () => void) => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  root.render(<KemonoFriends3NewsSearch />);
+  root.render(<KemonoFriends3NewsSearch onNewsRowRender={onNewsRowRender} />);
 };
 
 const waitForText = (text: string) =>
@@ -160,7 +155,8 @@ beforeEach(() => {
   localStorage.clear();
   vi.stubGlobal(
     "IntersectionObserver",
-    TestIntersectionObserver as unknown as typeof IntersectionObserver,
+    // SAFETY: The fixture provides the DOM or platform fields consumed by this test.
+    TestIntersectionObserver /* SAFETY: The fixture provides the DOM or platform fields consumed by this test. */ as typeof IntersectionObserver,
   );
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -251,7 +247,7 @@ describe("KemonoFriends3NewsSearch", () => {
       },
     });
 
-    mount();
+    mount(newsRowRenderSpy);
     await flushFakeUpdates();
     expect(container.querySelectorAll("li")).toHaveLength(20);
     while (container.querySelectorAll("li").length < news.length) {
@@ -555,7 +551,14 @@ describe("KemonoFriends3NewsSearch", () => {
     getRefreshButton()?.click();
     await waitForText("対象1更新");
     expect(container.querySelectorAll("li")).toHaveLength(25);
-    expect((container.querySelector("#news-keyword") as HTMLInputElement).value).toBe("対象");
+    // SAFETY: The fixture provides the DOM or platform fields consumed by this test.
+    expect(
+      (
+        container.querySelector(
+          "#news-keyword",
+        ) /* SAFETY: The fixture provides the DOM or platform fields consumed by this test. */ as HTMLInputElement
+      ).value,
+    ).toBe("対象");
   });
 
   it("refresh成功時は公式確認日時とcooldown期限を別々に扱う", async () => {
@@ -611,7 +614,8 @@ describe("KemonoFriends3NewsSearch", () => {
     setInputValue(startDate, "2019-09-25");
     await waitForText("･ 2件");
 
-    const sortOrder = container.querySelector("#sortOrder") as unknown as HTMLSelectElement;
+    // SAFETY: The fixture provides the DOM or platform fields consumed by this test.
+    const sortOrder = bridgeRuntimeValue<HTMLSelectElement>(container.querySelector("#sortOrder"));
     sortOrder.value = "asc";
     sortOrder.dispatchEvent(new Event("change", { bubbles: true }));
     await waitForText("･ 2件");
