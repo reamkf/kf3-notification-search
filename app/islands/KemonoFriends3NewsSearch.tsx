@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "hono/jsx";
 import * as v from "valibot";
-import { newsArraySchema, News, summarizeValidationIssues } from "../schema";
+import { jsonObjectSchema, newsArraySchema, News, summarizeValidationIssues } from "../schema";
 import { QueryParser } from "../query-parser";
 import { normalizeQuery } from "../query-normalizer";
 import { getJapaneseDate } from "../get-japanese-date";
@@ -392,22 +392,24 @@ const parseCooldownMs = async (response: Response) => {
   if (headerDelay) return parseRetryAfterMs(headerDelay);
 
   try {
-    const body: unknown = await response.json();
-    if (!body || typeof body !== "object" || Array.isArray(body)) return DEFAULT_RETRY_AFTER_MS;
-    const candidate = body as Record<string, unknown>;
+    const result = v.safeParse(jsonObjectSchema, await response.json());
+    if (!result.success) return DEFAULT_RETRY_AFTER_MS;
+    const candidate = result.output;
     for (const key of ["nextAvailableAt", "cooldownUntil"]) {
-      const value = candidate[key];
-      if (typeof value !== "string") continue;
-      const timestamp = Date.parse(value);
+      const value = v.safeParse(v.string(), candidate[key]);
+      if (!value.success) continue;
+      const timestamp = Date.parse(value.output);
       if (Number.isFinite(timestamp)) return Math.max(0, timestamp - Date.now());
     }
     for (const key of ["cooldownSeconds", "retryAfter"]) {
       const seconds = candidate[key];
-      if (typeof seconds === "number" && Number.isFinite(seconds)) {
-        return Math.max(0, seconds * 1000);
+      const numericSeconds = v.safeParse(v.number(), seconds);
+      if (numericSeconds.success && Number.isFinite(numericSeconds.output)) {
+        return Math.max(0, numericSeconds.output * 1000);
       }
-      if (typeof seconds === "string" && seconds.trim() !== "") {
-        const parsed = Number(seconds);
+      const textSeconds = v.safeParse(v.string(), seconds);
+      if (textSeconds.success && textSeconds.output.trim() !== "") {
+        const parsed = Number(textSeconds.output);
         if (Number.isFinite(parsed)) return Math.max(0, parsed * 1000);
       }
     }
@@ -466,7 +468,11 @@ const getSortedNews = (data: Array<News>, sortOrder: string) => {
 };
 
 // お知らせデータの検索・表示コンポーネント
-const KemonoFriends3NewsSearch = () => {
+type KemonoFriends3NewsSearchProps = {
+  onNewsRowRender?: () => void;
+};
+
+const KemonoFriends3NewsSearch = ({ onNewsRowRender }: KemonoFriends3NewsSearchProps = {}) => {
   const [initialLoadStatus, setInitialLoadStatus] = useState<InitialLoadStatus>("loading");
   const [initialErrorMessage, setInitialErrorMessage] = useState<string | null>(null);
   const [newsPayload, setNewsPayload] = useState<NewsPayload | null>(null);
@@ -531,13 +537,11 @@ const KemonoFriends3NewsSearch = () => {
       const timeout = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
       refreshAbortRef.current = controller;
       try {
-        const response = await fetch("/api/kf3-news/refresh", {
-          method: "POST",
-          ...(newsPayload.metadata.dataVersion
-            ? { headers: { [NEWS_DATA_VERSION_HEADER]: newsPayload.metadata.dataVersion } }
-            : {}),
-          signal: controller.signal,
-        });
+        const requestInit: RequestInit = { method: "POST", signal: controller.signal };
+        if (newsPayload.metadata.dataVersion) {
+          requestInit.headers = { [NEWS_DATA_VERSION_HEADER]: newsPayload.metadata.dataVersion };
+        }
+        const response = await fetch("/api/kf3-news/refresh", requestInit);
         if (!mountedRef.current || generationRef.current !== generation) return;
 
         if (response.status === 202) {
@@ -965,7 +969,7 @@ const KemonoFriends3NewsSearch = () => {
 
         <ul class="space-y-4">
           {newsData.map((news) => (
-            <NewsRow key={news.targetUrl} news={news} />
+            <NewsRow key={news.targetUrl} news={news} onRender={onNewsRowRender} />
           ))}
         </ul>
 
