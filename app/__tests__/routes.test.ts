@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import notFoundHandler from "../routes/_404";
 import { bridgeRuntimeValue } from "../runtime-value";
 import errorHandler from "../routes/_error";

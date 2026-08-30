@@ -3,24 +3,24 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --config vite.dev.config.ts",
-    "build": "vite build --mode client && vite build && vite build --config vite.ssg.config.ts && bun scripts/assert-build-output.ts",
-    "preview": "$npm_execpath run build && wrangler dev",
+    "dev": "vp dev",
+    "build": "vp build --mode client && vp build && vp build --mode ssg && bun scripts/assert-build-output.ts",
+    "preview": "vp run build && wrangler dev",
     "restore:dev": "wrangler dev --config wrangler.restore.toml --ip 127.0.0.1 --port 8790",
     "seed:dummy": "bun scripts/seed-dummy-data.js",
     "seed:production": "bun scripts/fetch-production-data.js",
-    "deploy": "$npm_execpath run build && wrangler deploy",
-    "test": "bun run test:unit && bun run test:worker",
+    "deploy": "vp run build && wrangler deploy",
+    "test": "vp test --project unit && vp test --project worker",
     "test:e2e": "playwright test",
     "test:e2e:preview": "playwright test --config playwright.preview.config.ts",
-    "test:unit": "vitest run",
-    "test:worker": "vitest run --config vitest.worker.config.ts",
-    "test:watch": "vitest",
-    "lint": "oxlint",
-    "lint:fix": "oxlint --fix",
-    "format": "oxfmt .",
-    "format:check": "oxfmt --check .",
-    "prepare": "bun run seed:dummy && bun run seed:production && lefthook install"
+    "test:unit": "vp test --project unit",
+    "test:worker": "vp test --project worker",
+    "test:watch": "vp test --project unit --watch",
+    "lint": "vp lint",
+    "lint:fix": "vp lint --fix",
+    "format": "vp fmt",
+    "format:check": "vp fmt --check",
+    "prepare": "bun run seed:dummy && bun run seed:production && vp config --no-agent"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans-jp": "^5.3.0",
@@ -38,13 +38,15 @@
     "@playwright/test": "^1.62.1",
     "@tailwindcss/vite": "^4.3.3",
     "happy-dom": "^20.11.8",
-    "lefthook": "^2.1.10",
-    "oxfmt": "^0.65.0",
-    "oxlint": "^1.80.0",
     "tailwindcss": "^4.3.3",
-    "vite": "^8.2.2",
-    "vite-node": "^6.0.0",
-    "vitest": "^4.1.11",
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.3.0",
+    "vite-plus": "0.3.0",
+    "vitest": "4.1.11",
     "wrangler": "^4.125.0"
-  }
+  },
+  "overrides": {
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.3.0",
+    "vitest": "4.1.11"
+  },
+  "packageManager": "bun@1.4.0"
 }

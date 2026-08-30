@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { env } from "cloudflare:workers";
 import { createExecutionContext, reset } from "cloudflare:test";
 import type { ExportedHandler } from "@cloudflare/workers-types";

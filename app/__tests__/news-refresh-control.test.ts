@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import {
   NEWS_REFRESH_CONTROL_KEY,
   NEWS_REFRESH_CONTROL_VERSION,

@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { createRenderer } from "../routes/_renderer";
 
 describe("renderer metadata", () => {

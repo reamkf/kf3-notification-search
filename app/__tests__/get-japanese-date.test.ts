@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vite-plus/test";
 import { getJapaneseDate } from "../get-japanese-date";
 import dayjs from "dayjs";
 import "dayjs/locale/ja";

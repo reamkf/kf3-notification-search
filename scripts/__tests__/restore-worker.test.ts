@@ -1,5 +1,5 @@
 import * as v from "valibot";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vite-plus/test";
 import type {
   KVNamespace,
   R2Bucket,

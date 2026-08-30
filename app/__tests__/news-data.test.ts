@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import * as v from "valibot";
 import {
   MAX_UPDATED_EXISTING_ENTRY_COUNT,
