@@ -35,9 +35,7 @@ export default jsxRenderer(({ children, title }, c) => {
       </head>
       <body>
         <main class="bg-yellow-400">
-          <div class="max-w-5xl mx-auto ">
-            <body class=" font-noto-sans">{children}</body>
-          </div>
+          <div class="max-w-5xl mx-auto ">{children}</div>
         </main>
       </body>
     </html>

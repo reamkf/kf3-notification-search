@@ -1,9 +1,2 @@
 @import "tailwindcss";
 @config "../tailwind.config.js";
-
-@layer components {
-  @font-face {
-    font-family: "Noto Sans JP";
-    src: url("NotoSansJP-VariableFont_wght.ttf") format("ttf");
-  }
-}
