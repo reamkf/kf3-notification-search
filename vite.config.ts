@@ -13,7 +13,7 @@ export default defineConfig(({ command }) => ({
     honox({
       entry: command === "serve" ? "./app/dev-server.ts" : "./app/worker.ts",
       client: {
-        input: ["/app/client.ts", "/app/style.css"],
+        input: ["/app/client.ts", "/app/style.css", "/app/font.css"],
       },
       devServer: {
         handleHotUpdate({ server, modules }) {

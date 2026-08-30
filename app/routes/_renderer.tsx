@@ -32,6 +32,7 @@ export default jsxRenderer(({ children, title }, c) => {
         <link rel="icon" href="/favicon.ico" />
         <Script src="/app/client.ts" async />
         <Link href="/app/style.css" rel="stylesheet" />
+        <Link href="/app/font.css" rel="stylesheet" />
       </head>
       <body>
         <main class="bg-yellow-400">
