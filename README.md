@@ -17,7 +17,7 @@
 
 ## ローカル開発
 
-依存関係のインストール、Cloudflareのリソース準備、ローカルWorkerとscheduled handler、Queue consumerの確認、テスト、デプロイ手順、Cloudflare Workers BuildsによるGit push自動デプロイの設定は [開発ガイド](./docs/development.md) にまとめています。
+[`development.md`](./docs/development.md) を参照してください。
 
 ## お知らせ一覧取得フロー
 
