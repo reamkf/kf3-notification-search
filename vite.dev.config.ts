@@ -41,7 +41,7 @@ export default defineConfig({
     honox({
       entry: "./app/dev-server.ts",
       client: {
-        input: ["/app/client.ts", "/app/style.css"],
+        input: ["/app/client.ts", "/app/style.css", "/app/font.css"],
       },
       devServer: {
         exclude: [/^\/.*/],

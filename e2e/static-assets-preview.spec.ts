@@ -10,6 +10,22 @@ test("SSG shellをStatic Assetsから返し、APIをWorkerへfallbackする", as
   expect(html).toMatch(/href="\/static\/[^"]+\.css"/);
   expect(html).toContain('<meta property="og:image" content="http://127.0.0.1:8787/og-image.jpg"');
 
+  const fontStylesheetPath = html.match(/href="(\/static\/font-[^"]+\.css)"/)?.[1];
+  expect(fontStylesheetPath).toBeDefined();
+  const fontStylesheetResponse = await request.get(fontStylesheetPath!);
+  expect(fontStylesheetResponse.status()).toBe(200);
+  expect(fontStylesheetResponse.headers()["cache-control"]).toBe(
+    "public, max-age=31536000, immutable",
+  );
+
+  const fontPath = (await fontStylesheetResponse.text()).match(
+    /url\(["']?(\/static\/noto-sans-jp-[^)"']+\.woff2)/,
+  )?.[1];
+  expect(fontPath).toBeDefined();
+  const fontResponse = await request.get(fontPath!);
+  expect(fontResponse.status()).toBe(200);
+  expect(fontResponse.headers()["cache-control"]).toBe("public, max-age=31536000, immutable");
+
   let newsRequests = 0;
   let preHydrationNewsRequests = 0;
   await page.route("**/api/kf3-news", async (route) => {
