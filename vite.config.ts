@@ -1,4 +1,5 @@
 import honox from "honox/vite";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 import build, {
   defaultOptions as cloudflareWorkersBuildOptions,
@@ -10,6 +11,7 @@ export default defineConfig(({ command }) => ({
     allowedHosts: true,
   },
   plugins: [
+    tailwindcss(),
     honox({
       entry: command === "serve" ? "./app/dev-server.ts" : "./app/worker.ts",
       client: {

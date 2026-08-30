@@ -1,3 +1,4 @@
+import tailwindcss from "@tailwindcss/vite";
 import { cloudflare } from "@cloudflare/vite-plugin";
 import honox from "honox/vite";
 import { defineConfig } from "vite";
@@ -34,6 +35,7 @@ export default defineConfig({
     allowedHosts: true,
   },
   plugins: [
+    tailwindcss(),
     ...cloudflare({
       config: { main: "./app/dev-server.ts" },
     }),
