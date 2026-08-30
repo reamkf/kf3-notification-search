@@ -195,6 +195,7 @@ describe("news response metadata", () => {
       },
     },
   ])("不正または欠落したheadersを安全に扱う: %#", ({ headers, expected }) => {
+    // SAFETY: The test cases provide valid HeadersInit records.
     expect(parseNewsResponseHeaders(new Headers(headers as HeadersInit))).toEqual(expected);
   });
 });

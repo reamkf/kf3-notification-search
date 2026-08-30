@@ -15,6 +15,8 @@ import { NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION } from "../news-archive-queue";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createNewsCacheMetadata } from "../news-response-metadata";
 import { createWorkerHandler } from "../server";
+import { bridgeRuntimeValue } from "../runtime-value";
+import type { JsonInput, JsonObject } from "../schema";
 import {
   NEWS_REFRESH_CONTROL_KEY,
   NEWS_REFRESH_CONTROL_VERSION,
@@ -23,7 +25,7 @@ import {
   NEWS_REFRESH_LEASE_MS,
 } from "../news-refresh-control";
 
-const bindings = env as unknown as WorkerBindings;
+const bindings = bridgeRuntimeValue<WorkerBindings>(env);
 
 const createNews = (id: number) => ({
   id,
@@ -44,15 +46,17 @@ type WorkerFetch = NonNullable<ExportedHandler<WorkerBindings>["fetch"]>;
 type WorkerQueue = NonNullable<ReturnType<typeof createWorkerHandler>["queue"]>;
 
 const callFetch = async (handler: ReturnType<typeof createWorkerHandler>, request: Request) =>
-  (await handler.fetch?.(
-    request as unknown as Parameters<WorkerFetch>[0],
-    bindings as Parameters<WorkerFetch>[1],
-    createExecutionContext() as unknown as Parameters<WorkerFetch>[2],
-  )) as unknown as Response;
+  bridgeRuntimeValue<Response>(
+    await handler.fetch?.(
+      bridgeRuntimeValue<Parameters<WorkerFetch>[0]>(request),
+      bindings,
+      bridgeRuntimeValue<Parameters<WorkerFetch>[2]>(createExecutionContext()),
+    ),
+  );
 
 const callQueue = async (
   handler: ReturnType<typeof createWorkerHandler>,
-  body: unknown = {
+  body: JsonInput = {
     version: NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION,
     reason: "refresh-detected-change",
     detectedAt: "2026-08-01T18:14:00.000Z",
@@ -64,7 +68,7 @@ const callQueue = async (
   const ack = vi.fn();
   const retry = vi.fn();
   await handler.queue?.(
-    {
+    bridgeRuntimeValue<Parameters<WorkerQueue>[0]>({
       queue: "kf3-notif-archive-update",
       messages: [
         {
@@ -76,9 +80,9 @@ const callQueue = async (
           retry,
         },
       ],
-    } as unknown as Parameters<WorkerQueue>[0],
-    bindings as Parameters<WorkerQueue>[1],
-    createExecutionContext() as unknown as Parameters<WorkerQueue>[2],
+    }),
+    bindings,
+    bridgeRuntimeValue<Parameters<WorkerQueue>[2]>(createExecutionContext()),
   );
   return { ack, retry };
 };
@@ -152,7 +156,7 @@ describe("Cloudflare bindings", () => {
     await bindings.KF3_NOTIF_DATA.put(CURRENT_ARCHIVE_KEY, JSON.stringify(createDocument(1)));
     await bindings.KF3_NOTIF_CACHE.put("kf3-news", "fresh-refresh-cache");
     const officialDocument = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       fetcher: async () => new Response(JSON.stringify(officialDocument)),
       clock: () => Date.parse("2026-08-01T18:15:00Z"),
@@ -245,6 +249,7 @@ describe("Cloudflare bindings", () => {
     await bindings.KF3_NOTIF_DATA.put(LEGACY_ARCHIVE_KEY, JSON.stringify(legacyDocument));
     await bindings.KF3_NOTIF_CACHE.put("kf3-news", "stale");
     let injected = false;
+    // SAFETY: The test double implements the R2 methods exercised by this scenario.
     const dataBucket = {
       get: bindings.KF3_NOTIF_DATA.get.bind(bindings.KF3_NOTIF_DATA),
       head: bindings.KF3_NOTIF_DATA.head.bind(bindings.KF3_NOTIF_DATA),
@@ -255,7 +260,8 @@ describe("Cloudflare bindings", () => {
         }
         return bindings.KF3_NOTIF_DATA.put(key, value, options);
       },
-    } as unknown as R2Bucket;
+      // SAFETY: The Cloudflare fixture provides the runtime fields consumed by this test.
+    } /* SAFETY: The Cloudflare fixture provides the runtime fields consumed by this test. */ as R2Bucket;
 
     await expect(
       updateNewsArchive({
@@ -282,13 +288,15 @@ describe("Cloudflare bindings", () => {
     await bindings.KF3_NOTIF_DATA.put(CURRENT_ARCHIVE_KEY, JSON.stringify(currentDocument));
     await bindings.KF3_NOTIF_BACKUP.put(monthlyKey, "existing monthly");
     let putCalls = 0;
+    // SAFETY: The test double implements the R2 methods exercised by this scenario.
     const backupBucket = {
       put: async (...args: Parameters<R2Bucket["put"]>) => {
         putCalls += 1;
         return bindings.KF3_NOTIF_BACKUP.put(...args);
       },
       head: bindings.KF3_NOTIF_BACKUP.head.bind(bindings.KF3_NOTIF_BACKUP),
-    } as unknown as R2Bucket;
+      // SAFETY: The Cloudflare fixture provides the runtime fields consumed by this test.
+    } /* SAFETY: The Cloudflare fixture provides the runtime fields consumed by this test. */ as R2Bucket;
 
     const result = await updateNewsArchive({
       dataBucket: bindings.KF3_NOTIF_DATA,

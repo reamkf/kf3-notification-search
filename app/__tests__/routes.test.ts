@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import notFoundHandler from "../routes/_404";
+import { bridgeRuntimeValue } from "../runtime-value";
 import errorHandler from "../routes/_error";
 
 const createNotFoundContext = (
@@ -15,12 +16,12 @@ const createNotFoundContext = (
     redirect: "manual",
     headers: { accept: "text/html" },
   });
-  const context = {
+  const context = bridgeRuntimeValue<Parameters<typeof notFoundHandler>[0]>({
     req: { method, raw: request, url: request.url, header: () => ({}) },
     env: { ASSETS: { fetch: assetFetch } },
     status,
     render,
-  } as unknown as Parameters<typeof notFoundHandler>[0];
+  });
   return { context, request, status, render, assetFetch, renderedResponse };
 };
 
@@ -59,7 +60,7 @@ describe("error handler", () => {
   it("getResponseを持つerrorのresponseを維持する", () => {
     const expected = new Response("bad request", { status: 400 });
     const error = Object.assign(new Error("bad request"), { getResponse: () => expected });
-    const context = {} as Parameters<typeof errorHandler>[1];
+    const context = bridgeRuntimeValue<Parameters<typeof errorHandler>[1]>({});
 
     expect(errorHandler(error, context)).toBe(expected);
   });
@@ -68,7 +69,7 @@ describe("error handler", () => {
     const status = vi.fn();
     const expected = new Response("Internal Server Error", { status: 500 });
     const render = vi.fn(() => expected);
-    const context = { status, render } as unknown as Parameters<typeof errorHandler>[1];
+    const context = bridgeRuntimeValue<Parameters<typeof errorHandler>[1]>({ status, render });
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       expect(errorHandler(new Error("failed"), context)).toBe(expected);

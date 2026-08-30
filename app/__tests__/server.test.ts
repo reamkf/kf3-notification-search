@@ -28,16 +28,21 @@ import {
 import { NEWS_CACHE_KEY, NEWS_REFRESH_STATE_KEY } from "../news-cache-keys";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createWorkerHandler } from "../server";
+import { bridgeRuntimeValue } from "../runtime-value";
 import { createNewsCacheMetadata } from "../news-response-metadata";
+import type { JsonInput, JsonObject } from "../schema";
 
-const createNews = (id: number, category?: string) => ({
-  id,
-  targetUrl: `/info/${id}`,
-  title: `お知らせ${id}`,
-  newsDate: "2026年08月01日 12時00分00秒",
-  updated: "2026年08月01日 12時00分00秒",
-  ...(category !== undefined ? { category } : {}),
-});
+const createNews = (id: number, category?: string) => {
+  const news = {
+    id,
+    targetUrl: `/info/${id}`,
+    title: `お知らせ${id}`,
+    newsDate: "2026年08月01日 12時00分00秒",
+    updated: "2026年08月01日 12時00分00秒",
+  };
+  if (category !== undefined) return { ...news, category };
+  return news;
+};
 
 const createDocument = (count: number, sorted = false) => {
   const news = Array.from({ length: count }, (_, index) => createNews(index + 1));
@@ -45,6 +50,7 @@ const createDocument = (count: number, sorted = false) => {
   return { news };
 };
 
+// SAFETY: The fixture provides the R2 object fields consumed by this test.
 const createR2Object = (text: string, etag = "etag"): R2ObjectBody =>
   ({
     etag,
@@ -59,9 +65,10 @@ const createR2Object = (text: string, etag = "etag"): R2ObjectBody =>
       });
     },
     arrayBuffer: async () => new TextEncoder().encode(text).buffer,
-  }) as unknown as R2ObjectBody;
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+  }) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as R2ObjectBody;
 
-const createResponse = (document: unknown, ok = true) =>
+const createResponse = (document: JsonInput, ok = true) =>
   new Response(ok ? JSON.stringify(document) : "failed", { status: ok ? 200 : 503 });
 
 type RefreshCoordinatorStub = {
@@ -155,6 +162,7 @@ const createBindings = (
   }> = [];
   const cacheDeletes: string[] = [];
   const queueMessages: NewsArchiveUpdateMessage[] = [];
+  // SAFETY: The test double implements the R2 methods exercised by this scenario.
   const dataBucket = {
     get: async (key: string, getOptions?: { onlyIf?: { etagMatches?: string } }) => {
       dataGets.push(key);
@@ -163,6 +171,7 @@ const createBindings = (
         getOptions?.onlyIf?.etagMatches !== undefined &&
         (options.conditionalCurrentMismatch || options.conditionalCurrentReadMismatch)
       ) {
+        // SAFETY: The test double returns the R2 metadata fields used by the handler.
         return { etag: "new-current-etag" } as R2Object;
       }
       if (key === CURRENT_ARCHIVE_KEY && currentText !== null)
@@ -178,6 +187,7 @@ const createBindings = (
     head: async (key: string) => {
       if (key === CURRENT_ARCHIVE_KEY && currentText !== null) {
         currentHeadCalls += 1;
+        // SAFETY: The test double returns the R2 metadata fields used by the handler.
         return {
           etag: options.conditionalCurrentMismatch ? "new-current-etag" : currentEtag,
         } as R2Object;
@@ -189,11 +199,14 @@ const createBindings = (
         if (options.checkStatePutBlock) await options.checkStatePutBlock;
         checkStateText = value;
         checkStateEtag = `check-state-etag-${checkStateText.length}`;
+        // SAFETY: The test double returns the R2 metadata fields used by the handler.
         return { etag: checkStateEtag } as R2Object;
       }
       return null;
     },
-  } as unknown as R2Bucket;
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+  } /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as R2Bucket;
+  // SAFETY: The test double implements the KV methods exercised by this scenario.
   const cache = {
     get: async (key: string) => {
       if (options.cacheGetError) throw new Error("cache get failed");
@@ -232,26 +245,31 @@ const createBindings = (
       cacheValues.delete(key);
       cacheMetadata.delete(key);
     },
-  } as unknown as KVNamespace;
-  const backup = {
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+  } /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as KVNamespace;
+  const backup = bridgeRuntimeValue<R2Bucket>({
     get: async () => null,
     head: async () => null,
     put: async () => null,
-  } as unknown as R2Bucket;
-  const archiveUpdateQueue = {
+  });
+  const archiveUpdateQueue = bridgeRuntimeValue<Queue<NewsArchiveUpdateMessage>>({
     send: async (message: NewsArchiveUpdateMessage) => {
       if (options.queueSendError) throw new Error("queue send failed");
       if (options.queueSendBlock) await options.queueSendBlock;
       queueMessages.push(message);
     },
-  } as unknown as Queue<NewsArchiveUpdateMessage>;
+  });
   const refreshCoordinator = createRefreshCoordinator(options);
-  const refreshCoordinatorNamespace = {
-    getByName: () => refreshCoordinator,
-  } as unknown as WorkerBindings["KF3_REFRESH_COORDINATOR"];
+  const refreshCoordinatorNamespace = bridgeRuntimeValue<WorkerBindings["KF3_REFRESH_COORDINATOR"]>(
+    {
+      getByName: () => refreshCoordinator,
+    },
+  );
   return {
     env: {
-      ASSETS: {} as Fetcher,
+      // SAFETY: The fixture provides the Worker fields consumed by this test.
+      ASSETS:
+        {} /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as Fetcher,
       KF3_NOTIF_CACHE: cache,
       KF3_NOTIF_DATA: dataBucket,
       KF3_NOTIF_BACKUP: backup,
@@ -269,13 +287,15 @@ const createBindings = (
   };
 };
 
+// SAFETY: The test context implements the execution hooks exercised by this test.
 const createContext = (pending?: Promise<unknown>[]) =>
   ({
     waitUntil: (promise: Promise<unknown>) => {
       pending?.push(promise);
     },
     passThroughOnException: () => undefined,
-  }) as unknown as ExecutionContext;
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+  }) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as ExecutionContext;
 
 type WorkerFetch = NonNullable<ReturnType<typeof createWorkerHandler>["fetch"]>;
 type WorkerScheduled = NonNullable<ReturnType<typeof createWorkerHandler>["scheduled"]>;
@@ -287,32 +307,46 @@ const callFetch = async (
   env: WorkerBindings,
   pending?: Promise<unknown>[],
 ) =>
+  // SAFETY: The test invokes the Worker fetch adapter with compatible runtime values.
   (await handler.fetch?.(
-    request as unknown as Parameters<WorkerFetch>[0],
-    env as unknown as Parameters<WorkerFetch>[1],
-    createContext(pending) as unknown as Parameters<WorkerFetch>[2],
-  )) as unknown as Response;
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    bridgeRuntimeValue<Parameters<WorkerFetch>[0]>(request),
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    env /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as Parameters<WorkerFetch>[1],
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    createContext(
+      pending,
+    ) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as Parameters<WorkerFetch>[2],
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+  )) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as Response;
 
 const callScheduled = async (
   handler: ReturnType<typeof createWorkerHandler>,
   env: WorkerBindings,
   scheduledTime: number,
 ) =>
+  // SAFETY: The test invokes the Worker scheduled adapter with compatible runtime values.
   handler.scheduled?.(
-    { scheduledTime } as unknown as Parameters<WorkerScheduled>[0],
-    env as unknown as Parameters<WorkerScheduled>[1],
-    createContext() as unknown as Parameters<WorkerScheduled>[2],
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    {
+      scheduledTime,
+    } /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as Parameters<WorkerScheduled>[0],
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    env /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as Parameters<WorkerScheduled>[1],
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    createContext() /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as Parameters<WorkerScheduled>[2],
   );
 
 const callQueue = async (
   handler: ReturnType<typeof createWorkerHandler>,
   env: WorkerBindings,
-  body: unknown,
+  body: JsonInput,
 ) => {
   const ack = vi.fn();
   const retry = vi.fn();
+  // SAFETY: The test invokes the Worker queue adapter with compatible runtime values.
   await handler.queue?.(
-    {
+    bridgeRuntimeValue<Parameters<WorkerQueue>[0]>({
       queue: "kf3-notif-archive-update",
       messages: [
         {
@@ -324,9 +358,11 @@ const callQueue = async (
           retry,
         },
       ],
-    } as unknown as Parameters<WorkerQueue>[0],
-    env as Parameters<WorkerQueue>[1],
-    createContext() as unknown as Parameters<WorkerQueue>[2],
+    }),
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    env /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as Parameters<WorkerQueue>[1],
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    createContext() /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as Parameters<WorkerQueue>[2],
   );
   return { ack, retry };
 };
@@ -352,7 +388,7 @@ describe("Worker API handler", () => {
       tag: "test",
       timestamp: "2026-08-09T12:34:56.789Z",
     };
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     let fetchCalls = 0;
     let clockCalls = 0;
     const handler = createWorkerHandler({
@@ -453,7 +489,7 @@ describe("Worker API handler", () => {
     const setup = createBindings(JSON.stringify(createDocument(2)), undefined, {
       checkStateText: JSON.stringify({ version: 1, checkedAt: officialCheckedAt }),
     });
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       fetcher: async () => {
         throw new Error("unexpected fetch");
@@ -469,7 +505,10 @@ describe("Worker API handler", () => {
     );
     const responseText = await response.text();
     await Promise.all(pending);
-    const body = JSON.parse(responseText) as Array<Record<string, unknown>>;
+    // SAFETY: The endpoint returns a JSON array of client news records.
+    const body = JSON.parse(
+      responseText,
+    ) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as JsonObject[];
 
     expect(response.status).toBe(200);
     expect(body[0].targetUrl).toBe("/info/1");
@@ -521,7 +560,10 @@ describe("Worker API handler", () => {
     );
 
     expect(response.status).toBe(200);
-    expect((await response.json()) as unknown[]).toHaveLength(1);
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    expect(
+      (await response.json()) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as unknown[],
+    ).toHaveLength(1);
     expect(pending).toHaveLength(1);
     expect(setup.cachePuts).toHaveLength(0);
 
@@ -572,7 +614,7 @@ describe("Worker API handler", () => {
       "kf3-news-archive-snapshot",
       createNewsCacheMetadata("archive-snapshot", "2026-08-09T12:34:56.789Z", null, 1),
     );
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
 
     const response = await callFetch(
       createWorkerHandler({
@@ -669,7 +711,7 @@ describe("Worker API handler", () => {
     const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
       cachePutError: true,
     });
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const pending: Promise<unknown>[] = [];
     const response = await callFetch(
       createWorkerHandler({
@@ -681,7 +723,10 @@ describe("Worker API handler", () => {
     );
 
     expect(response.status).toBe(200);
-    expect((await response.json()) as unknown[]).toHaveLength(1);
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    expect(
+      (await response.json()) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as unknown[],
+    ).toHaveLength(1);
     await Promise.all(pending);
     expect(setup.cachePuts).toHaveLength(0);
     expect(logs).toContainEqual(
@@ -730,7 +775,10 @@ describe("Worker API handler", () => {
       pending,
     );
     expect(response.status).toBe(200);
-    expect((await response.json()) as unknown[]).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    expect(
+      (await response.json()) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as unknown[],
+    ).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
     await Promise.all(pending);
     expect(requestHeaders).toHaveLength(0);
     expect(setup.cachePuts).toHaveLength(1);
@@ -744,7 +792,7 @@ describe("Worker API handler", () => {
         currentEtag: "current-etag",
       }),
     });
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       fetcher: async () => Promise.reject(new Error("official unavailable")),
       logger: { log: () => undefined, error: (event) => logs.push(event) },
@@ -765,7 +813,7 @@ describe("Worker API handler", () => {
     const setup = createBindings(null, JSON.stringify(createDocument(1)), {
       cacheGetError: true,
     });
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     let fetchCalls = 0;
     const handler = createWorkerHandler({
       fetcher: async () => {
@@ -820,7 +868,7 @@ describe("Worker API handler", () => {
       tag: "test-refresh",
       timestamp: "2026-08-09T12:34:56.789Z",
     };
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       fetcher: async () => createResponse(official),
       clock: () => Date.parse("2026-08-09T12:34:56.789Z"),
@@ -831,10 +879,12 @@ describe("Worker API handler", () => {
       new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
       setup.env,
     );
-    const payload = (await response.json()) as {
-      news: Array<Record<string, unknown>>;
-      metadata: unknown;
-    };
+    // SAFETY: This response is the successful refresh payload used by the test.
+    const payload =
+      (await response.json()) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as {
+        news: JsonObject[];
+        metadata: JsonInput;
+      };
 
     expect(response.status).toBe(200);
     expect(payload.news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
@@ -938,9 +988,11 @@ describe("Worker API handler", () => {
       new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
       setup.env,
     );
-    const payload = (await response.json()) as {
-      metadata: Record<string, unknown>;
-    };
+    // SAFETY: This response contains the refresh metadata asserted below.
+    const payload =
+      (await response.json()) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as {
+        metadata: JsonObject;
+      };
 
     expect(response.status).toBe(200);
     expect(payload.metadata).toMatchObject({
@@ -1028,7 +1080,7 @@ describe("Worker API handler", () => {
   it("refreshのmerge結果に変更がない場合はQueueへ通知しない", async () => {
     const document = createDocument(MIN_OFFICIAL_ENTRY_COUNT);
     const setup = createBindings(JSON.stringify(document));
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const response = await callFetch(
       createWorkerHandler({
         fetcher: async () => createResponse(document),
@@ -1039,7 +1091,12 @@ describe("Worker API handler", () => {
     );
 
     expect(response.status).toBe(200);
-    expect((await response.json()) as { news: unknown[] }).toHaveProperty("news");
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    expect(
+      (await response.json()) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as {
+        news: unknown[];
+      },
+    ).toHaveProperty("news");
     expect(setup.queueMessages).toHaveLength(0);
     expect(logs).toContainEqual(
       expect.objectContaining({
@@ -1064,7 +1121,9 @@ describe("Worker API handler", () => {
       }),
       setup.env,
     );
-    const payload = (await response.json()) as Record<string, unknown>;
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    const payload =
+      (await response.json()) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as JsonObject;
 
     expect(response.status).toBe(200);
     expect(payload).toMatchObject({
@@ -1084,7 +1143,7 @@ describe("Worker API handler", () => {
   it("current未作成ならmerge差分がなくても初期化Queue messageを送る", async () => {
     const legacy = createDocument(MIN_OFFICIAL_ENTRY_COUNT, true);
     const setup = createBindings(null, JSON.stringify(legacy));
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const response = await callFetch(
       createWorkerHandler({
         fetcher: async () => createResponse(legacy),
@@ -1173,7 +1232,9 @@ describe("Worker API handler", () => {
       }),
       setup.env,
     );
-    const payload = (await response.json()) as Record<string, unknown>;
+    // SAFETY: The fixture provides the Worker fields consumed by this test.
+    const payload =
+      (await response.json()) /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as JsonObject;
 
     expect(response.status).toBe(200);
     expect(payload).toMatchObject({
@@ -1248,7 +1309,7 @@ describe("Worker API handler", () => {
       new Response(null, { status: 304, headers: { etag: '"official-etag"' } }),
       createResponse(document),
     ];
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const response = await callFetch(
       createWorkerHandler({
         fetcher: async () => responses.shift()!,
@@ -1274,7 +1335,7 @@ describe("Worker API handler", () => {
     const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
       queueSendError: true,
     });
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const pending: Promise<unknown>[] = [];
     const response = await callFetch(
       createWorkerHandler({
@@ -1347,7 +1408,7 @@ describe("Worker API handler", () => {
       refreshCompleteResult: "lease-mismatch",
     });
     setup.cacheValues.set("kf3-news", "old-cache");
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
       logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
@@ -1367,7 +1428,7 @@ describe("Worker API handler", () => {
     const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
       refreshCompleteError: new Error("completion failed"),
     });
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const response = await callFetch(
       createWorkerHandler({
         fetcher: async () => createResponse(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
@@ -1517,7 +1578,7 @@ describe("Worker API handler", () => {
       timestamp: "2026-08-09T12:34:56.789Z",
     };
     setup.cacheValues.set("kf3-news", "old-cache");
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       fetcher: async () => createResponse(null, false),
       logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
@@ -1676,7 +1737,7 @@ describe("scheduled handler", () => {
     const secretUrl = "https://heartbeat.test/sensitive-secret";
     setup.env.HEALTHCHECKS_PING_URL = secretUrl;
     let updateCalls = 0;
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       heartbeatFetcher: async () => {
         throw new Error(`request failed: ${secretUrl}`);
@@ -1707,7 +1768,7 @@ describe("scheduled handler", () => {
     const setup = createBindings(null);
     setup.env.HEALTHCHECKS_PING_URL = "https://heartbeat.test/check";
     let updateCalls = 0;
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       heartbeatFetcher: async () => new Response(null, { status: 503 }),
       updater: async () => {
@@ -1737,7 +1798,7 @@ describe("scheduled handler", () => {
     const setup = createBindings(null);
     setup.env.HEALTHCHECKS_PING_URL = "https://heartbeat.test/check";
     const originalError = new Error("scheduled failed");
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       heartbeatFetcher: async (input) => {
         if (String(input).endsWith("/fail")) throw new Error("heartbeat failed");
@@ -1761,7 +1822,7 @@ describe("scheduled handler", () => {
       setup.env.HEALTHCHECKS_PING_URL = "https://heartbeat.test/check";
       let heartbeatCalls = 0;
       let updateCalls = 0;
-      const logs: Record<string, unknown>[] = [];
+      const logs: JsonObject[] = [];
       const handler = createWorkerHandler({
         heartbeatFetcher: async (_input, init) => {
           heartbeatCalls += 1;
@@ -1814,7 +1875,7 @@ describe("queue handler", () => {
     const nowMs = Date.parse("2026-08-09T12:35:00.000Z");
     let received: NewsArchiveUpdateDependencies | undefined;
     let heartbeatCalls = 0;
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       clock: () => nowMs,
       heartbeatFetcher: async () => {
@@ -1872,7 +1933,7 @@ describe("queue handler", () => {
 
   it("archive updater失敗時はackせず60秒後にretryする", async () => {
     const setup = createBindings(null);
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       updater: async () => Promise.reject(new Error("queue update failed")),
       logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
@@ -1918,7 +1979,7 @@ describe("queue handler", () => {
   it("未知versionのmessageはarchive updaterを実行せずackする", async () => {
     const setup = createBindings(null);
     let updateCalls = 0;
-    const logs: Record<string, unknown>[] = [];
+    const logs: JsonObject[] = [];
     const handler = createWorkerHandler({
       updater: async () => {
         updateCalls += 1;

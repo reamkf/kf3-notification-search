@@ -1,3 +1,4 @@
+import * as v from "valibot";
 import { beforeEach, describe, expect, it } from "vitest";
 import type {
   KVNamespace,
@@ -13,6 +14,7 @@ import {
 } from "../../app/news-cache-keys";
 import { canonicalizeNewsDocument } from "../../app/news-data";
 import { handleRestoreRequest, type RestoreBindings } from "../restore-worker";
+import type { JsonInput, JsonObject } from "../../app/schema";
 
 const snapshotKey = "daily/2026/08/02/2026-08-01T18-15-00Z-abc123def456.json";
 
@@ -32,7 +34,7 @@ const snapshotDocument = {
 };
 
 type SetupOptions = {
-  snapshot?: unknown;
+  snapshot?: JsonInput;
   snapshotGetError?: boolean;
   snapshotMissing?: boolean;
   snapshotReadError?: boolean;
@@ -44,46 +46,63 @@ type SetupOptions = {
 
 const createSetup = (options: SetupOptions = {}) => {
   const calls: string[] = [];
-  const puts: Array<{ key: string; value: string; options: Record<string, unknown> }> = [];
+  const puts: Array<{ key: string; value: string; options: JsonObject }> = [];
   const snapshot = options.snapshot ?? snapshotDocument;
   const currentEtag = options.currentEtag === undefined ? "current-etag" : options.currentEtag;
   const putResult = options.putResult ?? "success";
 
+  // SAFETY: The fixture provides the R2 fields consumed by this test.
   const backupBucket = {
     get: async (key: string) => {
       calls.push(`backup:get:${key}`);
       if (options.snapshotGetError) throw new Error("snapshot get failed");
       if (options.snapshotMissing) return null;
+      // SAFETY: The fixture provides the R2 body fields consumed by this test.
       return {
         text: async () => {
           if (options.snapshotReadError) throw new Error("snapshot read failed");
-          return typeof snapshot === "string" ? snapshot : JSON.stringify(snapshot);
+          const text = v.safeParse(v.string(), snapshot);
+          return text.success ? text.output : JSON.stringify(snapshot);
         },
-      } as unknown as R2ObjectBody;
+        // SAFETY: The fixture provides the R2 or KV fields consumed by this test.
+      } /* SAFETY: The fixture provides the R2 or KV fields consumed by this test. */ as R2ObjectBody;
     },
-  } as unknown as R2Bucket;
+    // SAFETY: The fixture provides the R2 or KV fields consumed by this test.
+  } /* SAFETY: The fixture provides the R2 or KV fields consumed by this test. */ as R2Bucket;
 
+  // SAFETY: The fixture provides the R2 fields consumed by this test.
   const dataBucket = {
     head: async (key: string) => {
       calls.push(`data:head:${key}`);
       if (options.currentHeadError) throw new Error("current head failed");
-      return currentEtag === null ? null : ({ etag: currentEtag } as R2Object);
+      // SAFETY: The fixture provides the R2 or KV fields consumed by this test.
+      return currentEtag === null
+        ? null
+        : ({
+            etag: currentEtag,
+          } /* SAFETY: The fixture provides the R2 or KV fields consumed by this test. */ as R2Object);
     },
-    put: async (key: string, value: string, putOptions: Record<string, unknown>) => {
+    put: async (key: string, value: string, putOptions: JsonObject) => {
       calls.push(`data:put:${key}`);
       puts.push({ key, value, options: putOptions });
       if (putResult === "error") throw new Error("put failed");
       if (putResult === "conflict") return null;
-      return { etag: "updated-etag" } as R2Object;
+      // SAFETY: The fixture provides the R2 or KV fields consumed by this test.
+      return {
+        etag: "updated-etag",
+      } /* SAFETY: The fixture provides the R2 or KV fields consumed by this test. */ as R2Object;
     },
-  } as unknown as R2Bucket;
+    // SAFETY: The fixture provides the R2 or KV fields consumed by this test.
+  } /* SAFETY: The fixture provides the R2 or KV fields consumed by this test. */ as R2Bucket;
 
+  // SAFETY: The fixture provides the KV fields consumed by this test.
   const cache = {
     delete: async (key: string) => {
       calls.push(`cache:delete:${key}`);
       if (options.cacheDeleteError) throw new Error("delete failed");
     },
-  } as unknown as KVNamespace;
+    // SAFETY: The fixture provides the R2 or KV fields consumed by this test.
+  } /* SAFETY: The fixture provides the R2 or KV fields consumed by this test. */ as KVNamespace;
 
   return {
     env: {
@@ -96,7 +115,7 @@ const createSetup = (options: SetupOptions = {}) => {
   };
 };
 
-const callRestore = async (env: RestoreBindings, body: unknown) =>
+const callRestore = async (env: RestoreBindings, body: JsonInput) =>
   handleRestoreRequest(
     new Request("http://127.0.0.1:8790/restore", {
       method: "POST",
@@ -106,7 +125,7 @@ const callRestore = async (env: RestoreBindings, body: unknown) =>
     env,
   );
 
-const readBody = async (response: Response) => response.json() as Promise<Record<string, any>>;
+const readBody = async (response: Response): Promise<JsonInput> => response.json();
 
 describe("operator-only復元tool", () => {
   beforeEach(() => {

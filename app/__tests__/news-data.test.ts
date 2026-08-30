@@ -13,12 +13,18 @@ import {
   projectValidatedClientNews,
   sha256Hex,
   validateOfficialNewsDocument,
-  validateParsedStoredNewsDocumentShape,
+  validateParsedStoredNewsDocumentStructure,
   validateStoredNewsDocument,
 } from "../news-data";
-import { newsArraySchema, storedNewsDocumentSchema, storedNewsSchema } from "../schema";
+import {
+  newsArraySchema,
+  storedNewsDocumentSchema,
+  storedNewsSchema,
+  type JsonInput,
+  type JsonObject,
+} from "../schema";
 
-const createNews = (id: number, overrides: Record<string, unknown> = {}) => ({
+const createNews = (id: number, overrides: Record<string, JsonInput> = {}) => ({
   id,
   targetUrl: `/info/${id}`,
   title: `お知らせ${id}`,
@@ -29,7 +35,7 @@ const createNews = (id: number, overrides: Record<string, unknown> = {}) => ({
 
 const createDocument = (
   count: number,
-  overrides: Record<number, Record<string, unknown>> = {},
+  overrides: Record<number, Record<string, JsonInput>> = {},
 ) => ({
   news: Array.from({ length: count }, (_, index) => createNews(index + 1, overrides[index + 1])),
 });
@@ -53,12 +59,12 @@ describe("保存用スキーマ", () => {
 
   it("通常経路の高速検証でも安全整数の範囲外のidを拒否する", () => {
     expect(() =>
-      validateParsedStoredNewsDocumentShape(
+      validateParsedStoredNewsDocumentStructure(
         createDocument(1, { 1: { id: Number.MAX_SAFE_INTEGER } }),
       ),
     ).not.toThrow();
     expect(() =>
-      validateParsedStoredNewsDocumentShape(
+      validateParsedStoredNewsDocumentStructure(
         createDocument(1, { 1: { id: Number.MAX_SAFE_INTEGER + 1 } }),
       ),
     ).toThrow();
@@ -104,7 +110,7 @@ describe("保存用スキーマ", () => {
 
   it("通常経路の構造検証では保存済み日時を再解析しない", () => {
     const document = createDocument(1, { 1: { newsDate: "invalid" } });
-    expect(validateParsedStoredNewsDocumentShape(document)).toBe(document);
+    expect(validateParsedStoredNewsDocumentStructure(document)).toBe(document);
     expect(() => validateStoredNewsDocument(document)).toThrow();
   });
 
@@ -302,7 +308,7 @@ describe("統合と正規化", () => {
   });
 
   it("JSONで安全に表現できない値を拒否する", () => {
-    const circular: Record<string, unknown> = {};
+    const circular: JsonObject = {};
     circular.self = circular;
     expect(() =>
       validateStoredNewsDocument({ news: [createNews(1, { extra: circular })] }),

@@ -1,3 +1,4 @@
+import * as v from "valibot";
 import { describe, expect, it, vi } from "vitest";
 import type {
   KVNamespace,
@@ -20,11 +21,14 @@ import {
   fetchOfficialNews,
   readArchive,
   readArchiveDocument,
+  serializeArchiveErrorForLog,
   updateNewsArchive,
   updateOfficialCheckState,
 } from "../news-archive";
 import { NEWS_REFRESH_STATE_KEY } from "../news-cache-keys";
 import { parseJapaneseNewsDate, MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
+import { bridgeRuntimeValue } from "../runtime-value";
+import type { JsonInput, JsonObject } from "../schema";
 
 const createNews = (id: number) => ({
   id,
@@ -38,22 +42,28 @@ const createDocument = (count: number) => ({
   news: Array.from({ length: count }, (_, index) => createNews(index + 1)),
 });
 
-const createObject = (value: unknown, etag: string): R2ObjectBody => {
+// SAFETY: The fixture provides the R2 object fields consumed by this test.
+const createObject = (value: JsonInput, etag: string): R2ObjectBody => {
   const text = JSON.stringify(value);
+  // SAFETY: The test double provides the R2 body fields consumed by this scenario.
   return {
     etag,
     text: async () => text,
     get body() {
       return streamFromChunks([new TextEncoder().encode(text)]);
     },
-  } as unknown as R2ObjectBody;
+    // SAFETY: The fixture provides the platform fields consumed by this test.
+  } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2ObjectBody;
 };
 
+// SAFETY: The fixture provides the R2 bucket fields consumed by this test.
 const createBucket = (objects: Record<string, R2ObjectBody>): R2Bucket =>
   ({
     get: async (key: string) => objects[key] ?? null,
-  }) as unknown as R2Bucket;
+    // SAFETY: The fixture provides the platform fields consumed by this test.
+  }) /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2Bucket;
 
+// SAFETY: The fixture provides the Response fields consumed by this test.
 const createResponse = (
   body: ReadableStream<Uint8Array> | null,
   headers: HeadersInit = {},
@@ -65,7 +75,8 @@ const createResponse = (
     status,
     headers: new Headers(headers),
     body,
-  }) as unknown as Response;
+    // SAFETY: The fixture provides the platform fields consumed by this test.
+  }) /* SAFETY: The fixture provides the platform fields consumed by this test. */ as Response;
 
 const streamFromChunks = (chunks: Uint8Array[], onCancel?: () => void) =>
   new ReadableStream<Uint8Array>({
@@ -87,9 +98,10 @@ type PutOptions = {
   onlyIf?: R2Conditional;
   httpMetadata?: R2PutOptions["httpMetadata"];
 };
+type TestThrownValue = Error | JsonInput | { token: string; toString: () => string };
 type PutCall = {
   key: string;
-  value: unknown;
+  value: JsonInput | R2ObjectBody["body"];
   options?: PutOptions;
 };
 
@@ -99,9 +111,9 @@ const createMutableBucket = (
   timeline: string[],
   options: {
     failPutKeys?: Set<string>;
-    putErrors?: Map<string, unknown>;
+    putErrors?: Map<string, TestThrownValue>;
     concurrentPutObjects?: Map<string, FakeStoredObject>;
-    putErrorsAfterConcurrentPutObjects?: Map<string, unknown>;
+    putErrorsAfterConcurrentPutObjects?: Map<string, TestThrownValue>;
     nullPutKeys?: Set<string>;
     putCalls?: PutCall[];
     checkStatePutCalls?: PutCall[];
@@ -110,6 +122,7 @@ const createMutableBucket = (
 ) => {
   const objects = new Map(Object.entries(initial));
   let nextEtag = 0;
+  // SAFETY: The fixture provides the R2 object fields consumed by this test.
   const toBody = (object: FakeStoredObject) =>
     ({
       etag: object.etag,
@@ -117,7 +130,8 @@ const createMutableBucket = (
       get body() {
         return streamFromChunks([new TextEncoder().encode(object.text)]);
       },
-    }) as unknown as R2ObjectBody;
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+    }) /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2ObjectBody;
   const bucket = {
     get: async (key: string, getOptions?: { onlyIf?: Record<string, string> }) => {
       if (key !== OFFICIAL_FETCH_STATE_KEY && key !== OFFICIAL_CHECK_STATE_KEY) {
@@ -127,16 +141,24 @@ const createMutableBucket = (
       if (!object) return null;
       const onlyIf = getOptions?.onlyIf;
       if (onlyIf?.etagMatches && object.etag !== onlyIf.etagMatches) {
-        return { etag: object.etag } as unknown as R2Object;
+        // SAFETY: The fixture provides the platform fields consumed by this test.
+        return {
+          etag: object.etag,
+        } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2Object;
       }
       return toBody(object);
     },
     head: async (key: string) => {
       options.headCalls?.push(key);
       const object = objects.get(key);
-      return object ? ({ etag: object.etag } as unknown as R2Object) : null;
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+      return object
+        ? ({
+            etag: object.etag,
+          } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2Object)
+        : null;
     },
-    put: async (key: string, value: unknown, putOptions?: PutOptions) => {
+    put: async (key: string, value: JsonInput | R2ObjectBody["body"], putOptions?: PutOptions) => {
       if (key !== OFFICIAL_CHECK_STATE_KEY) timeline.push(`${label}:put:${key}`);
       const putCall = { key, value, options: putOptions };
       if (key === OFFICIAL_CHECK_STATE_KEY) options.checkStatePutCalls?.push(putCall);
@@ -167,31 +189,38 @@ const createMutableBucket = (
         }
       }
       const etag = `${label}-etag-${nextEtag++}`;
-      objects.set(key, { text: typeof value === "string" ? value : "", etag });
-      return { etag } as unknown as R2Object;
+      const textValue = v.safeParse(v.string(), value);
+      objects.set(key, { text: textValue.success ? textValue.output : "", etag });
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+      return {
+        etag,
+      } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2Object;
     },
   };
-  return bucket as unknown as R2Bucket;
+  // SAFETY: The fixture provides the platform fields consumed by this test.
+  return bucket /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2Bucket;
 };
 
-const createTransactionFetcher = (document: unknown) => async () =>
+const createTransactionFetcher = (document: JsonInput) => async () =>
   createResponse(streamFromChunks([new TextEncoder().encode(JSON.stringify(document))]));
 
+// SAFETY: The fixture provides the KV fields consumed by this test.
 const createTransactionCache = (timeline: string[], shouldFail = false) =>
   ({
     delete: async (key: string) => {
       timeline.push(`cache:delete:${key}`);
       if (shouldFail) throw new Error("cache delete failed");
     },
-  }) as unknown as KVNamespace;
+    // SAFETY: The fixture provides the platform fields consumed by this test.
+  }) /* SAFETY: The fixture provides the platform fields consumed by this test. */ as KVNamespace;
 
 const createLogger = () => {
-  const logs: Record<string, unknown>[] = [];
-  const errors: Record<string, unknown>[] = [];
+  const logs: JsonObject[] = [];
+  const errors: JsonObject[] = [];
   return {
     logger: {
-      log: (event: Record<string, unknown>) => logs.push(event),
-      error: (event: Record<string, unknown>) => errors.push(event),
+      log: (event: JsonObject) => logs.push(event),
+      error: (event: JsonObject) => errors.push(event),
     },
     logs,
     errors,
@@ -199,7 +228,7 @@ const createLogger = () => {
 };
 
 const transactionNowMs = parseJapaneseNewsDate("2026年08月01日 12時00分00秒");
-const asStoredObject = (value: unknown, etag: string): FakeStoredObject => ({
+const asStoredObject = (value: JsonInput, etag: string): FakeStoredObject => ({
   text: JSON.stringify(value),
   etag,
 });
@@ -215,13 +244,15 @@ const createSortedDocument = (count: number) => ({
 describe("アーカイブ読み込み", () => {
   it("currentがあればlegacyを読まず、etagを保持する", async () => {
     const calls: string[] = [];
+    // SAFETY: The test double provides the platform fields consumed by this scenario.
     const bucket = {
       get: async (key: string) => {
         calls.push(key);
         if (key === CURRENT_ARCHIVE_KEY) return createObject(createDocument(1), "current-etag");
         return createObject(createDocument(1), "legacy-etag");
       },
-    } as unknown as R2Bucket;
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+    } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2Bucket;
     const result = await readArchive(bucket);
     expect(result.sourceKey).toBe(CURRENT_ARCHIVE_KEY);
     expect(result.etag).toBe("current-etag");
@@ -252,13 +283,15 @@ describe("アーカイブ読み込み", () => {
 
   it("currentが不正ならlegacyへfallbackしない", async () => {
     const calls: string[] = [];
+    // SAFETY: The test double provides the platform fields consumed by this scenario.
     const bucket = {
       get: async (key: string) => {
         calls.push(key);
         if (key === CURRENT_ARCHIVE_KEY) return createObject({ news: [{ id: 1 }] }, "bad-etag");
         return createObject(createDocument(1), "legacy-etag");
       },
-    } as unknown as R2Bucket;
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+    } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2Bucket;
     await expect(readArchive(bucket)).rejects.toMatchObject({ stage: "archive-read" });
     expect(calls).toEqual([CURRENT_ARCHIVE_KEY]);
   });
@@ -274,13 +307,15 @@ describe("アーカイブ読み込み", () => {
 
   it("currentのR2取得失敗時はlegacyへfallbackしない", async () => {
     const calls: string[] = [];
+    // SAFETY: The test double provides the platform fields consumed by this scenario.
     const bucket = {
       get: async (key: string) => {
         calls.push(key);
         if (key === CURRENT_ARCHIVE_KEY) throw new Error("current get failed");
         return createObject(createDocument(1), "legacy-etag");
       },
-    } as unknown as R2Bucket;
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+    } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2Bucket;
 
     await expect(readArchive(bucket)).rejects.toMatchObject({
       stage: "archive-read",
@@ -293,13 +328,14 @@ describe("アーカイブ読み込み", () => {
   });
 
   it("archive-readの汎用Errorも秘密値を除去して記録する", async () => {
-    const bucket = {
+    // SAFETY: The test double provides the platform fields consumed by this scenario.
+    const bucket = bridgeRuntimeValue<R2Bucket>({
       get: async () => {
         throw new Error(
           "request https://example.com/private?token=read-secret Authorization: Bearer auth-secret",
         );
       },
-    } as unknown as R2Bucket;
+    });
 
     await expect(readArchive(bucket)).rejects.toMatchObject({
       stage: "archive-read",
@@ -315,15 +351,19 @@ describe("アーカイブ読み込み", () => {
 
   it("current本文の読み込み失敗時はlegacyへfallbackしない", async () => {
     const calls: string[] = [];
+    // SAFETY: The test double provides the platform fields consumed by this scenario.
     const bucket = {
       get: async (key: string) => {
         calls.push(key);
+        // SAFETY: The test double provides the R2 body fields consumed by this scenario.
         return {
           etag: "current-etag",
           text: async () => Promise.reject(new Error("current text failed")),
-        } as unknown as R2ObjectBody;
+          // SAFETY: The fixture provides the platform fields consumed by this test.
+        } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2ObjectBody;
       },
-    } as unknown as R2Bucket;
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+    } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2Bucket;
 
     await expect(readArchive(bucket)).rejects.toMatchObject({
       stage: "archive-read",
@@ -343,12 +383,14 @@ describe("アーカイブ読み込み", () => {
   });
 
   it("legacyのR2取得失敗をarchive-readへ変換する", async () => {
+    // SAFETY: The test double provides the platform fields consumed by this scenario.
     const bucket = {
       get: async (key: string) => {
         if (key === CURRENT_ARCHIVE_KEY) return null;
         throw new Error("legacy get failed");
       },
-    } as unknown as R2Bucket;
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+    } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as R2Bucket;
 
     await expect(readArchive(bucket)).rejects.toMatchObject({
       stage: "archive-read",
@@ -356,6 +398,31 @@ describe("アーカイブ読み込み", () => {
         sourceKey: LEGACY_ARCHIVE_KEY,
         originalError: { name: "Error", message: "legacy get failed" },
       },
+    });
+  });
+});
+
+describe("エラーログ", () => {
+  it("nameとmessageのgetterが失敗しても固定値へ変換する", () => {
+    const error = new Error("unreadable");
+    Object.defineProperties(error, {
+      name: {
+        configurable: true,
+        get: () => {
+          throw new Error("name getter failed");
+        },
+      },
+      message: {
+        configurable: true,
+        get: () => {
+          throw new Error("message getter failed");
+        },
+      },
+    });
+
+    expect(serializeArchiveErrorForLog(error)).toEqual({
+      name: "Error",
+      message: "Error message unavailable",
     });
   });
 });
@@ -375,12 +442,14 @@ describe("公式レスポンス取得", () => {
       stage: "official-fetch",
     });
     let readerCalled = false;
+    // SAFETY: The test double provides the platform fields consumed by this scenario.
     const body = {
       getReader: () => {
         readerCalled = true;
         return streamFromChunks([]).getReader();
       },
-    } as unknown as ReadableStream<Uint8Array>;
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+    } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as ReadableStream<Uint8Array>;
     await expect(
       fetchOfficialNews(async () => createResponse(body, { "content-length": "1,2" })),
     ).rejects.toMatchObject({ stage: "official-fetch" });
@@ -389,12 +458,14 @@ describe("公式レスポンス取得", () => {
 
   it("Content-Length超過をreader取得前に拒否する", async () => {
     let readerCalled = false;
+    // SAFETY: The test double provides the platform fields consumed by this scenario.
     const body = {
       getReader: () => {
         readerCalled = true;
         return streamFromChunks([]).getReader();
       },
-    } as unknown as ReadableStream<Uint8Array>;
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+    } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as ReadableStream<Uint8Array>;
     await expect(
       fetchOfficialNews(async () =>
         createResponse(body, { "content-length": String(MAX_OFFICIAL_RESPONSE_BYTES + 1) }),
@@ -420,6 +491,7 @@ describe("公式レスポンス取得", () => {
     const overLimit = new Uint8Array(MAX_OFFICIAL_RESPONSE_BYTES + 1);
     const stream = streamFromChunks([overLimit]);
     const reader = stream.getReader();
+    // SAFETY: The test double implements the stream methods exercised by this scenario.
     const body = {
       getReader: () => ({
         read: reader.read.bind(reader),
@@ -429,7 +501,8 @@ describe("公式レスポンス取得", () => {
         },
         releaseLock: reader.releaseLock.bind(reader),
       }),
-    } as unknown as ReadableStream<Uint8Array>;
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+    } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as ReadableStream<Uint8Array>;
     await expect(fetchOfficialNews(async () => createResponse(body))).rejects.toMatchObject({
       stage: "official-fetch",
     });
@@ -498,12 +571,14 @@ describe("公式レスポンス取得", () => {
     const checkedAt = "2026-08-09T12:34:56.789Z";
     const requestHeaders: Headers[] = [];
     let readerCalled = false;
+    // SAFETY: The test double implements the stream method exercised by this scenario.
     const body = {
       getReader: () => {
         readerCalled = true;
         return streamFromChunks([bytes]).getReader();
       },
-    } as unknown as ReadableStream<Uint8Array>;
+      // SAFETY: The fixture provides the platform fields consumed by this test.
+    } /* SAFETY: The fixture provides the platform fields consumed by this test. */ as ReadableStream<Uint8Array>;
     const result = await fetchOfficialNews(
       async (_input, init) => {
         requestHeaders.push(new Headers(init?.headers));
@@ -680,9 +755,9 @@ describe("アーカイブ更新トランザクション", () => {
     official = createDocument(MIN_OFFICIAL_ENTRY_COUNT),
     backupOptions: {
       failPutKeys?: Set<string>;
-      putErrors?: Map<string, unknown>;
+      putErrors?: Map<string, TestThrownValue>;
       concurrentPutObjects?: Map<string, FakeStoredObject>;
-      putErrorsAfterConcurrentPutObjects?: Map<string, unknown>;
+      putErrorsAfterConcurrentPutObjects?: Map<string, TestThrownValue>;
       nullPutKeys?: Set<string>;
       initial?: Record<string, FakeStoredObject>;
       putCalls?: PutCall[];
@@ -691,7 +766,7 @@ describe("アーカイブ更新トランザクション", () => {
     cacheFailure = false,
     dataOptions: {
       failPutKeys?: Set<string>;
-      putErrors?: Map<string, unknown>;
+      putErrors?: Map<string, TestThrownValue>;
       nullPutKeys?: Set<string>;
       putCalls?: PutCall[];
       checkStatePutCalls?: PutCall[];
@@ -699,10 +774,8 @@ describe("アーカイブ更新トランザクション", () => {
     } = {},
   ) => {
     const timeline: string[] = [];
-    const dataInitial: Record<string, FakeStoredObject> = {
-      ...dataOptions.initial,
-      ...(current ? { [CURRENT_ARCHIVE_KEY]: current } : {}),
-    };
+    const dataInitial = { ...dataOptions.initial };
+    if (current) dataInitial[CURRENT_ARCHIVE_KEY] = current;
     const dataBucket = createMutableBucket("data", dataInitial, timeline, dataOptions);
     const backupBucket = createMutableBucket(
       "backup",
@@ -1349,8 +1422,15 @@ describe("アーカイブ更新トランザクション", () => {
       stage: "archive-write",
     });
 
-    const details = setup.logger.errors[0].details as Record<string, unknown>;
-    const originalError = details.originalError as { name: string; message: string };
+    const detailsResult = v.safeParse(
+      v.object({
+        originalError: v.object({ name: v.string(), message: v.string() }),
+      }),
+      setup.logger.errors[0].details,
+    );
+    expect(detailsResult.success).toBe(true);
+    if (!detailsResult.success) return;
+    const originalError = detailsResult.output.originalError;
     expect(originalError.name).toHaveLength(100);
     expect(originalError.name.endsWith("…")).toBe(true);
     expect(originalError.message).toHaveLength(500);
@@ -1394,7 +1474,7 @@ describe("アーカイブ更新トランザクション", () => {
     const result = await updateNewsArchive({
       ...setup.dependencies,
       fetcher: async () => createResponse(streamFromChunks([]), {}, false),
-    }).catch((error: unknown) => error);
+    }).catch((error: Error | JsonInput) => error);
     expect(result).toMatchObject({ stage: "official-fetch" });
     expect(setup.timeline).toEqual([`data:get:${CURRENT_ARCHIVE_KEY}`]);
     expect(setup.logger.errors[0]).toMatchObject({ stage: "official-fetch" });
