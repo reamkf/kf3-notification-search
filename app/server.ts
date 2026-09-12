@@ -189,6 +189,11 @@ type RefreshDurations = {
   officialFetchDurationMs: number;
   refreshCacheReadDurationMs: number;
   archiveReadDurationMs: number;
+  archiveBodyReadDurationMs: number;
+  archiveJsonParseDurationMs: number;
+  archiveValidationDurationMs: number;
+  clientProjectionDurationMs: number;
+  clientJsonStringifyDurationMs: number;
 };
 
 type RefreshMeasurements = RefreshDurations & {
@@ -323,6 +328,11 @@ const getRefreshNews = async (
     officialFetchDurationMs: 0,
     refreshCacheReadDurationMs: 0,
     archiveReadDurationMs: 0,
+    archiveBodyReadDurationMs: 0,
+    archiveJsonParseDurationMs: 0,
+    archiveValidationDurationMs: 0,
+    clientProjectionDurationMs: 0,
+    clientJsonStringifyDurationMs: 0,
     officialFetchStatus: null,
     refreshDataSource: null,
   };
@@ -363,12 +373,22 @@ const getRefreshNews = async (
     }
 
     const current = await measureRefreshOperation(measurements, "archiveReadDurationMs", () =>
-      readCurrentArchiveDocumentIfEtag(env.KF3_NOTIF_DATA, eligibility.currentEtag ?? ""),
+      readCurrentArchiveDocumentIfEtag(
+        env.KF3_NOTIF_DATA,
+        eligibility.currentEtag ?? "",
+        measurements,
+      ),
     );
     if (current) {
+      const projectionStartedAt = performance.now();
+      const clientNews = projectValidatedClientNews(current.document);
+      measurements.clientProjectionDurationMs += performance.now() - projectionStartedAt;
+      const stringifyStartedAt = performance.now();
+      const serialized = serializeClientNews(clientNews);
+      measurements.clientJsonStringifyDurationMs += performance.now() - stringifyStartedAt;
       return {
         ...measurements,
-        ...serializeClientNews(projectValidatedClientNews(current.document)),
+        ...serialized,
         currentEtag: current.etag,
         currentExists: true,
         officialCheckedAt: official.checkedAt,
@@ -810,6 +830,11 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         officialFetchDurationMs: result.officialFetchDurationMs,
         refreshCacheReadDurationMs: result.refreshCacheReadDurationMs,
         archiveReadDurationMs: result.archiveReadDurationMs,
+        archiveBodyReadDurationMs: result.archiveBodyReadDurationMs,
+        archiveJsonParseDurationMs: result.archiveJsonParseDurationMs,
+        archiveValidationDurationMs: result.archiveValidationDurationMs,
+        clientProjectionDurationMs: result.clientProjectionDurationMs,
+        clientJsonStringifyDurationMs: result.clientJsonStringifyDurationMs,
         newsDataWritten: shouldWriteNewsData,
         cachePutDurationMs,
         refreshStatePutDurationMs,

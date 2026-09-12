@@ -416,9 +416,16 @@ export const readOfficialFetchEligibility = async (
 const isR2ObjectBody = (object: R2Object | R2ObjectBody | null): object is R2ObjectBody =>
   object !== null && "body" in object;
 
+export type CurrentArchiveReadBreakdown = {
+  archiveBodyReadDurationMs: number;
+  archiveJsonParseDurationMs: number;
+  archiveValidationDurationMs: number;
+};
+
 export const readCurrentArchiveDocumentIfEtag = async (
   bucket: R2Bucket,
   etag: string,
+  breakdown?: CurrentArchiveReadBreakdown,
 ): Promise<ArchiveDocumentReadResult | null> => {
   let object: R2Object | R2ObjectBody | null;
   try {
@@ -427,13 +434,47 @@ export const readCurrentArchiveDocumentIfEtag = async (
     throw createArchiveReadError(asLoggableError(error), { sourceKey: CURRENT_ARCHIVE_KEY });
   }
   if (!isR2ObjectBody(object) || object.etag !== etag) return null;
-  const text = await readObjectText(object, CURRENT_ARCHIVE_KEY);
-  return {
-    document: parseArchiveText(text, CURRENT_ARCHIVE_KEY),
-    sourceKey: CURRENT_ARCHIVE_KEY,
-    etag: object.etag,
-    currentExists: true,
-  };
+  if (!breakdown) {
+    const text = await readObjectText(object, CURRENT_ARCHIVE_KEY);
+    return {
+      document: parseArchiveText(text, CURRENT_ARCHIVE_KEY),
+      sourceKey: CURRENT_ARCHIVE_KEY,
+      etag: object.etag,
+      currentExists: true,
+    };
+  }
+  const bodyReadStartedAt = performance.now();
+  let text: string;
+  try {
+    text = await readObjectText(object, CURRENT_ARCHIVE_KEY);
+  } finally {
+    breakdown.archiveBodyReadDurationMs += performance.now() - bodyReadStartedAt;
+  }
+  let parsed: JsonInput;
+  const parseStartedAt = performance.now();
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new NewsArchiveError("archive-read", "アーカイブJSONの解析に失敗しました", {
+      sourceKey: CURRENT_ARCHIVE_KEY,
+    });
+  } finally {
+    breakdown.archiveJsonParseDurationMs += performance.now() - parseStartedAt;
+  }
+  const validationStartedAt = performance.now();
+  try {
+    const document = validateParsedStoredNewsDocumentStructure(parsed);
+    return {
+      document,
+      sourceKey: CURRENT_ARCHIVE_KEY,
+      etag: object.etag,
+      currentExists: true,
+    };
+  } catch (error) {
+    throw createArchiveReadError(asLoggableError(error), { sourceKey: CURRENT_ARCHIVE_KEY });
+  } finally {
+    breakdown.archiveValidationDurationMs += performance.now() - validationStartedAt;
+  }
 };
 
 export const readCurrentArchiveBodyIfEtag = async (
