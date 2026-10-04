@@ -3,10 +3,22 @@ import {
   NEWS_REFRESH_CONTROL_KEY,
   NEWS_REFRESH_CONTROL_VERSION,
   parseNewsRefreshControl,
+  parseRefreshControlTime,
   parseRefreshControlState,
 } from "../news-refresh-control";
 
 describe("news refresh control metadata", () => {
+  it.each([
+    ["2026-08-09T12:01:00.000Z", Date.UTC(2026, 7, 9, 12, 1)],
+    ["2026-08-09T21:01:00+09:00", Date.UTC(2026, 7, 9, 12, 1)],
+    ["", null],
+    ["invalid", null],
+    [42, null],
+    [null, null],
+  ])("parses control time %s", (value, expected) => {
+    expect(parseRefreshControlTime(value)).toBe(expected);
+  });
+
   it("parses valid legacy control metadata without an ETag", () => {
     expect(
       parseNewsRefreshControl({

@@ -69,8 +69,9 @@ const refreshControlSchema = v.object({
 });
 
 const toTime = (value: JsonInput): number | null => {
-  const result = v.safeParse(timestampSchema, value);
-  return result.success ? Date.parse(result.output) : null;
+  if (typeof value !== "string") return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
 };
 
 const validateState = (candidate: RefreshControlState): RefreshControlState | null => {
