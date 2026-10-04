@@ -169,6 +169,7 @@ const parseDateString = (dateString: string): number => {
 };
 
 const newsDateTimestamps = new WeakMap<News, { value: string; timestamp: number }>();
+const normalizedNewsTitles = new WeakMap<News, { value: string; normalized: string }>();
 
 const getNewsTimestamp = (news: News) => {
   const cached = newsDateTimestamps.get(news);
@@ -176,6 +177,14 @@ const getNewsTimestamp = (news: News) => {
   const timestamp = parseDateString(news.newsDate);
   newsDateTimestamps.set(news, { value: news.newsDate, timestamp });
   return timestamp;
+};
+
+const getNormalizedNewsTitle = (news: News) => {
+  const cached = normalizedNewsTitles.get(news);
+  if (cached?.value === news.title) return cached.normalized;
+  const normalized = normalizeQuery(news.title);
+  normalizedNewsTitles.set(news, { value: news.title, normalized });
+  return normalized;
 };
 
 export const formatRelativeCheckedAt = (officialCheckedAt: string | null, now = Date.now()) => {
@@ -420,8 +429,7 @@ const parseCooldownMs = async (response: Response) => {
 };
 
 // お知らせデータをキーワードでフィルター
-const filterNewsByKeyword = (newsArray: Array<News>, query: string) => {
-  const normalizedQuery = normalizeQuery(query);
+export const filterNewsByKeyword = (newsArray: Array<News>, normalizedQuery: string) => {
   if (!normalizedQuery) return newsArray;
 
   try {
@@ -433,16 +441,12 @@ const filterNewsByKeyword = (newsArray: Array<News>, query: string) => {
       console.error("Query parsing error:", error);
       return [];
     }
-    return newsArray.filter((news) => {
-      const normalizedTitle = normalizeQuery(news.title);
-      return evaluator(normalizedTitle);
-    });
+    return newsArray.filter((news) => evaluator(getNormalizedNewsTitle(news)));
   } catch (error) {
     console.error("Query parsing error:", error);
     // 評価処理の例外時は単純な部分一致検索にフォールバック
     return newsArray.filter((news) => {
-      const normalizedTitle = normalizeQuery(news.title);
-      return normalizedTitle.includes(normalizedQuery);
+      return getNormalizedNewsTitle(news).includes(normalizedQuery);
     });
   }
 };
@@ -761,12 +765,22 @@ const KemonoFriends3NewsSearch = ({ onNewsRowRender }: KemonoFriends3NewsSearchP
   };
 
   const newsItems = newsPayload?.data;
-  const filteredNews = useMemo(() => {
-    if (!newsItems) return [];
-    const keywordFilteredNews = filterNewsByKeyword(newsItems, appliedSearchKeyword);
-    const dateFilteredNews = filterNewsByDate(keywordFilteredNews, startDate, endDate);
-    return getSortedNews(dateFilteredNews, sortOrder);
-  }, [newsItems, appliedSearchKeyword, startDate, endDate, sortOrder]);
+  const normalizedAppliedSearchKeyword = useMemo(
+    () => normalizeQuery(appliedSearchKeyword),
+    [appliedSearchKeyword],
+  );
+  const keywordFilteredNews = useMemo(
+    () => filterNewsByKeyword(newsItems ?? [], normalizedAppliedSearchKeyword),
+    [newsItems, normalizedAppliedSearchKeyword],
+  );
+  const dateFilteredNews = useMemo(
+    () => filterNewsByDate(keywordFilteredNews, startDate, endDate),
+    [keywordFilteredNews, startDate, endDate],
+  );
+  const filteredNews = useMemo(
+    () => getSortedNews(dateFilteredNews, sortOrder),
+    [dateFilteredNews, sortOrder],
+  );
 
   const newsData = useMemo(
     () => filteredNews.slice(0, visibleNewsCount),
@@ -774,7 +788,7 @@ const KemonoFriends3NewsSearch = ({ onNewsRowRender }: KemonoFriends3NewsSearchP
   );
   const numberOfNews = filteredNews.length;
   const totalNewsCount = newsPayload?.data.length ?? 0;
-  const isKeywordSearchApplied = normalizeQuery(appliedSearchKeyword).length > 0;
+  const isKeywordSearchApplied = normalizedAppliedSearchKeyword.length > 0;
   const hasMoreNews = visibleNewsCount < numberOfNews;
   const isInitialLoading = initialLoadStatus === "loading";
 

@@ -4,11 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import { createRoot } from "hono/jsx/dom/client";
 import { bridgeRuntimeValue } from "../runtime-value";
 import type { JsonInput } from "../schema";
+import { QueryParser } from "../query-parser";
 import KemonoFriends3NewsSearch, {
+  filterNewsByKeyword,
   formatRelativeCheckedAt,
   getRelativeTimeUpdateDelay,
   INITIAL_LOADING_INDICATOR_ID,
 } from "../islands/KemonoFriends3NewsSearch";
+import { normalizeQuery } from "../query-normalizer";
 
 const newsRowRenderSpy = vi.fn();
 
@@ -197,6 +200,50 @@ describe("relative-time helpers", () => {
   });
 });
 
+describe("keyword filtering", () => {
+  it("空の検索語は配列を保持し、正規化した検索語でAND、OR、否定、括弧を評価する", () => {
+    const news = [
+      createNews(1, "測定イベント"),
+      createNews(2, "そうじイベント"),
+      createNews(3, "測定のお知らせ"),
+    ];
+    expect(filterNewsByKeyword(news, "")).toBe(news);
+    expect(
+      filterNewsByKeyword(news, normalizeQuery("(測定 OR ソウジ) -お知らせ")).map(
+        (item) => item.targetUrl,
+      ),
+    ).toEqual(["/info/1", "/info/2"]);
+    expect(filterNewsByKeyword(news, normalizeQuery("測定 イベント"))).toEqual([news[0]]);
+    expect(
+      filterNewsByKeyword([createNews(4, "Souji")], normalizeQuery("ＳＯＵＪＩ")),
+    ).toHaveLength(1);
+  });
+
+  it("同じNews参照のtitle変更を検索に反映する", () => {
+    const item = createNews(1, "測定イベント");
+    const news = [item];
+    expect(filterNewsByKeyword(news, "測定")).toEqual(news);
+    expect(filterNewsByKeyword(news, "測定")).toEqual(news);
+    item.title = "掃除イベント";
+    expect(filterNewsByKeyword(news, "測定")).toEqual([]);
+    expect(filterNewsByKeyword(news, "掃除")).toEqual(news);
+  });
+
+  it("query解析失敗と評価例外の結果を維持する", () => {
+    const news = [createNews(1, "測定イベント"), createNews(2, "別のお知らせ")];
+    const parse = vi.spyOn(QueryParser.prototype, "parse");
+    parse.mockImplementationOnce(() => {
+      throw new Error("parse error");
+    });
+    expect(filterNewsByKeyword(news, "測定")).toEqual([]);
+
+    parse.mockImplementationOnce(() => () => {
+      throw new Error("evaluation error");
+    });
+    expect(filterNewsByKeyword(news, "測定")).toEqual([news[0]]);
+  });
+});
+
 describe("KemonoFriends3NewsSearch", () => {
   it("相対時刻とcooldownのtimerは非表示中に停止し、復帰時に再計算する", async () => {
     vi.useFakeTimers();
@@ -310,10 +357,22 @@ describe("KemonoFriends3NewsSearch", () => {
     await flushUpdates();
     setInputValue(container.querySelector<HTMLInputElement>("#news-keyword")!, "対象");
     await flushUpdates();
+    const parse = vi.spyOn(QueryParser.prototype, "parse");
     findButton("検索").click();
 
     await waitForText("検索結果: 3件");
     expect(container.textContent).toContain("･ 25件");
+    expect(parse).toHaveBeenCalledOnce();
+
+    setInputValue(container.querySelector<HTMLInputElement>("#startDate")!, "2026-08-01");
+    await flushUpdates();
+    // SAFETY: The fixture provides the DOM or platform fields consumed by this test.
+    const sortOrder = bridgeRuntimeValue<HTMLSelectElement>(container.querySelector("#sortOrder"));
+    sortOrder.value = "asc";
+    sortOrder.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUpdates();
+    expect(parse).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain("検索結果: 3件");
   });
 
   it("公式分類ラベルは値があるお知らせにだけ表示する", async () => {
