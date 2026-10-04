@@ -13,6 +13,7 @@ import {
   projectValidatedClientNews,
   sha256Hex,
   validateOfficialNewsDocument,
+  validateParsedStoredNewsDocument,
   validateParsedStoredNewsDocumentStructure,
   validateStoredNewsDocument,
 } from "../news-data";
@@ -111,7 +112,74 @@ describe("保存用スキーマ", () => {
   it("通常経路の構造検証では保存済み日時を再解析しない", () => {
     const document = createDocument(1, { 1: { newsDate: "invalid" } });
     expect(validateParsedStoredNewsDocumentStructure(document)).toBe(document);
+    expect(() => validateParsedStoredNewsDocument(document)).toThrowError(NewsDataError);
     expect(() => validateStoredNewsDocument(document)).toThrow();
+  });
+
+  it.each([
+    ["null", null],
+    ["配列", []],
+    ["news欠落", {}],
+    ["newsが配列以外", { news: null }],
+  ] satisfies [string, JsonInput][])(
+    "通常経路の構造検証は%sのdocumentを拒否する",
+    (_label, value) => {
+      expect(() => validateParsedStoredNewsDocumentStructure(value)).toThrowError(NewsDataError);
+    },
+  );
+
+  it.each([
+    ["0", 0],
+    ["負数", -1],
+    ["小数", 1.5],
+    ["安全整数上限超過", Number.MAX_SAFE_INTEGER + 1],
+    ["NaN", NaN],
+    ["Infinity", Infinity],
+    ["文字列", "1"],
+  ] as const)("通常経路の構造検証は%sのidを拒否する", (_label, id) => {
+    const document = createDocument(1, { 1: { id } });
+    try {
+      validateParsedStoredNewsDocumentStructure(document);
+      expect.fail("invalid id was accepted");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NewsDataError);
+      if (!(error instanceof NewsDataError)) return;
+      expect(error.stage).toBe("document-validation");
+      expect(error.details).toEqual({ index: 0 });
+    }
+  });
+
+  it.each([
+    ["targetUrl空", { targetUrl: "" }],
+    ["title空", { title: "" }],
+    ["titleが数値", { title: 1 }],
+    ["categoryが数値", { category: 1 }],
+  ] as const)("通常経路の構造検証は%sを拒否する", (_label, override) => {
+    expect(() =>
+      validateParsedStoredNewsDocumentStructure(createDocument(1, { 1: override })),
+    ).toThrowError(NewsDataError);
+  });
+
+  it("通常経路の構造検証は任意categoryと未知フィールドを保持し、重複IDを拒否する", () => {
+    const document = createDocument(2, { 1: { extra: { nested: true } } });
+    expect(validateParsedStoredNewsDocumentStructure(document)).toBe(document);
+    expect(document.news[0]).not.toHaveProperty("category");
+    expect(document.news[0]).toHaveProperty("extra", { nested: true });
+    expect(() =>
+      validateParsedStoredNewsDocumentStructure(
+        createDocument(1, { 1: { id: Number.MAX_SAFE_INTEGER } }),
+      ),
+    ).not.toThrow();
+    document.news[1].id = 1;
+    try {
+      validateParsedStoredNewsDocumentStructure(document);
+      expect.fail("duplicate id was accepted");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NewsDataError);
+      if (!(error instanceof NewsDataError)) return;
+      expect(error.stage).toBe("document-validation");
+      expect(error.details).toEqual({ id: 1 });
+    }
   });
 
   it("スキーマエラーの詳細にはメッセージとキーのパスだけを含める", () => {
@@ -250,6 +318,19 @@ describe("統合と正規化", () => {
     expect(result.document.news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
     expect(result).not.toHaveProperty("normalizedJson");
     expect(result).not.toHaveProperty("digest");
+  });
+
+  it("検証済みマージは既存の挿入順と入力を維持する", () => {
+    const existing = { news: [createNews(3), createNews(1)] };
+    const official = { news: [createNews(1, { title: "更新" }), createNews(2)] };
+    const existingJson = JSON.stringify(existing);
+    const officialJson = JSON.stringify(official);
+    const result = mergeValidatedNewsDocument(existing, official);
+
+    expect(result.document.news.map((news) => news.id)).toEqual([3, 1, 2]);
+    expect(result.stats).toMatchObject({ addedCount: 1, updatedCount: 1 });
+    expect(JSON.stringify(existing)).toBe(existingJson);
+    expect(JSON.stringify(official)).toBe(officialJson);
   });
 
   it("未知フィールドのキー順だけが違う項目を変更扱いにしない", () => {

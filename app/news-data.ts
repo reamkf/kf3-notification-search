@@ -47,20 +47,14 @@ type NewsRecord = InputObject & {
 };
 
 const isInputObject = (value: SerializableValue): value is InputObject =>
-  value !== null &&
-  !Array.isArray(value) &&
-  Object.prototype.toString.call(value) === "[object Object]";
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
-const isInputString = (value: JsonInput): value is string =>
-  Object.prototype.toString.call(value) === "[object String]";
-
-const isInputNumber = (value: JsonInput): value is number =>
-  Object.prototype.toString.call(value) === "[object Number]" && Number.isFinite(Number(value));
+const isInputString = (value: JsonInput): value is string => typeof value === "string";
 
 const isNewsRecord = (value: JsonInput): value is NewsRecord => {
   if (!isInputObject(value)) return false;
   return (
-    isInputNumber(value.id) &&
+    typeof value.id === "number" &&
     Number.isSafeInteger(value.id) &&
     value.id > 0 &&
     isInputString(value.targetUrl) &&
@@ -544,7 +538,8 @@ const mergeValidatedDocument = (
   official: StoredNewsDocument,
   options?: NewsMergeOptions,
 ): ValidatedNewsMergeResult => {
-  const existingById = new Map(existing.news.map((news) => [news.id, news]));
+  const existingById = new Map<number, StoredNews>();
+  for (const news of existing.news) existingById.set(news.id, news);
   let addedCount = 0;
   let updatedCount = 0;
 
