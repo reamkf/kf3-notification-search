@@ -6,7 +6,7 @@
 
 ## 目的
 
-公式配信元のETagと`If-None-Match`をQueue consumerとscheduled fallbackの`updateNewsArchive`で利用し、公式データが前回の正常処理から変わっていない場合に本文処理を省略する。表示用データのrefreshは、表示用KVを最新化する独立した処理として公式データを取得、検証、mergeする。公式が304を返し、表示用KV v2の`baseArchiveEtag`がcurrent ETagと一致する場合は、KVのclient JSONを再利用してR2 current本文の読み込みと再投影を省略する。refreshの実行結果は公式ETag stateや`archive/current.json`の正しさの根拠にならず、merge差分がある場合またはcurrentが未作成の場合はQueue publishだけを行う。
+公式配信元のETagと`If-None-Match`をQueue consumerとscheduled fallbackの`updateNewsArchive`で利用し、公式データが前回の正常処理から変わっていない場合に本文処理を省略する。表示用データのrefreshは、表示用KVを最新化する独立した処理として公式データを取得、検証、mergeする。公式が304を返し、merged本文KVまたはGET専用snapshot KVの現行metadataとcurrent ETagが一致する場合は、KVのclient JSONを再利用してR2 current本文の読み込みと再投影を省略する。refreshの実行結果は公式ETag stateや`archive/current.json`の正しさの根拠にならず、merge差分がある場合またはcurrentが未作成の場合はQueue publishだけを行う。
 
 Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 
@@ -23,9 +23,10 @@ Queue consumerまたはscheduled fallbackの304経路では次を行わない。
 
 1. refreshは保存済みstateとcurrent HEADのETagが対応する場合だけ公式へ`If-None-Match`を送る。
 2. 公式が304を返したら、表示用KV `kf3-news`をmetadata付きで読む。
-3. metadataがv2で、`baseArchiveEtag`が現在のcurrent ETagと一致し、valueが存在する場合はvalueをclient JSONとして再利用する。変更を含むmerge結果やcurrent未作成の結果は`baseArchiveEtag`が`null`となるため再利用しない。
-4. 一致しない場合、v1、metadata欠落、value欠落の場合は`readCurrentArchiveDocumentIfEtag`へfallbackし、従来どおりR2本文を検証して投影する。
-5. 再利用したJSON本文は書き直さず、可変state KV `kf3-news-refresh-state`だけをTTL 86400秒で更新する。本文を書かないためpost-writeのcurrent HEADも省略する。クライアントの`X-KF3-News-Data-Version`が一致する場合はHTTP本文からJSON配列を省略し`{changed:false, metadata}`を返し、それ以外は同じJSONを`{news, metadata}`へ埋め込む。
+3. merged本文KVのmetadataが現行v2で、`baseArchiveEtag`が現在のcurrent ETagと一致し、valueが存在する場合はvalueをclient JSONとして再利用する。この場合は本文を書き直さず、post-writeのcurrent HEADも省略する。
+4. merged本文KVを使えなければGET専用snapshot KVを文字列として読む。valueが存在し、metadataが現行v2、`source: "archive-snapshot"`、非nullの`baseArchiveEtag`がcurrent ETagと一致する場合だけ再利用する。読み取り失敗や条件不一致は最適化のmissとして扱う。
+5. snapshot KVを再利用した場合は同じJSONをmerged本文KVへ保存し、post-writeのcurrent HEADで競合を確認する。どちらのKVも使えなければ`readCurrentArchiveDocumentIfEtag`へfallbackし、R2本文を検証して投影する。
+6. 可変state KV `kf3-news-refresh-state`をTTL 86400秒で更新する。クライアントの`X-KF3-News-Data-Version`が一致する場合はHTTP本文からJSON配列を省略し`{changed:false, metadata}`を返し、それ以外は同じJSONを`{news, metadata}`へ埋め込む。
 
 ## 設計方針
 
@@ -205,7 +206,7 @@ Workers Invocation LogsのCPU時間を`officialFetchStatus`と`trigger`別に集
 - 304を公式取得エラーとして扱わない。
 - GETのKV hitではR2、公式サーバー、stateへアクセスしない。
 - GETのKV missでは公式サーバーへアクセスせず、R2 snapshotを投影し、official-check-stateの`checkedAt`を同じJSONのmetadataへ反映して表示用KVへbest-effort保存する。
-- refreshは公式取得、検証、merge、表示用KVとDurable Objectのrefresh制御stateの同期更新を行い、official-check-state更新を`waitUntil()`へ登録する。成功本文はdata version一致時の`{changed:false, metadata}`または通常の`{news, metadata}`とし、current、daily、monthly、公式ETag stateを変更しない。304かつKV v2/current ETag一致時は、KV JSONを再利用してR2 current本文を読まず、本文KVも再保存しない。
+- refreshは公式取得、検証、merge、表示用KVとDurable Objectのrefresh制御stateの同期更新を行い、official-check-state更新を`waitUntil()`へ登録する。成功本文はdata version一致時の`{changed:false, metadata}`または通常の`{news, metadata}`とし、current、daily、monthly、公式ETag stateを変更しない。304でmerged本文KVのETagが一致すれば本文を再保存せずに再利用し、GET専用snapshot KVが一致すればmerged本文KVへ保存して再利用する。どちらもR2 current本文は読まない。
 - 別refreshの実行中は公式取得前に202、5分cooldown中は429を返す。
 - refresh成功時は200と、data versionの一致に応じたレスポンス本文を返す。
 - refreshの依存処理失敗時は503を返し、表示用KVを置き換えない。

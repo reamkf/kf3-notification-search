@@ -25,7 +25,11 @@ import {
   type NewsRefreshCompletionResult,
   type NewsRefreshRenewalResult,
 } from "../news-refresh-control";
-import { NEWS_CACHE_KEY, NEWS_REFRESH_STATE_KEY } from "../news-cache-keys";
+import {
+  NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY,
+  NEWS_CACHE_KEY,
+  NEWS_REFRESH_STATE_KEY,
+} from "../news-cache-keys";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createWorkerHandler } from "../server";
 import { bridgeRuntimeValue } from "../runtime-value";
@@ -102,6 +106,7 @@ type TestBindings = {
 
 type BindingOptions = {
   cacheGetError?: boolean;
+  snapshotGetError?: boolean;
   stateGetError?: boolean;
   cacheReadBlocks?: Record<string, Promise<void>>;
   cachePutError?: boolean;
@@ -227,6 +232,8 @@ const createBindings = (
       cacheReadFormats.push({ key, type });
       await options.cacheReadBlocks?.[key];
       if (options.cacheGetError) throw new Error("cache get failed");
+      if (key === NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY && options.snapshotGetError)
+        throw new Error("snapshot get failed");
       const value = cacheValues.get(key) ?? null;
       return {
         value: value === null || type === "text" ? value : new TextEncoder().encode(value).buffer,
@@ -1384,6 +1391,7 @@ describe("Worker API handler", () => {
     expect(response.headers.get("X-KF3-News-Data-Version")).toBe("current-etag");
     expect(setup.dataGets).not.toContain(CURRENT_ARCHIVE_KEY);
     expect(setup.cacheReadFormats).toContainEqual({ key: NEWS_CACHE_KEY, type: "text" });
+    expect(setup.cacheReads).not.toContain(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY);
     expect(setup.getCurrentHeadCalls()).toBe(1);
     expect(setup.cachePuts).toHaveLength(1);
     expect(setup.cachePuts[0].key).toBe(NEWS_REFRESH_STATE_KEY);
@@ -1396,6 +1404,178 @@ describe("Worker API handler", () => {
     expect(setup.cachePuts[0].metadata).toBeUndefined();
     expect(setup.cacheValues.get(NEWS_CACHE_KEY)).toBe(clientJson);
     expect(setup.queueMessages).toHaveLength(0);
+  });
+
+  it.each([false, true])(
+    "refreshの304はsnapshot KVを再利用してmergedへ保存する: changed=%s",
+    async (dataVersionMatches) => {
+      const setup = createBindings(
+        JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+        undefined,
+        {
+          stateText: JSON.stringify({
+            version: 1,
+            officialEtag: '"official-etag"',
+            currentEtag: "current-etag",
+          }),
+        },
+      );
+      const clientJson = JSON.stringify([
+        {
+          targetUrl: "/snapshot",
+          title: "snapshotの本文",
+          newsDate: "2026年08月01日 12時00分00秒",
+          updated: "",
+        },
+      ]);
+      setup.cacheValues.set(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, clientJson);
+      setup.cacheMetadata.set(
+        NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY,
+        createNewsCacheMetadata("archive-snapshot", null, "current-etag", 1),
+      );
+      const logs: JsonObject[] = [];
+      const officialCheckedAt = Date.parse("2026-08-09T12:34:56.789Z");
+      const response = await callFetch(
+        createWorkerHandler({
+          fetcher: async () =>
+            new Response(null, { status: 304, headers: { etag: '"official-etag"' } }),
+          clock: () => officialCheckedAt,
+          logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+        }),
+        new Request("https://example.com/api/kf3-news/refresh", {
+          method: "POST",
+          headers: dataVersionMatches ? { "X-KF3-News-Data-Version": "current-etag" } : {},
+        }),
+        setup.env,
+      );
+      const payload = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(payload).toMatchObject(
+        dataVersionMatches
+          ? { changed: false, metadata: { source: "merged" } }
+          : { news: JSON.parse(clientJson), metadata: { source: "merged" } },
+      );
+      expect(setup.dataGets).not.toContain(CURRENT_ARCHIVE_KEY);
+      expect(setup.cacheReadFormats).toContainEqual({
+        key: NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY,
+        type: "text",
+      });
+      expect(setup.cachePuts[0]).toMatchObject({
+        key: NEWS_CACHE_KEY,
+        value: clientJson,
+        metadata: { source: "merged", baseArchiveEtag: "current-etag", newsCount: 1 },
+      });
+      expect(setup.cachePuts[1].key).toBe(NEWS_REFRESH_STATE_KEY);
+      expect(setup.getCurrentHeadCalls()).toBe(2);
+      expect(setup.queueMessages).toHaveLength(0);
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          event: "news_refresh_succeeded",
+          refreshDataSource: "snapshot-kv",
+          newsDataWritten: true,
+          officialCheckedAt: "2026-08-09T12:34:56.789Z",
+        }),
+      );
+    },
+  );
+
+  it.each([
+    [
+      "旧metadata",
+      { version: 1, source: "archive-snapshot", fetchedAt: "2026-08-09" },
+      true,
+      false,
+    ],
+    ["source不一致", createNewsCacheMetadata("merged", null, "current-etag", 1), true, false],
+    ["ETag欠落", createNewsCacheMetadata("archive-snapshot", null, null, 1), true, false],
+    ["ETag不一致", createNewsCacheMetadata("archive-snapshot", null, "other-etag", 1), true, false],
+    ["不正metadata", { version: 3 }, true, false],
+    [
+      "本文欠落",
+      createNewsCacheMetadata("archive-snapshot", null, "current-etag", 1),
+      false,
+      false,
+    ],
+    ["読取失敗", createNewsCacheMetadata("archive-snapshot", null, "current-etag", 1), true, true],
+  ] as const)(
+    "refreshの304はsnapshotの%sでcurrentへ戻る",
+    async (_label, metadata, hasBody, readFails) => {
+      const setup = createBindings(
+        JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+        undefined,
+        {
+          stateText: JSON.stringify({
+            version: 1,
+            officialEtag: '"official-etag"',
+            currentEtag: "current-etag",
+          }),
+          snapshotGetError: readFails,
+        },
+      );
+      if (hasBody) setup.cacheValues.set(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, "snapshot-json");
+      setup.cacheMetadata.set(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, metadata);
+      const logs: JsonObject[] = [];
+      const response = await callFetch(
+        createWorkerHandler({
+          fetcher: async () =>
+            new Response(null, { status: 304, headers: { etag: '"official-etag"' } }),
+          logger: { log: (event) => logs.push(event), error: (event) => logs.push(event) },
+        }),
+        new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+        setup.env,
+      );
+
+      expect(response.status).toBe(200);
+      expect(setup.dataGets).toContain(CURRENT_ARCHIVE_KEY);
+      expect(setup.cacheReads).toContain(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY);
+      expect(logs).toContainEqual(
+        expect.objectContaining({ event: "news_refresh_succeeded", refreshDataSource: "current" }),
+      );
+    },
+  );
+
+  it.each([
+    ["ETag競合", { currentChangesOnCachePut: true }, 503],
+    ["lease失効", { refreshCompleteResult: "lease-mismatch" as const }, 202],
+  ])("refreshのsnapshot再利用後の%sを検出する", async (_label, options, expectedStatus) => {
+    const setup = createBindings(
+      JSON.stringify(createDocument(MIN_OFFICIAL_ENTRY_COUNT)),
+      undefined,
+      {
+        ...options,
+        stateText: JSON.stringify({
+          version: 1,
+          officialEtag: '"official-etag"',
+          currentEtag: "current-etag",
+        }),
+      },
+    );
+    setup.cacheValues.set(NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY, "snapshot-json");
+    setup.cacheMetadata.set(
+      NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY,
+      createNewsCacheMetadata("archive-snapshot", null, "current-etag", 1),
+    );
+    const response = await callFetch(
+      createWorkerHandler({
+        fetcher: async () =>
+          new Response(null, { status: 304, headers: { etag: '"official-etag"' } }),
+      }),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(expectedStatus);
+    expect(setup.dataGets).not.toContain(CURRENT_ARCHIVE_KEY);
+    expect(setup.cachePuts[0].key).toBe(NEWS_CACHE_KEY);
+    expect(setup.queueMessages).toHaveLength(0);
+    if (expectedStatus === 503) {
+      expect(setup.cacheDeletes).toContain(NEWS_CACHE_KEY);
+      expect(setup.cachePuts).toHaveLength(1);
+    } else {
+      expect(setup.cacheDeletes).not.toContain(NEWS_CACHE_KEY);
+      expect(setup.cachePuts[1].key).toBe(NEWS_REFRESH_STATE_KEY);
+    }
   });
 
   it.each([

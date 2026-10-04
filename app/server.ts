@@ -199,7 +199,7 @@ type RefreshDurations = {
 type RefreshMeasurements = RefreshDurations & {
   officialFetchCount: number;
   officialFetchStatus: "modified" | "not-modified" | null;
-  refreshDataSource: "kv" | "current" | "full-merge" | null;
+  refreshDataSource: "kv" | "snapshot-kv" | "current" | "full-merge" | null;
 };
 
 type NewsApiMeasurements = {
@@ -222,7 +222,7 @@ type RefreshNewsResult = RefreshDurations & {
   addedCount: number;
   updatedCount: number;
   officialFetchStatus: "modified" | "not-modified";
-  refreshDataSource: "kv" | "current" | "full-merge";
+  refreshDataSource: "kv" | "snapshot-kv" | "current" | "full-merge";
 };
 
 const measureRefreshOperation = async <T>(
@@ -369,6 +369,31 @@ const getRefreshNews = async (
         updatedCount: 0,
         officialFetchStatus: "not-modified",
         refreshDataSource: "kv",
+      };
+    }
+
+    const snapshot = await measureRefreshOperation(measurements, "refreshCacheReadDurationMs", () =>
+      env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(archiveSnapshotCacheKey),
+    ).catch(() => null);
+    if (
+      snapshot !== null &&
+      snapshot.value !== null &&
+      isReusableNewsCacheMetadata(snapshot.metadata) &&
+      snapshot.metadata.source === "archive-snapshot" &&
+      snapshot.metadata.baseArchiveEtag !== null &&
+      snapshot.metadata.baseArchiveEtag === eligibility.currentEtag
+    ) {
+      return {
+        ...measurements,
+        clientJson: snapshot.value,
+        newsCount: snapshot.metadata.newsCount,
+        currentEtag: eligibility.currentEtag,
+        currentExists: true,
+        officialCheckedAt: official.checkedAt,
+        addedCount: 0,
+        updatedCount: 0,
+        officialFetchStatus: "not-modified",
+        refreshDataSource: "snapshot-kv",
       };
     }
 
