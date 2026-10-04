@@ -526,8 +526,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         snapshot.archive.etag,
         archiveCount,
       );
-      const responseMetadata =
-        applyNewsRefreshState(metadata, parseNewsRefreshState(refreshStateJson)) ?? metadata;
+      const responseMetadata = applyNewsRefreshState(metadata, refreshState) ?? metadata;
       const response = createJsonResponse(responseJson, responseMetadata);
       context.executionCtx.waitUntil(
         (async () => {
