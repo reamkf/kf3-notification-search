@@ -40,7 +40,7 @@ import {
   applyNewsRefreshState,
   createNewsCacheMetadata,
   createNewsRefreshState,
-  createNewsResponseHeaders,
+  createNewsResponseHeadersFromValidatedMetadata,
   isReusableNewsCacheMetadata,
   parseNewsRefreshState,
   type NewsCacheMetadata,
@@ -117,7 +117,7 @@ const createRefreshErrorLog = <T>(
 const refreshPath = "/api/kf3-news/refresh";
 
 const createJsonResponse = (json: string, metadata?: NewsCacheMetadata) => {
-  const headers = createNewsResponseHeaders(metadata);
+  const headers = createNewsResponseHeadersFromValidatedMetadata(metadata);
   headers.set("cache-control", "no-store");
   return new Response(json, { headers });
 };

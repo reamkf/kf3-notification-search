@@ -4,6 +4,7 @@ import {
   createNewsCacheMetadata,
   createNewsRefreshState,
   createNewsResponseHeaders,
+  createNewsResponseHeadersFromValidatedMetadata,
   isReusableNewsCacheMetadata,
   NEWS_CACHE_METADATA_VERSION,
   NEWS_OFFICIAL_CHECKED_AT_HEADER,
@@ -96,6 +97,48 @@ describe("news response metadata", () => {
       dataVersion: null,
     });
     expect(isReusableNewsCacheMetadata(metadata)).toBe(false);
+  });
+
+  it.each([
+    {
+      metadata: { ...v1Metadata, refreshAvailableAt },
+      expectedSource: "merged",
+    },
+    {
+      metadata: {
+        version: 2,
+        source: "archive-snapshot",
+        fetchedAt: officialCheckedAt,
+        baseArchiveEtag: "archive-etag",
+        newsCount: 12,
+        refreshAvailableAt,
+      },
+      expectedSource: "archive-snapshot",
+    },
+  ])(
+    "preserves legacy cooldown in validated response headers: %#",
+    ({ metadata, expectedSource }) => {
+      const validated = applyNewsRefreshState(metadata, null);
+      expect(validated).toBeDefined();
+      expect(createNewsResponseHeadersFromValidatedMetadata(validated)).toEqual(
+        createNewsResponseHeaders(metadata),
+      );
+      const headers = createNewsResponseHeadersFromValidatedMetadata(validated);
+      expect(headers.get("X-KF3-News-Source")).toBe(expectedSource);
+      expect(headers.get(NEWS_REFRESH_AVAILABLE_AT_HEADER)).toBe(refreshAvailableAt);
+      expect(headers.get(NEWS_OFFICIAL_CHECKED_AT_HEADER)).toBeNull();
+    },
+  );
+
+  it("keeps invalid metadata and cooldown out of response headers", () => {
+    const invalid = { ...v1Metadata, fetchedAt: "invalid", refreshAvailableAt };
+    expect(
+      createNewsResponseHeadersFromValidatedMetadata(applyNewsRefreshState(invalid, null)),
+    ).toEqual(createNewsResponseHeaders(invalid));
+    const legacy = { ...v1Metadata, refreshAvailableAt: "invalid" };
+    expect(
+      createNewsResponseHeadersFromValidatedMetadata(applyNewsRefreshState(legacy, null)),
+    ).toEqual(createNewsResponseHeaders(legacy));
   });
 
   it("supports snapshots with a null official ETag or check time", () => {

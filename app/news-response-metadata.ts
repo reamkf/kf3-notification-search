@@ -195,10 +195,17 @@ export const toNewsResponseMetadata = (value: JsonInput): NewsResponseMetadata =
       dataVersion: null,
     };
   }
+  return toValidatedNewsResponseMetadata(metadata, getRefreshAvailableAt(value));
+};
+
+const toValidatedNewsResponseMetadata = (
+  metadata: NewsCacheMetadata,
+  refreshAvailableAt: string | null,
+): NewsResponseMetadata => {
   return {
     source: metadata.source,
     officialCheckedAt: isCurrentNewsCacheMetadata(metadata) ? metadata.officialCheckedAt : null,
-    refreshAvailableAt: getRefreshAvailableAt(value),
+    refreshAvailableAt,
     dataVersion:
       isCurrentNewsCacheMetadata(metadata) && metadata.source !== "archive-fallback"
         ? metadata.baseArchiveEtag
@@ -206,8 +213,7 @@ export const toNewsResponseMetadata = (value: JsonInput): NewsResponseMetadata =
   };
 };
 
-export const createNewsResponseHeaders = (metadata: JsonInput): Headers => {
-  const responseMetadata = toNewsResponseMetadata(metadata);
+const headersFromResponseMetadata = (responseMetadata: NewsResponseMetadata): Headers => {
   const headers = new Headers({
     "content-type": "application/json; charset=UTF-8",
     [NEWS_SOURCE_HEADER]: responseMetadata.source,
@@ -224,6 +230,21 @@ export const createNewsResponseHeaders = (metadata: JsonInput): Headers => {
   }
   return headers;
 };
+
+export const createNewsResponseHeaders = (metadata: JsonInput): Headers =>
+  headersFromResponseMetadata(toNewsResponseMetadata(metadata));
+
+export const createNewsResponseHeadersFromValidatedMetadata = (
+  metadata: NewsCacheMetadata | undefined,
+): Headers =>
+  headersFromResponseMetadata(
+    metadata
+      ? toValidatedNewsResponseMetadata(
+          metadata,
+          "refreshAvailableAt" in metadata ? (metadata.refreshAvailableAt ?? null) : null,
+        )
+      : { source: "unknown", officialCheckedAt: null, refreshAvailableAt: null, dataVersion: null },
+  );
 
 export const parseNewsResponseHeaders = (headers: Headers): NewsResponseMetadata => {
   const source = headers.get(NEWS_SOURCE_HEADER);
