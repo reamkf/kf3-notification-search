@@ -480,16 +480,19 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       officialCheckStateReadDurationMs: 0,
     };
     try {
-      const [cachedNews, refreshStateJson] = await Promise.all([
-        measureNewsApiOperation(measurements, "primaryCacheReadDurationMs", () =>
-          context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey),
-        ),
-        measureNewsApiOperation(measurements, "refreshStateReadDurationMs", () =>
-          context.env.KF3_NOTIF_CACHE.get(refreshStateKey).catch(() => null),
-        ),
-      ]);
-      const refreshState = parseNewsRefreshState(refreshStateJson);
+      const cachedNewsPromise = measureNewsApiOperation(
+        measurements,
+        "primaryCacheReadDurationMs",
+        () => context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey),
+      );
+      const refreshStatePromise = measureNewsApiOperation(
+        measurements,
+        "refreshStateReadDurationMs",
+        () => context.env.KF3_NOTIF_CACHE.get(refreshStateKey).catch(() => null),
+      );
+      const cachedNews = await cachedNewsPromise;
       if (cachedNews.value !== null) {
+        const refreshState = parseNewsRefreshState(await refreshStatePromise);
         const metadata = applyNewsRefreshState(cachedNews.metadata, refreshState);
         const response = createJsonResponse(cachedNews.value, metadata);
         logNewsApiSuccess(logger, context.env, "merged-kv", measurements, startedAt);
@@ -503,6 +506,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(archiveSnapshotCacheKey),
       );
       if (cachedArchiveSnapshot.value !== null) {
+        const refreshState = parseNewsRefreshState(await refreshStatePromise);
         const metadata = applyNewsRefreshState(cachedArchiveSnapshot.metadata, refreshState);
         const response = createJsonResponse(cachedArchiveSnapshot.value, metadata);
         logNewsApiSuccess(logger, context.env, "snapshot-kv", measurements, startedAt);
@@ -526,6 +530,7 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         snapshot.archive.etag,
         archiveCount,
       );
+      const refreshState = parseNewsRefreshState(await refreshStatePromise);
       const responseMetadata = applyNewsRefreshState(metadata, refreshState) ?? metadata;
       const response = createJsonResponse(responseJson, responseMetadata);
       context.executionCtx.waitUntil(

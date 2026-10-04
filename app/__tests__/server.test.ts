@@ -84,6 +84,7 @@ type RefreshCoordinatorStub = {
 type TestBindings = {
   env: WorkerBindings;
   dataGets: string[];
+  cacheReads: string[];
   getCurrentHeadCalls: () => number;
   cacheValues: Map<string, string>;
   cacheMetadata: Map<string, unknown>;
@@ -100,6 +101,8 @@ type TestBindings = {
 
 type BindingOptions = {
   cacheGetError?: boolean;
+  stateGetError?: boolean;
+  cacheReadBlocks?: Record<string, Promise<void>>;
   cachePutError?: boolean;
   queueSendError?: boolean;
   queueSendBlock?: Promise<void>;
@@ -148,6 +151,7 @@ const createBindings = (
   options: BindingOptions = {},
 ): TestBindings => {
   const dataGets: string[] = [];
+  const cacheReads: string[] = [];
   let currentHeadCalls = 0;
   let currentEtag = "current-etag";
   let checkStateText = options.checkStateText ?? null;
@@ -209,10 +213,16 @@ const createBindings = (
   // SAFETY: The test double implements the KV methods exercised by this scenario.
   const cache = {
     get: async (key: string) => {
+      cacheReads.push(key);
+      await options.cacheReadBlocks?.[key];
+      if (key === NEWS_REFRESH_STATE_KEY && options.stateGetError)
+        throw new Error("state get failed");
       if (options.cacheGetError) throw new Error("cache get failed");
       return cacheValues.get(key) ?? null;
     },
     getWithMetadata: async (key: string) => {
+      cacheReads.push(key);
+      await options.cacheReadBlocks?.[key];
       if (options.cacheGetError) throw new Error("cache get failed");
       return {
         value: cacheValues.get(key) ?? null,
@@ -277,6 +287,7 @@ const createBindings = (
       KF3_REFRESH_COORDINATOR: refreshCoordinatorNamespace,
     },
     dataGets,
+    cacheReads,
     getCurrentHeadCalls: () => currentHeadCalls,
     cacheValues,
     cacheMetadata,
@@ -705,6 +716,74 @@ describe("Worker API handler", () => {
       officialCheckedAt: "2026-08-09T12:34:56.789Z",
       refreshAvailableAt: "2026-08-09T12:39:56.789Z",
     });
+  });
+
+  it("refresh stateを待たずにsnapshotとR2を読み、応答前にはstateを反映する", async () => {
+    let releaseState!: () => void;
+    const stateBlock = new Promise<void>((resolve) => {
+      releaseState = resolve;
+    });
+    const setup = createBindings(JSON.stringify(createDocument(1)), undefined, {
+      cacheReadBlocks: { [NEWS_REFRESH_STATE_KEY]: stateBlock },
+    });
+    setup.cacheValues.set(
+      NEWS_REFRESH_STATE_KEY,
+      JSON.stringify({
+        version: 1,
+        baseArchiveEtag: "current-etag",
+        officialCheckedAt: "2026-08-09T12:34:56.789Z",
+        refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+      }),
+    );
+    const pending: Promise<unknown>[] = [];
+    let responded = false;
+    const responsePromise = callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+      pending,
+    ).then((response) => {
+      responded = true;
+      return response;
+    });
+
+    await vi.waitFor(() => {
+      expect(setup.cacheReads).toContain("kf3-news-archive-snapshot");
+      expect(setup.dataGets).toContain(CURRENT_ARCHIVE_KEY);
+    });
+    expect(responded).toBe(false);
+    releaseState();
+    const response = await responsePromise;
+    await Promise.all(pending);
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe("2026-08-09T12:34:56.789Z");
+    expect(response.headers.get("X-KF3-News-Refresh-Available-At")).toBe(
+      "2026-08-09T12:39:56.789Z",
+    );
+    expect(setup.cacheReads).toEqual([
+      NEWS_CACHE_KEY,
+      NEWS_REFRESH_STATE_KEY,
+      "kf3-news-archive-snapshot",
+    ]);
+  });
+
+  it("refresh stateの読み込み失敗時もsnapshot KVを返す", async () => {
+    const setup = createBindings(null, undefined, { stateGetError: true });
+    setup.cacheValues.set("kf3-news-archive-snapshot", "archive-json");
+    setup.cacheMetadata.set(
+      "kf3-news-archive-snapshot",
+      createNewsCacheMetadata("archive-snapshot", "2026-08-09T12:00:00.000Z", "current-etag", 1),
+    );
+
+    const response = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("archive-json");
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe("2026-08-09T12:00:00.000Z");
+    expect(setup.dataGets).toEqual([]);
   });
 
   it("cache missのKV write失敗でもHTTP 200を維持する", async () => {

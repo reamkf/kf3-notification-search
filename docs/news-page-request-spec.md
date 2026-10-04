@@ -43,7 +43,7 @@ APIはsnapshotの入力順を維持して返す。日付順への並べ替えは
 
 ### KV hit
 
-1. KVの`kf3-news`と`kf3-news-refresh-state`を並列に読み込む。
+1. KVの`kf3-news`と`kf3-news-refresh-state`を並列に読み込む。本文KVのmissが先に判明した場合は、refresh stateの完了を待たずにsnapshot KV、さらにmissならR2と公式確認時刻stateの取得へ進む。成功レスポンスはrefresh stateの完了後に作成する。
 2. 本文が存在すれば、保存済みのJSON配列を返す。本文metadataと可変stateの`baseArchiveEtag`が一致する場合だけstateをレスポンスmetadataへ合成する。
 3. R2、公式サーバー、refresh制御stateへアクセスしない。
 4. metadataがない旧形式のKV valueや不正なmetadataでも、お知らせ配列を壊さずsource不明、取得日時不明として返す。不正または本文と不一致の可変stateは無視する。
