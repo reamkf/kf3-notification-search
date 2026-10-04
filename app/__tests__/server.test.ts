@@ -85,6 +85,7 @@ type TestBindings = {
   env: WorkerBindings;
   dataGets: string[];
   cacheReads: string[];
+  cacheReadFormats: Array<{ key: string; type: "text" | "arrayBuffer" }>;
   getCurrentHeadCalls: () => number;
   cacheValues: Map<string, string>;
   cacheMetadata: Map<string, unknown>;
@@ -211,6 +212,7 @@ const createBindings = (
     // SAFETY: The fixture provides the Worker fields consumed by this test.
   } /* SAFETY: The fixture provides the Worker fields consumed by this test. */ as R2Bucket;
   // SAFETY: The test double implements the KV methods exercised by this scenario.
+  const cacheReadFormats: TestBindings["cacheReadFormats"] = [];
   const cache = {
     get: async (key: string) => {
       cacheReads.push(key);
@@ -220,12 +222,14 @@ const createBindings = (
       if (options.cacheGetError) throw new Error("cache get failed");
       return cacheValues.get(key) ?? null;
     },
-    getWithMetadata: async (key: string) => {
+    getWithMetadata: async (key: string, type: "text" | "arrayBuffer" = "text") => {
       cacheReads.push(key);
+      cacheReadFormats.push({ key, type });
       await options.cacheReadBlocks?.[key];
       if (options.cacheGetError) throw new Error("cache get failed");
+      const value = cacheValues.get(key) ?? null;
       return {
-        value: cacheValues.get(key) ?? null,
+        value: value === null || type === "text" ? value : new TextEncoder().encode(value).buffer,
         metadata: cacheMetadata.get(key) ?? null,
         cacheStatus: null,
       };
@@ -288,6 +292,7 @@ const createBindings = (
     },
     dataGets,
     cacheReads,
+    cacheReadFormats,
     getCurrentHeadCalls: () => currentHeadCalls,
     cacheValues,
     cacheMetadata,
@@ -616,6 +621,61 @@ describe("Worker API handler", () => {
     expect(await response.text()).toBe("merged-json");
     expect(setup.dataGets).toEqual([]);
     expect(setup.cachePuts).toEqual([]);
+  });
+
+  it.each([
+    [NEWS_CACHE_KEY, "merged"],
+    ["kf3-news-archive-snapshot", "archive-snapshot"],
+  ] as const)("%sのUTF-8本文をそのまま返す", async (key, source) => {
+    const setup = createBindings(null);
+    const json = JSON.stringify([
+      {
+        targetUrl: "/日本語/🦊",
+        title: "お知らせ🦊\n改行",
+        newsDate: "2026年08月01日 12時00分00秒",
+        updated: "",
+      },
+    ]);
+    setup.cacheValues.set(key, json);
+    setup.cacheMetadata.set(key, createNewsCacheMetadata(source, null, "current-etag", 1));
+
+    const response = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new TextEncoder().encode(json));
+    expect(response.headers.get("content-type")).toBe("application/json; charset=UTF-8");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("X-KF3-News-Source")).toBe(source);
+    expect(setup.cacheReadFormats).toContainEqual({ key, type: "arrayBuffer" });
+    expect(setup.dataGets).toEqual([]);
+  });
+
+  it("空のKV本文とKV missを区別する", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    setup.cacheValues.set(NEWS_CACHE_KEY, "");
+
+    const emptyResponse = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+    expect(emptyResponse.status).toBe(200);
+    expect((await emptyResponse.arrayBuffer()).byteLength).toBe(0);
+    expect(setup.dataGets).toEqual([]);
+
+    setup.cacheValues.delete(NEWS_CACHE_KEY);
+    const missResponse = await callFetch(
+      createWorkerHandler(),
+      new Request("https://example.com/api/kf3-news"),
+      setup.env,
+    );
+    expect(missResponse.status).toBe(200);
+    expect(await missResponse.json()).toHaveLength(1);
+    expect(setup.dataGets).toContain(CURRENT_ARCHIVE_KEY);
   });
 
   it("archive snapshot cache hitはR2へアクセスせず返す", async () => {
@@ -1323,6 +1383,7 @@ describe("Worker API handler", () => {
     expect(payload).not.toHaveProperty("news");
     expect(response.headers.get("X-KF3-News-Data-Version")).toBe("current-etag");
     expect(setup.dataGets).not.toContain(CURRENT_ARCHIVE_KEY);
+    expect(setup.cacheReadFormats).toContainEqual({ key: NEWS_CACHE_KEY, type: "text" });
     expect(setup.getCurrentHeadCalls()).toBe(1);
     expect(setup.cachePuts).toHaveLength(1);
     expect(setup.cachePuts[0].key).toBe(NEWS_REFRESH_STATE_KEY);

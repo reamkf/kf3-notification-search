@@ -266,6 +266,59 @@ describe("統合と正規化", () => {
     expect(result.document.news[0]).toBe(existing.news[0]);
   });
 
+  it.each([
+    ["入れ子のキー順", { nested: { a: 1, b: 2 } }, { nested: { b: 2, a: 1 } }, false],
+    ["配列順", [1, 2], [2, 1], true],
+    ["nullと欠落キー", { nested: { value: null } }, { nested: {} }, true],
+    ["値の型", { nested: { value: 1 } }, { nested: { value: "1" } }, true],
+  ] satisfies [string, JsonInput, JsonInput, boolean][])(
+    "未知フィールドの比較で%sを扱う",
+    (_label, before, after, changed) => {
+      const existing = createDocument(1, { 1: { extra: before } });
+      const official = createDocument(1, { 1: { extra: after } });
+      const existingJson = JSON.stringify(existing);
+      const officialJson = JSON.stringify(official);
+      const result = mergeValidatedNewsDocument(existing, official);
+
+      expect(result.stats.updatedCount).toBe(Number(changed));
+      expect(result.document.news[0]).toBe(changed ? official.news[0] : existing.news[0]);
+      expect(JSON.stringify(existing)).toBe(existingJson);
+      expect(JSON.stringify(official)).toBe(officialJson);
+    },
+  );
+
+  it("特殊キーを比較対象から除き、通常のキーは比較する", () => {
+    const before = JSON.parse('{"safe":1,"__proto__":1,"prototype":1,"constructor":1}');
+    const ignoredChanges = JSON.parse('{"safe":1,"__proto__":2,"prototype":2,"constructor":2}');
+    const regularChange = JSON.parse('{"safe":2,"__proto__":2}');
+    const existing = createDocument(1, { 1: { extra: before } });
+
+    expect(
+      mergeValidatedNewsDocument(existing, createDocument(1, { 1: { extra: ignoredChanges } }))
+        .stats.updatedCount,
+    ).toBe(0);
+    expect(
+      mergeValidatedNewsDocument(existing, createDocument(1, { 1: { extra: regularChange } })).stats
+        .updatedCount,
+    ).toBe(1);
+  });
+
+  it("マージの変更件数上限を維持する", () => {
+    const existing = createDocument(MAX_UPDATED_EXISTING_ENTRY_COUNT + 1);
+    const allowed = createDocument(MAX_UPDATED_EXISTING_ENTRY_COUNT + 1);
+    const rejected = createDocument(MAX_UPDATED_EXISTING_ENTRY_COUNT + 1);
+    for (let index = 0; index < MAX_UPDATED_EXISTING_ENTRY_COUNT; index += 1) {
+      allowed.news[index].title = "変更";
+      rejected.news[index].title = "変更";
+    }
+    rejected.news[MAX_UPDATED_EXISTING_ENTRY_COUNT].title = "変更";
+
+    expect(mergeValidatedNewsDocument(existing, allowed).stats.updatedCount).toBe(
+      MAX_UPDATED_EXISTING_ENTRY_COUNT,
+    );
+    expect(() => mergeValidatedNewsDocument(existing, rejected)).toThrowError(NewsDataError);
+  });
+
   it("公式データの日時とURLは新規または変更項目だけ検証する", () => {
     const existing = createDocument(MIN_OFFICIAL_ENTRY_COUNT, {
       1: { newsDate: "保存時に検証済み" },

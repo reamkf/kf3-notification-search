@@ -12,6 +12,7 @@ import {
   updateNewsArchive,
 } from "../news-archive";
 import { NEWS_ARCHIVE_UPDATE_MESSAGE_VERSION } from "../news-archive-queue";
+import { NEWS_CACHE_KEY } from "../news-cache-keys";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
 import { createNewsCacheMetadata } from "../news-response-metadata";
 import { createWorkerHandler } from "../server";
@@ -119,6 +120,54 @@ describe("Cloudflare bindings", () => {
     expect(response.headers.get("X-KF3-News-Source")).toBe("archive-fallback");
     expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe("2026-08-09T12:34:56.789Z");
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("実KVのmergedとsnapshotで日本語JSONのバイト列を維持する", async () => {
+    const mergedJson = JSON.stringify([
+      {
+        targetUrl: "/news/🦊",
+        title: "日本語🦊\n改行",
+        newsDate: "2026年08月01日 12時00分00秒",
+        updated: "",
+      },
+    ]);
+    const snapshotJson = JSON.stringify([
+      {
+        targetUrl: "/news/2",
+        title: "分類あり",
+        newsDate: "2026年08月02日 12時00分00秒",
+        updated: "",
+        category: "お知らせ",
+      },
+    ]);
+    await bindings.KF3_NOTIF_CACHE.put(NEWS_CACHE_KEY, mergedJson, {
+      metadata: createNewsCacheMetadata("merged", null, "current-etag", 1),
+    });
+    await bindings.KF3_NOTIF_CACHE.put("kf3-news-archive-snapshot", snapshotJson, {
+      metadata: createNewsCacheMetadata("archive-snapshot", null, "current-etag", 1),
+    });
+    const handler = createWorkerHandler({
+      fetcher: vi.fn(async () => Promise.reject(new Error("unexpected fetch"))),
+    });
+
+    const mergedResponse = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news"),
+    );
+    expect(new Uint8Array(await mergedResponse.arrayBuffer())).toEqual(
+      new TextEncoder().encode(mergedJson),
+    );
+    expect(mergedResponse.headers.get("X-KF3-News-Source")).toBe("merged");
+
+    await bindings.KF3_NOTIF_CACHE.delete(NEWS_CACHE_KEY);
+    const snapshotResponse = await callFetch(
+      handler,
+      new Request("https://example.com/api/kf3-news"),
+    );
+    expect(new Uint8Array(await snapshotResponse.arrayBuffer())).toEqual(
+      new TextEncoder().encode(snapshotJson),
+    );
+    expect(snapshotResponse.headers.get("X-KF3-News-Source")).toBe("archive-snapshot");
   });
 
   it("実R2とKVでdaily、current、cache削除、monthlyを確定する", async () => {

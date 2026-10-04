@@ -182,22 +182,24 @@ const jsonValuesEqual = (left: SerializableValue, right: SerializableValue): boo
   }
   if (Array.isArray(right)) return false;
 
-  const leftObject = v.safeParse(jsonRecordSchema, left);
-  const rightObject = v.safeParse(jsonRecordSchema, right);
-  if (!leftObject.success || !rightObject.success) return false;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object")
+    return false;
 
-  const leftKeys = Object.keys(leftObject.output);
-  const rightKeys = Object.keys(rightObject.output);
-  if (leftKeys.length !== rightKeys.length) return false;
-  for (const key of leftKeys) {
-    if (
-      !Object.hasOwn(rightObject.output, key) ||
-      !jsonValuesEqual(leftObject.output[key], rightObject.output[key])
-    ) {
+  const leftObject = left as Record<string, SerializableValue>;
+  const rightObject = right as Record<string, SerializableValue>;
+  let leftKeyCount = 0;
+  for (const key of Object.keys(leftObject)) {
+    if (key === "__proto__" || key === "prototype" || key === "constructor") continue;
+    leftKeyCount += 1;
+    if (!Object.hasOwn(rightObject, key) || !jsonValuesEqual(leftObject[key], rightObject[key]))
       return false;
-    }
   }
-  return true;
+
+  let rightKeyCount = 0;
+  for (const key of Object.keys(rightObject)) {
+    if (key !== "__proto__" && key !== "prototype" && key !== "constructor") rightKeyCount += 1;
+  }
+  return leftKeyCount === rightKeyCount;
 };
 
 const parseDocument = (

@@ -116,7 +116,7 @@ const createRefreshErrorLog = <T>(
 
 const refreshPath = "/api/kf3-news/refresh";
 
-const createJsonResponse = (json: string, metadata?: NewsCacheMetadata) => {
+const createJsonResponse = (json: string | ArrayBuffer, metadata?: NewsCacheMetadata) => {
   const headers = createNewsResponseHeadersFromValidatedMetadata(metadata);
   headers.set("cache-control", "no-store");
   return new Response(json, { headers });
@@ -483,7 +483,8 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
       const cachedNewsPromise = measureNewsApiOperation(
         measurements,
         "primaryCacheReadDurationMs",
-        () => context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey),
+        () =>
+          context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(cacheKey, "arrayBuffer"),
       );
       const refreshStatePromise = measureNewsApiOperation(
         measurements,
@@ -503,7 +504,10 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         measurements,
         "snapshotCacheReadDurationMs",
         () =>
-          context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(archiveSnapshotCacheKey),
+          context.env.KF3_NOTIF_CACHE.getWithMetadata<NewsCacheMetadata>(
+            archiveSnapshotCacheKey,
+            "arrayBuffer",
+          ),
       );
       if (cachedArchiveSnapshot.value !== null) {
         const refreshState = parseNewsRefreshState(await refreshStatePromise);
