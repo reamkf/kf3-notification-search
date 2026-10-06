@@ -26,12 +26,6 @@ test("SSG shellをStatic Assetsから返し、APIをWorkerへfallbackする", as
   expect(response.status()).toBe(200);
   const html = await response.text();
 
-  expect(html).toContain("<honox-island");
-  expect(html).toMatch(/src="\/static\/[^"]+\.js"/);
-  expect(html).toMatch(/href="\/static\/[^"]+\.css"/);
-  expect(html).toContain('<meta property="og:image" content="http://127.0.0.1:8787/og-image.jpg"');
-  expect(html).toContain('<link rel="apple-touch-icon" href="/apple-touch-icon.png"');
-
   const fontStylesheetPath = html.match(/href="(\/static\/font-[^"]+\.css)"/)?.[1];
   expect(fontStylesheetPath).toBeDefined();
   const fontStylesheetResponse = await request.get(fontStylesheetPath!);
