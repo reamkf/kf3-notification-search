@@ -15,5 +15,6 @@ describe("renderer metadata", () => {
     expect(response.status).toBe(200);
     expect(html).toContain('<meta property="og:image" content="https://example.com/og-image.jpg"');
     expect(html).toContain('<meta name="twitter:image" content="https://example.com/og-image.jpg"');
+    expect(html).toContain('<link rel="apple-touch-icon" href="/apple-touch-icon.png"');
   });
 });

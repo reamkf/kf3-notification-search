@@ -36,6 +36,7 @@ export const createRenderer = (components: Partial<RendererComponents> = {}) =>
             <link rel="preload" href="/api/kf3-news" as="fetch" crossorigin="anonymous" />
           )}
           <link rel="icon" href="/favicon.ico" />
+          <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
           <Script src="/app/client.ts" async />
           <Link href="/app/style.css" rel="stylesheet" />
           <Link href="/app/font.css" rel="stylesheet" />

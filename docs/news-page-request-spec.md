@@ -12,6 +12,8 @@
 
 お知らせデータはshellのHTML解析中にpreloadを開始する別HTTPリクエストで取得し、hydration後のIslandがその結果を利用する。shellの応答とデータ取得のCPU時間を同じリクエストへ合算しない。GETからrefreshを開始したり、`waitUntil`でデータ取得を継続したりしない。
 
+`GET /robots.txt`は`User-agent: *`と空の`Disallow:`を含む静的テキストを返し、クロールを制限しない。`GET /apple-touch-icon.png`、`GET /apple-touch-icon-precomposed.png`、`GET /apple-touch-icon-160x160.png`は既存faviconの256×256 PNGを静的配信する。shellには`/apple-touch-icon.png`へのリンクを含める。これらのアセットはWorkerを起動せず、存在しないパスとAPIのWorker fallbackは維持する。
+
 ## `GET /api/kf3-news`
 
 ### 成功レスポンス

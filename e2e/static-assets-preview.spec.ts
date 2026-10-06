@@ -1,5 +1,26 @@
 import { expect, test } from "@playwright/test";
 
+test("robotsとホーム画面アイコンをStatic Assetsから返す", async ({ request }) => {
+  const robotsResponse = await request.get("/robots.txt");
+  expect(robotsResponse.status()).toBe(200);
+  expect(robotsResponse.headers()["content-type"]).toContain("text/plain");
+  expect(await robotsResponse.text()).toBe("User-agent: *\nDisallow:\n");
+
+  for (const path of [
+    "/apple-touch-icon.png",
+    "/apple-touch-icon-precomposed.png",
+    "/apple-touch-icon-160x160.png",
+  ]) {
+    const response = await request.get(path);
+    expect(response.status()).toBe(200);
+    expect(response.headers()["content-type"]).toContain("image/png");
+    const png = await response.body();
+    expect(png.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    expect(png.readUInt32BE(16)).toBe(256);
+    expect(png.readUInt32BE(20)).toBe(256);
+  }
+});
+
 test("SSG shellをStatic Assetsから返し、APIをWorkerへfallbackする", async ({ page, request }) => {
   const response = await request.get("/");
   expect(response.status()).toBe(200);
@@ -9,6 +30,7 @@ test("SSG shellをStatic Assetsから返し、APIをWorkerへfallbackする", as
   expect(html).toMatch(/src="\/static\/[^"]+\.js"/);
   expect(html).toMatch(/href="\/static\/[^"]+\.css"/);
   expect(html).toContain('<meta property="og:image" content="http://127.0.0.1:8787/og-image.jpg"');
+  expect(html).toContain('<link rel="apple-touch-icon" href="/apple-touch-icon.png"');
 
   const fontStylesheetPath = html.match(/href="(\/static\/font-[^"]+\.css)"/)?.[1];
   expect(fontStylesheetPath).toBeDefined();
