@@ -6,6 +6,9 @@ import { normalizeQuery } from "../query-normalizer";
 import { getJapaneseDate } from "../get-japanese-date";
 import {
   NEWS_DATA_VERSION_HEADER,
+  NEWS_OFFICIAL_CHECKED_AT_HEADER,
+  NEWS_REFRESH_AVAILABLE_AT_HEADER,
+  NEWS_REFRESH_NEXT_AVAILABLE_AT_HEADER,
   parseNewsResponseHeaders,
   type NewsResponseMetadata,
 } from "../news-response-metadata";
@@ -428,6 +431,88 @@ const parseCooldownMs = async (response: Response) => {
   return DEFAULT_RETRY_AFTER_MS;
 };
 
+const parseBusyCheckedAt = (value: string | null) =>
+  value && Number.isFinite(Date.parse(value)) ? value : null;
+
+type BusyResponseMetadata = {
+  officialCheckedAt: string | null;
+  refreshAvailableAt: string | null;
+  nextAvailableAt: string | null;
+  baseArchiveEtag: string | null;
+};
+
+// 他クライアントが確定させた最終取得時刻を429応答から取り出す。ヘッダ優先、本文で補完する。
+// nextAvailableAtはDurable Objectが確定させた実際のクールダウン期限で、KVのrefreshAvailableAtより正確。
+// baseArchiveEtagは更新世代のアーカイブ版で、一覧の対応確認に使う。本文優先(nullも正当な値)。
+const extractBusyResponseMetadata = async (
+  headers: {
+    officialCheckedAt: string | null;
+    refreshAvailableAt: string | null;
+    nextAvailableAt: string | null;
+    baseArchiveEtag: string | null;
+  },
+  bodyClone: Response | null,
+): Promise<BusyResponseMetadata> => {
+  const fromHeaders: BusyResponseMetadata = {
+    officialCheckedAt: parseBusyCheckedAt(headers.officialCheckedAt),
+    refreshAvailableAt: parseBusyCheckedAt(headers.refreshAvailableAt),
+    nextAvailableAt: parseBusyCheckedAt(headers.nextAvailableAt),
+    baseArchiveEtag:
+      headers.baseArchiveEtag && headers.baseArchiveEtag.length > 0
+        ? headers.baseArchiveEtag
+        : null,
+  };
+  if (!bodyClone) return fromHeaders;
+  try {
+    const result = v.safeParse(jsonObjectSchema, await bodyClone.json());
+    if (!result.success) return fromHeaders;
+    const candidate = result.output;
+    const pickTimestamp = (keys: Array<string>) => {
+      for (const key of keys) {
+        const value = v.safeParse(v.string(), candidate[key]);
+        if (!value.success) continue;
+        const parsed = parseBusyCheckedAt(value.output);
+        if (parsed) return parsed;
+      }
+      return null;
+    };
+    const pickEtag = () => {
+      if (!("baseArchiveEtag" in candidate)) return fromHeaders.baseArchiveEtag;
+      if (candidate["baseArchiveEtag"] === null) return null;
+      const value = v.safeParse(v.pipe(v.string(), v.minLength(1)), candidate["baseArchiveEtag"]);
+      return value.success ? value.output : fromHeaders.baseArchiveEtag;
+    };
+    return {
+      officialCheckedAt: fromHeaders.officialCheckedAt ?? pickTimestamp(["officialCheckedAt"]),
+      refreshAvailableAt: fromHeaders.refreshAvailableAt ?? pickTimestamp(["refreshAvailableAt"]),
+      nextAvailableAt:
+        fromHeaders.nextAvailableAt ?? pickTimestamp(["nextAvailableAt", "cooldownUntil"]),
+      baseArchiveEtag: pickEtag(),
+    };
+  } catch {
+    return fromHeaders;
+  }
+};
+
+// 429で他クライアントの更新を知った場合、一覧ごと再取得して時刻と一覧のペアを一致させる。
+const loadLatestNewsPayload = async (): Promise<NewsPayload | null> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
+  try {
+    const response = await fetch("/api/kf3-news", { signal: controller.signal });
+    if (!response.ok) return null;
+    const metadata = parseNewsResponseHeaders(response.headers);
+    const data: unknown = await response.json();
+    const result = v.safeParse(newsArraySchema, data);
+    if (!result.success) return null;
+    return { data: result.output, metadata };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 // お知らせデータをキーワードでフィルター
 export const filterNewsByKeyword = (newsArray: Array<News>, normalizedQuery: string) => {
   if (!normalizedQuery) return newsArray;
@@ -562,10 +647,65 @@ const KemonoFriends3NewsSearch = ({ onNewsRowRender }: KemonoFriends3NewsSearchP
         }
 
         if (response.status === 429) {
+          clearTimeout(timeout);
+          const bodyClone = response.clone();
           const cooldownMs = await parseCooldownMs(response);
           if (!mountedRef.current || generationRef.current !== generation) return;
+          const busyMetadata = await extractBusyResponseMetadata(
+            {
+              officialCheckedAt: response.headers.get(NEWS_OFFICIAL_CHECKED_AT_HEADER),
+              refreshAvailableAt: response.headers.get(NEWS_REFRESH_AVAILABLE_AT_HEADER),
+              nextAvailableAt: response.headers.get(NEWS_REFRESH_NEXT_AVAILABLE_AT_HEADER),
+              baseArchiveEtag: response.headers.get(NEWS_DATA_VERSION_HEADER),
+            },
+            bodyClone,
+          );
           refreshInFlightRef.current = false;
-          updateRefreshState({ status: "cooldown", retryAt: Date.now() + cooldownMs });
+          updateRefreshState({
+            status: "cooldown",
+            retryAt: busyMetadata.nextAvailableAt
+              ? Date.parse(busyMetadata.nextAvailableAt)
+              : busyMetadata.refreshAvailableAt
+                ? getRefreshCooldownUntil(busyMetadata.refreshAvailableAt)
+                : Date.now() + cooldownMs,
+          });
+          const incomingCheckedAtMs = busyMetadata.officialCheckedAt
+            ? Date.parse(busyMetadata.officialCheckedAt)
+            : Number.NaN;
+          const currentCheckedAtMs = newsPayload.metadata.officialCheckedAt
+            ? Date.parse(newsPayload.metadata.officialCheckedAt)
+            : Number.NaN;
+          if (
+            !Number.isFinite(incomingCheckedAtMs) ||
+            (Number.isFinite(currentCheckedAtMs) && incomingCheckedAtMs <= currentCheckedAtMs)
+          ) {
+            return;
+          }
+          const latest = await loadLatestNewsPayload();
+          if (!mountedRef.current || generationRef.current !== generation) return;
+          // GETが古いキャッシュやスナップショットを返す場合があるため、
+          // 429の時刻以上の新しさを確認できた場合のみ採用し、表示の後退を防ぐ。
+          const latestCheckedAtMs = latest?.metadata.officialCheckedAt
+            ? Date.parse(latest.metadata.officialCheckedAt)
+            : Number.NaN;
+          if (
+            !latest ||
+            !Number.isFinite(latestCheckedAtMs) ||
+            latestCheckedAtMs < incomingCheckedAtMs
+          ) {
+            return;
+          }
+          // GETでは新旧KVの読み混ざりで古い一覧へ新しい時刻が付く場合があるため、
+          // 429世代のetagと一致する一覧のみ採用し、表示の後退と誤認を防ぐ。
+          // baseArchiveEtagがnullの旧形式429ではmergedのみ時刻条件で採用する。
+          const isAdoptableSource =
+            latest.metadata.source === "merged" || latest.metadata.source === "archive-snapshot";
+          const generationMatches =
+            busyMetadata.baseArchiveEtag === null
+              ? latest.metadata.source === "merged"
+              : latest.metadata.dataVersion !== null &&
+                latest.metadata.dataVersion === busyMetadata.baseArchiveEtag;
+          if (isAdoptableSource && generationMatches) setNewsPayload(latest);
           return;
         }
 

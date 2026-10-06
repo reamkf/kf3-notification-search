@@ -37,6 +37,9 @@ import {
 } from "./news-refresh-control";
 import {
   NEWS_DATA_VERSION_HEADER,
+  NEWS_OFFICIAL_CHECKED_AT_HEADER,
+  NEWS_REFRESH_AVAILABLE_AT_HEADER,
+  NEWS_REFRESH_NEXT_AVAILABLE_AT_HEADER,
   applyNewsRefreshState,
   createNewsCacheMetadata,
   createNewsRefreshState,
@@ -45,6 +48,7 @@ import {
   parseNewsRefreshState,
   type NewsCacheMetadata,
   type NewsCacheMetadataV2,
+  type NewsRefreshState,
 } from "./news-response-metadata";
 import {
   NEWS_ARCHIVE_SNAPSHOT_CACHE_KEY,
@@ -140,6 +144,18 @@ const createRefreshResponse = (
   const response = createJsonResponse(body, responseMetadata);
   response.headers.set("vary", NEWS_DATA_VERSION_HEADER);
   return response;
+};
+
+// 一覧バイト列の非暗号ハッシュ(FNV-1a 64bit)。変更を伴う更新世代の識別子として使う。
+// baseArchiveEtagがnullだと世代を区別できず、新旧KVの読み混ざりで古い一覧へ新しい時刻が付く。
+// 同一内容なら同一値になるため、同一覧の世代間では照合が通る(誤採用にならない)。
+export const hashNewsClientJson = (clientJson: string): string => {
+  let hash = 0xcbf29ce484222325n;
+  for (let index = 0; index < clientJson.length; index++) {
+    hash ^= BigInt(clientJson.charCodeAt(index));
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return `content-${hash.toString(16).padStart(16, "0")}`;
 };
 
 type HeartbeatStage = "heartbeat-start" | "heartbeat-success" | "heartbeat-fail";
@@ -464,14 +480,25 @@ const createRefreshLeaseExpiredResponse = () =>
 
 const createRefreshBusyResponse = (
   result: Exclude<NewsRefreshAcquireResult, { status: "acquired" }>,
+  refreshState: NewsRefreshState | null = null,
 ) => {
   const headers = getRetryHeaders(result.retryAfterSeconds);
-  const body =
+  const body: Record<string, string | null> =
     result.status === "running"
       ? { error: "お知らせ更新が実行中です", leaseUntil: result.leaseUntil }
       : { error: "お知らせ更新はクールダウン中です", nextAvailableAt: result.nextAvailableAt };
   if (result.status === "cooldown") {
-    headers.set("x-kf3-news-refresh-next-available-at", result.nextAvailableAt);
+    headers.set(NEWS_REFRESH_NEXT_AVAILABLE_AT_HEADER, result.nextAvailableAt);
+  }
+  if (refreshState) {
+    body.officialCheckedAt = refreshState.officialCheckedAt;
+    body.refreshAvailableAt = refreshState.refreshAvailableAt;
+    body.baseArchiveEtag = refreshState.baseArchiveEtag;
+    headers.set(NEWS_OFFICIAL_CHECKED_AT_HEADER, refreshState.officialCheckedAt);
+    headers.set(NEWS_REFRESH_AVAILABLE_AT_HEADER, refreshState.refreshAvailableAt);
+    if (refreshState.baseArchiveEtag !== null) {
+      headers.set(NEWS_DATA_VERSION_HEADER, refreshState.baseArchiveEtag);
+    }
   }
   return new Response(JSON.stringify(body), {
     status: result.status === "running" ? 202 : 429,
@@ -641,7 +668,10 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
           retryAfterSeconds: acquired.retryAfterSeconds,
           workerVersionId: getWorkerVersionId(context.env),
         });
-        return createRefreshBusyResponse(acquired);
+        const refreshState = parseNewsRefreshState(
+          await context.env.KF3_NOTIF_CACHE.get(refreshStateKey).catch(() => null),
+        );
+        return createRefreshBusyResponse(acquired, refreshState);
       }
       lease = acquired.lease;
 
@@ -664,10 +694,12 @@ export const createNewsApp = (dependencies: ServerDependencies) => {
         lease = leaseRenewal;
       }
 
+      // 変更なし世代はアーカイブetagを使いKV再利用を維持する。
+      // 変更あり世代は一覧ハッシュを使い、null etag世代間の取り違えを防ぐ。
       const reusableArchiveEtag =
         result.currentExists && result.addedCount === 0 && result.updatedCount === 0
           ? result.currentEtag
-          : null;
+          : hashNewsClientJson(result.clientJson);
       const cacheRefreshAvailableAt = new Date(nowMs + NEWS_REFRESH_COOLDOWN_MS).toISOString();
       const metadata = createNewsCacheMetadata(
         "merged",

@@ -5,6 +5,7 @@ export const NEWS_SOURCE_HEADER = "X-KF3-News-Source";
 export const NEWS_OFFICIAL_CHECKED_AT_HEADER = "X-KF3-News-Official-Checked-At";
 export const NEWS_FETCHED_AT_HEADER = "X-KF3-News-Fetched-At";
 export const NEWS_REFRESH_AVAILABLE_AT_HEADER = "X-KF3-News-Refresh-Available-At";
+export const NEWS_REFRESH_NEXT_AVAILABLE_AT_HEADER = "x-kf3-news-refresh-next-available-at";
 export const NEWS_DATA_VERSION_HEADER = "X-KF3-News-Data-Version";
 export const NEWS_CACHE_METADATA_VERSION = 2;
 

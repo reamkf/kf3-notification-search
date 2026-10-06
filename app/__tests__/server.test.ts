@@ -31,7 +31,7 @@ import {
   NEWS_REFRESH_STATE_KEY,
 } from "../news-cache-keys";
 import { MIN_OFFICIAL_ENTRY_COUNT } from "../news-data";
-import { createWorkerHandler } from "../server";
+import { createWorkerHandler, hashNewsClientJson } from "../server";
 import { bridgeRuntimeValue } from "../runtime-value";
 import { createNewsCacheMetadata } from "../news-response-metadata";
 import type { JsonInput, JsonObject } from "../schema";
@@ -1035,11 +1035,12 @@ describe("Worker API handler", () => {
     expect(response.status).toBe(200);
     expect(payload.news).toHaveLength(MIN_OFFICIAL_ENTRY_COUNT);
     expect(payload.news[0].category).toBe("refresh");
+    const expectedEtag = hashNewsClientJson(JSON.stringify(payload.news));
     expect(payload.metadata).toEqual({
       ...createNewsCacheMetadata(
         "merged",
         "2026-08-09T12:34:56.789Z",
-        null,
+        expectedEtag,
         MIN_OFFICIAL_ENTRY_COUNT,
       ),
       fetchedAt: "2026-08-09T12:34:56.789Z",
@@ -1050,12 +1051,13 @@ describe("Worker API handler", () => {
     expect(response.headers.get("X-KF3-News-Refresh-Available-At")).toBe(
       "2026-08-09T12:39:56.789Z",
     );
+    expect(response.headers.get("X-KF3-News-Data-Version")).toBe(expectedEtag);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(setup.cachePuts).toHaveLength(2);
     expect(setup.cachePuts[0]).toMatchObject({
       key: NEWS_CACHE_KEY,
       expirationTtl: 86400,
-      metadata: createNewsCacheMetadata("merged", null, null, MIN_OFFICIAL_ENTRY_COUNT),
+      metadata: createNewsCacheMetadata("merged", null, expectedEtag, MIN_OFFICIAL_ENTRY_COUNT),
     });
     expect(setup.cachePuts[1]).toMatchObject({
       key: NEWS_REFRESH_STATE_KEY,
@@ -1064,7 +1066,7 @@ describe("Worker API handler", () => {
     });
     expect(JSON.parse(setup.cachePuts[1].value)).toEqual({
       version: 1,
-      baseArchiveEtag: null,
+      baseArchiveEtag: expectedEtag,
       officialCheckedAt: "2026-08-09T12:34:56.789Z",
       refreshAvailableAt: "2026-08-09T12:39:56.789Z",
     });
@@ -1576,6 +1578,100 @@ describe("Worker API handler", () => {
       expect(setup.cacheDeletes).not.toContain(NEWS_CACHE_KEY);
       expect(setup.cachePuts[1].key).toBe(NEWS_REFRESH_STATE_KEY);
     }
+  });
+
+  it("refreshのcooldown時は最新の最終取得時刻を429に含める", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    setup.cacheValues.set(
+      NEWS_REFRESH_STATE_KEY,
+      JSON.stringify({
+        version: 1,
+        baseArchiveEtag: "current-etag",
+        officialCheckedAt: "2026-08-09T12:34:56.789Z",
+        refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+      }),
+    );
+    setup.refreshCoordinator.acquire = async () => ({
+      status: "cooldown",
+      retryAfterSeconds: 300,
+      nextAvailableAt: "2026-08-09T12:39:56.789Z",
+    });
+    const response = await callFetch(
+      createWorkerHandler({}),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(429);
+    const payload = (await response.json()) as JsonObject;
+    expect(payload).toMatchObject({
+      error: "お知らせ更新はクールダウン中です",
+      nextAvailableAt: "2026-08-09T12:39:56.789Z",
+      officialCheckedAt: "2026-08-09T12:34:56.789Z",
+      refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+      baseArchiveEtag: "current-etag",
+    });
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBe("2026-08-09T12:34:56.789Z");
+    expect(response.headers.get("X-KF3-News-Refresh-Available-At")).toBe(
+      "2026-08-09T12:39:56.789Z",
+    );
+    expect(response.headers.get("X-KF3-News-Data-Version")).toBe("current-etag");
+  });
+
+  it("refreshのcooldown時は更新世代のetagがnullでも429に含める", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    setup.cacheValues.set(
+      NEWS_REFRESH_STATE_KEY,
+      JSON.stringify({
+        version: 1,
+        baseArchiveEtag: null,
+        officialCheckedAt: "2026-08-09T12:34:56.789Z",
+        refreshAvailableAt: "2026-08-09T12:39:56.789Z",
+      }),
+    );
+    setup.refreshCoordinator.acquire = async () => ({
+      status: "cooldown",
+      retryAfterSeconds: 300,
+      nextAvailableAt: "2026-08-09T12:39:56.789Z",
+    });
+    const response = await callFetch(
+      createWorkerHandler({}),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(429);
+    const payload = (await response.json()) as JsonObject;
+    expect(payload).toMatchObject({
+      error: "お知らせ更新はクールダウン中です",
+      officialCheckedAt: "2026-08-09T12:34:56.789Z",
+      baseArchiveEtag: null,
+    });
+    expect(response.headers.get("X-KF3-News-Data-Version")).toBeNull();
+  });
+
+  it("refreshのcooldown時にrefreshStateがなければ従来の429を返す", async () => {
+    const setup = createBindings(JSON.stringify(createDocument(1)));
+    setup.refreshCoordinator.acquire = async () => ({
+      status: "cooldown",
+      retryAfterSeconds: 300,
+      nextAvailableAt: "2026-08-09T12:39:56.789Z",
+    });
+    const response = await callFetch(
+      createWorkerHandler({}),
+      new Request("https://example.com/api/kf3-news/refresh", { method: "POST" }),
+      setup.env,
+    );
+
+    expect(response.status).toBe(429);
+    const payload = (await response.json()) as JsonObject;
+    expect(payload).toMatchObject({
+      error: "お知らせ更新はクールダウン中です",
+      nextAvailableAt: "2026-08-09T12:39:56.789Z",
+    });
+    expect(payload).not.toHaveProperty("officialCheckedAt");
+    expect(payload).not.toHaveProperty("baseArchiveEtag");
+    expect(response.headers.get("X-KF3-News-Official-Checked-At")).toBeNull();
   });
 
   it.each([
@@ -2315,5 +2411,13 @@ describe("queue handler", () => {
     expect(logs).toContainEqual(
       expect.objectContaining({ event: "news_archive_queue_invalid_message" }),
     );
+  });
+});
+
+describe("hashNewsClientJson", () => {
+  it("同一覧は同一値、異なる一覧は異なる値を返す", () => {
+    expect(hashNewsClientJson("[]")).toMatch(/^content-[0-9a-f]{16}$/);
+    expect(hashNewsClientJson("[]")).toBe(hashNewsClientJson("[]"));
+    expect(hashNewsClientJson('[{"title":"a"}]')).not.toBe(hashNewsClientJson('[{"title":"b"}]'));
   });
 });

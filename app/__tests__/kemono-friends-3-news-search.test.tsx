@@ -71,13 +71,16 @@ const mockNewsApi = ({
   },
   refreshResponses = [],
   getStatus = 200,
+  getResponses = [],
 }: {
   news: JsonInput;
   headers?: HeadersInit;
   refreshResponses?: Response[];
   getStatus?: number;
+  getResponses?: Response[];
 }) => {
   let refreshIndex = 0;
+  let getIndex = 0;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -88,6 +91,9 @@ const mockNewsApi = ({
         );
       }
       if (init?.method === "POST") throw new Error(`Unexpected POST request: ${url}`);
+      if (getResponses.length > 0) {
+        return getResponses[getIndex++] ?? getResponses[getResponses.length - 1];
+      }
       return jsonResponse(news, getStatus, headers);
     }),
   );
@@ -847,6 +853,316 @@ describe("KemonoFriends3NewsSearch", () => {
     expect(container.textContent).not.toContain("再取得はあと");
     expect(container.textContent).not.toContain("秒後");
     expect(container.querySelectorAll("li")).toHaveLength(1);
+  });
+
+  it("refreshの429で他クライアントの更新があれば一覧ごと再取得する", async () => {
+    const mountedAt = Date.now();
+    const oldCheckedAt = new Date(mountedAt).toISOString();
+    const newCheckedAt = new Date(mountedAt + 5 * 60_000).toISOString();
+    const nextAvailableAt = new Date(mountedAt + 10 * 60_000).toISOString();
+    const oldHeaders = {
+      "X-KF3-News-Source": "merged",
+      "X-KF3-News-Official-Checked-At": oldCheckedAt,
+    };
+    const newHeaders = {
+      "X-KF3-News-Source": "merged",
+      "X-KF3-News-Official-Checked-At": newCheckedAt,
+      "X-KF3-News-Refresh-Available-At": nextAvailableAt,
+    };
+    mockNewsApi({
+      news: [createNews(1, "古いお知らせ")],
+      getResponses: [
+        jsonResponse([createNews(1, "古いお知らせ")], 200, oldHeaders),
+        jsonResponse(
+          [createNews(1, "古いお知らせ"), createNews(2, "新しいお知らせ")],
+          200,
+          newHeaders,
+        ),
+      ],
+      refreshResponses: [
+        new Response(
+          JSON.stringify({
+            error: "お知らせ更新はクールダウン中です",
+            nextAvailableAt,
+            officialCheckedAt: newCheckedAt,
+            refreshAvailableAt: nextAvailableAt,
+          }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "Retry-After": "300",
+              "X-KF3-News-Official-Checked-At": newCheckedAt,
+              "X-KF3-News-Refresh-Available-At": nextAvailableAt,
+              "x-kf3-news-refresh-next-available-at": nextAvailableAt,
+            },
+          },
+        ),
+      ],
+    });
+
+    mount();
+    await waitForText("古いお知らせ");
+    expect(container.querySelector("time")?.getAttribute("dateTime")).toBe(oldCheckedAt);
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("新しいお知らせ");
+    expect(container.querySelector("time")?.getAttribute("dateTime")).toBe(newCheckedAt);
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+    expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("cooldown");
+  });
+
+  it("refreshの429後に古いGET結果が返っても表示を後退させない", async () => {
+    const mountedAt = Date.now();
+    const oldCheckedAt = new Date(mountedAt).toISOString();
+    const staleCheckedAt = new Date(mountedAt + 2 * 60_000).toISOString();
+    const newCheckedAt = new Date(mountedAt + 5 * 60_000).toISOString();
+    const nextAvailableAt = new Date(mountedAt + 10 * 60_000).toISOString();
+    const oldHeaders = {
+      "X-KF3-News-Source": "merged",
+      "X-KF3-News-Official-Checked-At": oldCheckedAt,
+    };
+    mockNewsApi({
+      news: [createNews(1, "古いお知らせ")],
+      getResponses: [
+        jsonResponse([createNews(1, "古いお知らせ")], 200, oldHeaders),
+        jsonResponse([createNews(1, "古いお知らせ"), createNews(2, "取り込まないお知らせ")], 200, {
+          "X-KF3-News-Source": "merged",
+          "X-KF3-News-Official-Checked-At": staleCheckedAt,
+        }),
+      ],
+      refreshResponses: [
+        new Response(
+          JSON.stringify({
+            error: "お知らせ更新はクールダウン中です",
+            nextAvailableAt,
+            officialCheckedAt: newCheckedAt,
+            refreshAvailableAt: nextAvailableAt,
+          }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "Retry-After": "300",
+              "X-KF3-News-Official-Checked-At": newCheckedAt,
+              "X-KF3-News-Refresh-Available-At": nextAvailableAt,
+              "x-kf3-news-refresh-next-available-at": nextAvailableAt,
+            },
+          },
+        ),
+      ],
+    });
+
+    mount();
+    await waitForText("古いお知らせ");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("お知らせは再取得待機中です");
+    await flushUpdates();
+    await flushUpdates();
+    expect(container.querySelector("time")?.getAttribute("dateTime")).toBe(oldCheckedAt);
+    expect(container.textContent).not.toContain("取り込まないお知らせ");
+    expect(container.querySelectorAll("li")).toHaveLength(1);
+    expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("cooldown");
+  });
+
+  it("refreshの429後に世代一致のスナップショットは採用する", async () => {
+    const mountedAt = Date.now();
+    const oldCheckedAt = new Date(mountedAt).toISOString();
+    const newCheckedAt = new Date(mountedAt + 5 * 60_000).toISOString();
+    const nextAvailableAt = new Date(mountedAt + 10 * 60_000).toISOString();
+    mockNewsApi({
+      news: [createNews(1, "古いお知らせ")],
+      getResponses: [
+        jsonResponse([createNews(1, "古いお知らせ")], 200, {
+          "X-KF3-News-Source": "merged",
+          "X-KF3-News-Official-Checked-At": oldCheckedAt,
+        }),
+        jsonResponse([createNews(1, "古いお知らせ"), createNews(2, "追加のお知らせ")], 200, {
+          "X-KF3-News-Source": "archive-snapshot",
+          "X-KF3-News-Official-Checked-At": newCheckedAt,
+          "X-KF3-News-Data-Version": "archive-etag-1",
+        }),
+      ],
+      refreshResponses: [
+        new Response(
+          JSON.stringify({
+            error: "お知らせ更新はクールダウン中です",
+            nextAvailableAt,
+            officialCheckedAt: newCheckedAt,
+            refreshAvailableAt: nextAvailableAt,
+            baseArchiveEtag: "archive-etag-1",
+          }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "Retry-After": "300",
+              "X-KF3-News-Official-Checked-At": newCheckedAt,
+              "X-KF3-News-Refresh-Available-At": nextAvailableAt,
+              "x-kf3-news-refresh-next-available-at": nextAvailableAt,
+              "X-KF3-News-Data-Version": "archive-etag-1",
+            },
+          },
+        ),
+      ],
+    });
+
+    mount();
+    await waitForText("古いお知らせ");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("追加のお知らせ");
+    expect(container.querySelector("time")?.getAttribute("dateTime")).toBe(newCheckedAt);
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+    expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("cooldown");
+  });
+
+  it("refreshの429後に世代不一致のスナップショットは採用しない", async () => {
+    const mountedAt = Date.now();
+    const oldCheckedAt = new Date(mountedAt).toISOString();
+    const newCheckedAt = new Date(mountedAt + 5 * 60_000).toISOString();
+    const nextAvailableAt = new Date(mountedAt + 10 * 60_000).toISOString();
+    mockNewsApi({
+      news: [createNews(1, "古いお知らせ")],
+      getResponses: [
+        jsonResponse([createNews(1, "古いお知らせ")], 200, {
+          "X-KF3-News-Source": "merged",
+          "X-KF3-News-Official-Checked-At": oldCheckedAt,
+        }),
+        jsonResponse([createNews(1, "古いお知らせ"), createNews(2, "取り込まないお知らせ")], 200, {
+          "X-KF3-News-Source": "archive-snapshot",
+          "X-KF3-News-Official-Checked-At": newCheckedAt,
+          "X-KF3-News-Data-Version": "old-etag",
+        }),
+      ],
+      refreshResponses: [
+        new Response(
+          JSON.stringify({
+            error: "お知らせ更新はクールダウン中です",
+            nextAvailableAt,
+            officialCheckedAt: newCheckedAt,
+            refreshAvailableAt: nextAvailableAt,
+            baseArchiveEtag: null,
+          }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "Retry-After": "300",
+              "X-KF3-News-Official-Checked-At": newCheckedAt,
+              "X-KF3-News-Refresh-Available-At": nextAvailableAt,
+              "x-kf3-news-refresh-next-available-at": nextAvailableAt,
+            },
+          },
+        ),
+      ],
+    });
+
+    mount();
+    await waitForText("古いお知らせ");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("お知らせは再取得待機中です");
+    await flushUpdates();
+    await flushUpdates();
+    expect(container.querySelector("time")?.getAttribute("dateTime")).toBe(oldCheckedAt);
+    expect(container.textContent).not.toContain("取り込まないお知らせ");
+    expect(container.querySelectorAll("li")).toHaveLength(1);
+    expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("cooldown");
+  });
+
+  it("refreshの429後に別世代のmergedは採用しない", async () => {
+    const mountedAt = Date.now();
+    const oldCheckedAt = new Date(mountedAt).toISOString();
+    const newCheckedAt = new Date(mountedAt + 5 * 60_000).toISOString();
+    const newerCheckedAt = new Date(mountedAt + 6 * 60_000).toISOString();
+    const nextAvailableAt = new Date(mountedAt + 10 * 60_000).toISOString();
+    mockNewsApi({
+      news: [createNews(1, "古いお知らせ")],
+      getResponses: [
+        jsonResponse([createNews(1, "古いお知らせ")], 200, {
+          "X-KF3-News-Source": "merged",
+          "X-KF3-News-Official-Checked-At": oldCheckedAt,
+        }),
+        jsonResponse([createNews(1, "古いお知らせ"), createNews(2, "別世代のお知らせ")], 200, {
+          "X-KF3-News-Source": "merged",
+          "X-KF3-News-Official-Checked-At": newerCheckedAt,
+          "X-KF3-News-Data-Version": "content-other-generation",
+        }),
+      ],
+      refreshResponses: [
+        new Response(
+          JSON.stringify({
+            error: "お知らせ更新はクールダウン中です",
+            nextAvailableAt,
+            officialCheckedAt: newCheckedAt,
+            refreshAvailableAt: nextAvailableAt,
+            baseArchiveEtag: "archive-etag-1",
+          }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "Retry-After": "300",
+              "X-KF3-News-Official-Checked-At": newCheckedAt,
+              "X-KF3-News-Refresh-Available-At": nextAvailableAt,
+              "x-kf3-news-refresh-next-available-at": nextAvailableAt,
+              "X-KF3-News-Data-Version": "archive-etag-1",
+            },
+          },
+        ),
+      ],
+    });
+
+    mount();
+    await waitForText("古いお知らせ");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("お知らせは再取得待機中です");
+    await flushUpdates();
+    await flushUpdates();
+    expect(container.querySelector("time")?.getAttribute("dateTime")).toBe(oldCheckedAt);
+    expect(container.textContent).not.toContain("別世代のお知らせ");
+    expect(container.querySelectorAll("li")).toHaveLength(1);
+    expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("cooldown");
+  });
+
+  it("refreshの429後はnextAvailableAtまで更新ボタンを無効にする", async () => {
+    const mountedAt = Date.now();
+    const nextAvailableAt = new Date(mountedAt + 10 * 60_000).toISOString();
+    mockNewsApi({
+      news: [createNews(1, "維持するお知らせ")],
+      headers: {
+        "X-KF3-News-Source": "merged",
+        "X-KF3-News-Official-Checked-At": new Date(mountedAt).toISOString(),
+      },
+      refreshResponses: [
+        new Response(
+          JSON.stringify({
+            error: "お知らせ更新はクールダウン中です",
+            nextAvailableAt,
+          }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "Retry-After": "1",
+              "x-kf3-news-refresh-next-available-at": nextAvailableAt,
+            },
+          },
+        ),
+      ],
+    });
+
+    mount();
+    await waitForText("維持するお知らせ");
+    await advanceRefreshCooldown();
+    getRefreshButton()?.click();
+    await waitForText("お知らせは再取得待機中です");
+    await advanceRefreshCooldown(2_000);
+    expect(getRefreshButton()?.disabled).toBe(true);
+    expect(getRefreshIndicator()?.dataset.refreshStatus).toBe("cooldown");
   });
 
   it("検索トグルとキーワード入力をアクセシブルに接続する", async () => {
